@@ -7,6 +7,10 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
 import shutil
+from PIL import Image
+import pytesseract
+import base64
+import requests
 
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
@@ -18,7 +22,6 @@ TEMPLATE_FILE = "staffing_template.xlsx"
 if not os.path.exists(TEMPLATE_FILE):
     st.error("Template file not found. Put staffing_template.xlsx in the same folder as App.py.")
     st.stop()
-
 
 @st.cache_data
 def load_names():
@@ -33,29 +36,22 @@ def load_names():
 
     return names
 
-
 names = load_names()
-
 
 def whole_workers(value):
     return int(float(value or 0) + 0.7)
 
-
 def is_present(row):
     return str(row["Present"]).strip().lower() == "x"
-
 
 def has_skill(row, code):
     return code in str(row["Skills"])
 
-
 def best_fit(row, text):
     return text.lower() in str(row["Best Fit"]).lower()
 
-
 def name_contains(row, text):
     return text.lower() in str(row["Name"]).lower()
-
 
 def calculate_input_values(day, shift, total_cases):
     first_shift_pick = {
@@ -91,16 +87,9 @@ def calculate_input_values(day, shift, total_cases):
 
     return cases_to_pick, full_pallets
 
-
 def calculate_needed(
-    day,
-    shift,
-    total_cases,
-    hours_remaining,
-    total_outbound_loads_actual,
-    crossroads_open,
-    deer_creek_open,
-    msb_open
+    day, shift, total_cases, hours_remaining,
+    total_outbound_loads_actual, crossroads_open, deer_creek_open, msb_open
 ):
     if hours_remaining <= 0:
         hours_remaining = 1
@@ -136,7 +125,6 @@ def calculate_needed(
     }
 
     return needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets
-
 
 def generate_recommendations(staff, needed):
     assigned = {task: 0 for task in needed}
@@ -254,8 +242,6 @@ def generate_recommendations(staff, needed):
             else:
                 staff.at[idx, "Recommended Task"] = "Lead/Extra"
 
-    # FINAL OVERRIDE:
-    # If Lead/Extra exists, Will Perkins and Antonio D. become Lead/Extra first.
     preferred_extra_names = ["will", "antonio"]
 
     preferred_idxs = [
@@ -294,7 +280,6 @@ def generate_recommendations(staff, needed):
 
     return staff
 
-
 def build_summary(staff, needed):
     present_recommendations = staff[
         staff["Present"].astype(str).str.strip().str.lower().eq("x")
@@ -314,8 +299,9 @@ def build_summary(staff, needed):
 
     return present_recommendations, summary_table
 
-
-def build_recommendations(summary_table, present_recommendations, raw_needed, hours_remaining, notes):
+def build_recommendations(
+    summary_table, present_recommendations, raw_needed, hours_remaining, notes
+):
     recommendations = []
 
     total_labor_gap = int(summary_table["Difference"].sum())
@@ -340,10 +326,234 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         else:
             recommendations.append(f"{task}: Staffing is balanced.")
 
-    if notes.strip():
-        recommendations.append(f"Manager notes: {notes.strip()}")
+    picking_gap = int(summary_table.loc["Picking", "Difference"]) if "Picking" in summary_table.index else 0
+    tasking_gap = int(summary_table.loc["Tasking", "Difference"]) if "Tasking" in summary_table.index else 0
+    receiving_gap = int(summary_table.loc["Receiving", "Difference"]) if "Receiving" in summary_table.index else 0
+    unloading_gap = int(summary_table.loc["Unloading", "Difference"]) if "Unloading" in summary_table.index else 0
+    loading_gap = int(summary_table.loc["Loading", "Difference"]) if "Loading" in summary_table.index else 0
+    lead_gap = int(summary_table.loc["Lead/Extra", "Difference"]) if "Lead/Extra" in summary_table.index else 0
+
+    if picking_gap < 0:
+        recommendations.append(
+            "High picking short risk detected. Consider moving tasking labor into replenishment to protect pickers."
+        )
+        recommendations.append(
+            "Avoid pulling pickers into unloading or loading unless outbound service is critical."
+        )
+        if tasking_gap > 0:
+            recommendations.append(
+                f"Tasking currently has {tasking_gap} extra worker(s). Consider temporarily assigning them to replenishment."
+            )
+        if lead_gap > 0:
+            recommendations.append(
+                "Lead/Extra capacity available. Consider flexing extra labor into replenishment or picking support."
+            )
+
+    if unloading_gap < 0 or receiving_gap < 0:
+        recommendations.append(
+            "Inbound flow risk detected. Falling behind may create dock congestion and delayed putaway."
+        )
+        recommendations.append(
+            "Consider moving flexible tasking labor into unloading or receiving temporarily."
+        )
+        if tasking_gap > 1:
+            recommendations.append(
+                "Tasking has available labor that can support inbound operations."
+            )
+
+    if loading_gap < 0:
+        recommendations.append(
+            "Outbound loading risk detected. Late departures and service failures may increase."
+        )
+        recommendations.append(
+            "Protect loading labor before reallocating to non-critical work."
+        )
+        if lead_gap > 0:
+            recommendations.append(
+                "Use Lead/Extra labor to support outbound staging or trailer cleanup."
+            )
+
+    if total_labor_gap > 1:
+        recommendations.append("Operation currently has excess labor capacity.")
+        recommendations.append(
+            "Consider deep cleaning, trailer audits, replenishment cleanup, or cross-training."
+        )
+        recommendations.append(
+            "Extra labor could be used proactively to prevent later picking shortages."
+        )
+
+    inbound_pressure = (
+        raw_needed["Unloading"] + raw_needed["Receiving"] + raw_needed["Putaway"]
+    )
+    outbound_pressure = raw_needed["Picking"] + raw_needed["Loading"]
+
+    if inbound_pressure > outbound_pressure * 1.3:
+        recommendations.append("Inbound workload is significantly heavier than outbound.")
+        recommendations.append(
+            "Focus on unloading, receiving, and putaway to avoid congestion."
+        )
+    elif outbound_pressure > inbound_pressure * 1.3:
+        recommendations.append("Outbound workload is significantly heavier than inbound.")
+        recommendations.append(
+            "Prioritize replenishment and picking continuity to avoid shorts."
+        )
+
+    if hours_remaining <= 4:
+        recommendations.append(
+            "Shift is entering final hours. Prioritize completion work and outbound execution."
+        )
+    elif hours_remaining >= 8:
+        recommendations.append(
+            "Enough shift time remains to strategically rebalance labor before bottlenecks form."
+        )
+
+    lower_notes = notes.lower()
+
+    if "late" in lower_notes:
+        recommendations.append(
+            "Manager notes mention late loads. Prioritize outbound execution and trailer readiness."
+        )
+    if "short" in lower_notes:
+        recommendations.append(
+            "Manager notes indicate short risk. Protect replenishment and picking flow."
+        )
+    if "live" in lower_notes:
+        recommendations.append(
+            "Live loads detected in notes. Prioritize those doors before drop trailers."
+        )
+    if "cpu" in lower_notes:
+        recommendations.append(
+            "CPU loads referenced. Ensure loading labor is protected."
+        )
 
     return recommendations
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOARD SCREENSHOT ANALYSIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def encode_image_to_base64(image_file) -> str:
+    image_file.seek(0)
+    return base64.standard_b64encode(image_file.read()).decode("utf-8")
+
+
+def analyze_board_with_claude(
+    image_b64, day, shift, total_cases, hours_remaining,
+    total_outbound_loads, crossroads_open, deer_creek_open, msb_open,
+    needed, summary_table, cases_to_pick, inbound_pallets, notes
+):
+    staffing_lines = []
+    for task, row in summary_table.iterrows():
+        staffing_lines.append(
+            f"  {task}: Need {int(row['Needed'])}, Have {int(row['Assigned'])}, "
+            f"Gap {int(row['Difference'])} ({row['Status']})"
+        )
+    staffing_summary = "\n".join(staffing_lines)
+
+    plants_open = [
+        p for p, status in [
+            ("Crossroads", crossroads_open),
+            ("Deer Creek", deer_creek_open),
+            ("MSB", msb_open),
+        ] if status == "YES"
+    ]
+
+    prompt = f"""You are an experienced warehouse operations manager analyzing a live outbound load board screenshot for a distribution center.
+
+Here is today's operational context:
+- Day: {day}, Shift: {shift}
+- Total cases forecast for today: {total_cases:,}
+- Cases to pick this shift: {cases_to_pick:,.0f}
+- Hours remaining in shift: {hours_remaining}
+- Total outbound loads scheduled today: {total_outbound_loads}
+- Inbound pallets expected: {inbound_pallets:,} (Plants open: {", ".join(plants_open) if plants_open else "None"})
+- Manager notes: {notes if notes.strip() else "None"}
+
+Current staffing vs. what we need:
+{staffing_summary}
+
+Now look at the board screenshot I've attached. Read every row carefully — destination, carrier, time, door, status, and any comments.
+
+Please give me a clear, practical analysis in plain English covering:
+
+1. **Board Summary** — How many loads total are shown? Break them down by status (RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc.). Call out any loads missing a door or loader assignment.
+
+2. **Late & At-Risk Loads** — List every load marked LATE or with concerning comments (No Driver, Cut, Short, etc.). What's the real risk to tonight's service?
+
+3. **Picking & Short Risk** — How many loads show Picking/Short or Loaded Short? Given our cases-to-pick ({cases_to_pick:,.0f}) and current staffing, are we at risk of falling further behind? What's your honest read?
+
+4. **Live Loads vs. Drops** — How many are live (driver waiting)? Are any live loads at risk given current staffing or timing?
+
+5. **Cross-Analysis with Staffing** — Given the staffing gaps or surpluses above, which problems on the board can we actually fix right now? Where should we move people first?
+
+6. **Your Top 3 Action Items** — Be direct. What are the 3 most important things the manager should do in the next 30 minutes?
+
+Keep the tone like a smart, experienced ops manager talking to another manager — no corporate fluff, just clear and actionable.
+"""
+
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llava",
+                "prompt": prompt,
+                "images": [image_b64],
+                "stream": False,
+            },
+            timeout=300,
+        )
+        response.raise_for_status()
+        return response.json()["response"]
+    except Exception as e:
+        return f"⚠️ Board analysis could not be completed: {str(e)}"
+
+
+def write_board_analysis_to_excel(wb, analysis_text):
+    sheet_name = "Board Analysis"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue = "0F5B78"
+    white = "FFFFFF"
+    light_blue = "D9EAF7"
+    thin = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "Board Screenshot Analysis — AI Insights"
+    ws["A1"].font = Font(size=16, bold=True, color=white)
+    ws["A1"].fill = PatternFill("solid", fgColor=dark_blue)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:G1")
+    ws.row_dimensions[1].height = 28
+
+    ws["A2"] = "Generated by Local AI (Ollama/LLaVA) — cross-referenced with today's staffing and demand data"
+    ws["A2"].font = Font(italic=True, size=10)
+    ws["A2"].fill = PatternFill("solid", fgColor=light_blue)
+    ws.merge_cells("A2:G2")
+
+    current_row = 4
+    for line in analysis_text.split("\n"):
+        cell = ws.cell(current_row, 1, line)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        cell.border = border
+        ws.merge_cells(
+            start_row=current_row, start_column=1,
+            end_row=current_row, end_column=7
+        )
+        ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
+        current_row += 1
+
+    for col in range(1, 8):
+        ws.column_dimensions[get_column_letter(col)].width = 22
+    ws.column_dimensions["A"].width = 110
+
+# ─────────────────────────────────────────────────────────────────────────────
+# END BOARD SCREENSHOT ANALYSIS SECTION
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def write_recommendations_to_excel(wb, staff):
@@ -368,7 +578,6 @@ def write_recommendations_to_excel(wb, staff):
             crew_row = crew_name_to_row[name]
             ws_crew[f"C{crew_row}"] = task
             ws_crew[f"D{crew_row}"] = task
-
 
 def build_dashboard(wb, summary_table, present_recommendations, recommendations):
     if "Staffing Dashboard" in wb.sheetnames:
@@ -535,7 +744,6 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
 
     ws_dash.freeze_panes = "A7"
 
-
 st.sidebar.header("Daily Inputs")
 
 day = st.sidebar.selectbox(
@@ -546,37 +754,36 @@ day = st.sidebar.selectbox(
 shift = st.sidebar.selectbox("Shift", ["1st", "2nd"])
 
 total_cases = st.sidebar.number_input(
-    "Total Cases for Today",
-    min_value=0,
-    step=1,
-    value=0
+    "Total Cases for Today", min_value=0, step=1, value=0
 )
 
 hours_remaining = st.sidebar.number_input(
-    "Hours Remaining in Shift",
-    min_value=0.0,
-    step=0.25,
-    value=8.0
+    "Hours Remaining in Shift", min_value=0.0, step=0.25, value=8.0
 )
 
 total_outbound_loads_day = st.sidebar.number_input(
-    "Total Outbound Loads for the Day",
-    min_value=0,
-    step=1,
-    value=0
+    "Total Outbound Loads for the Day", min_value=0, step=1, value=0
 )
 
 crossroads_open = st.sidebar.selectbox("Crossroads plant open?", ["YES", "NO"])
 deer_creek_open = st.sidebar.selectbox("Deer Creek plant open?", ["YES", "NO"])
 msb_open = st.sidebar.selectbox("MSB plant open?", ["YES", "NO"])
 
-present_workers = st.sidebar.multiselect(
-    "Who is present?",
-    names
-)
+present_workers = st.sidebar.multiselect("Who is present?", names)
 
 notes = st.sidebar.text_area("Operations Notes")
 
+st.markdown("---")
+st.subheader("📋 Board Screenshot")
+board_image = st.file_uploader(
+    "Upload a screenshot of the outbound load board (PNG or JPG)",
+    type=["png", "jpg", "jpeg"],
+    help="The local AI will read the board and cross-analyze it with today's staffing and demand.",
+)
+if board_image:
+    st.image(board_image, caption="Board loaded — ready for analysis", use_container_width=True)
+
+st.markdown("---")
 if st.button("Generate Staffing Report"):
 
     working_file = f"working_staffing_file_{day}_{shift}.xlsx"
@@ -620,20 +827,14 @@ if st.button("Generate Staffing Report"):
     wb.save(working_file)
 
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
-        day,
-        shift,
-        total_cases,
-        hours_remaining,
-        total_outbound_loads_actual,
-        crossroads_open,
-        deer_creek_open,
-        msb_open
+        day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
+        crossroads_open, deer_creek_open, msb_open,
     )
 
     staff = pd.read_excel(
         working_file,
         sheet_name="Staffing sheet 1ST Shift",
-        usecols="A,D,F,I,T"
+        usecols="A,D,F,I,T",
     )
 
     staff.columns = ["Name", "Skills", "Best Fit", "Recommended Task", "Present"]
@@ -650,23 +851,37 @@ if st.button("Generate Staffing Report"):
     present_recommendations, summary_table = build_summary(staff, needed)
 
     recommendations = build_recommendations(
-        summary_table,
-        present_recommendations,
-        raw_needed,
-        hours_remaining,
-        notes
+        summary_table, present_recommendations, raw_needed, hours_remaining, notes
     )
 
     wb = load_workbook(working_file)
 
     write_recommendations_to_excel(wb, staff)
 
-    build_dashboard(
-        wb,
-        summary_table,
-        present_recommendations,
-        recommendations
-    )
+    build_dashboard(wb, summary_table, present_recommendations, recommendations)
+
+    board_analysis_text = None
+
+    if board_image is not None:
+        with st.spinner("🤖 Analyzing board screenshot with local AI (this may take up to 60 seconds)..."):
+            image_b64 = encode_image_to_base64(board_image)
+            board_analysis_text = analyze_board_with_claude(
+                image_b64=image_b64,
+                day=day,
+                shift=shift,
+                total_cases=total_cases,
+                hours_remaining=hours_remaining,
+                total_outbound_loads=total_outbound_loads_day,
+                crossroads_open=crossroads_open,
+                deer_creek_open=deer_creek_open,
+                msb_open=msb_open,
+                needed=needed,
+                summary_table=summary_table,
+                cases_to_pick=cases_to_pick,
+                inbound_pallets=inbound_pallets,
+                notes=notes,
+            )
+            write_board_analysis_to_excel(wb, board_analysis_text)
 
     output = BytesIO()
     wb.save(output)
@@ -680,16 +895,25 @@ if st.button("Generate Staffing Report"):
     st.subheader("Recommended Staffing Board")
     st.dataframe(
         present_recommendations[["Name", "Skills", "Best Fit", "Recommended Task"]].reset_index(drop=True),
-        use_container_width=True
+        use_container_width=True,
     )
 
     st.subheader("Written Recommendations / What-Ifs")
     for rec in recommendations:
         st.write(f"• {rec}")
 
+    if board_analysis_text:
+        st.markdown("---")
+        st.subheader("📋 Board Screenshot Analysis — AI Insights")
+        st.info(
+            "The analysis below was generated by your local AI reading the board screenshot "
+            "and cross-referencing it with today's staffing data and demand."
+        )
+        st.markdown(board_analysis_text)
+
     st.download_button(
         label="Download Staffing Report",
         data=output,
         file_name="Staffing Report Generated.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
