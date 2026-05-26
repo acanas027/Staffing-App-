@@ -578,7 +578,8 @@ def analyze_board_with_groq(
     ]
 
     prompt = f"""
-You are an experienced warehouse operations first shift manager analyzing an outbound load board from an Excel/CSV file for a distribution center.
+You are an experienced warehouse operations first shift manager analyzing an outbound load board from an Excel/CSV file for a distribution center. I need you to be insightful, not just to tell me whats happening. Give me specific recomendations and add times and numbers to the goals for the day and explain why and how the goal is achivable. 
+Tell me what if scenarios. If this happens what should I do? 
 
 Here is today's operational context:
 - Day: {day}, Shift: {shift}
