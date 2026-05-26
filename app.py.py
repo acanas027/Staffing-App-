@@ -785,7 +785,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from.
 
 3. Prioritization:
-- Are there any loads we should prioritize?
+- Are there any loads we should prioritize? Be specific add load numbers
 - How and why should we prioritize them?
 
 4. Cross-Analysis with Staffing:
