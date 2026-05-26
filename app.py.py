@@ -717,6 +717,7 @@ Management philosophy:
 
 The goal is not only to survive the shift.
 The goal is to get ahead early enough that later appointments are protected.
+We only sending people to manufacturing if it's going to benefit us.
 
 The manager prefers:
 - proactive recommendations
@@ -770,17 +771,15 @@ Read the board carefully row by row.
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
-- Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, Completed, blank/not started, etc.
+- Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Completed, blank/not started, etc.
 - Specify how many loads are completed today out of the total for the day.
 - Specify if any late loads are occupying a door, and which door.
-- Call out any loads missing a door, trailer, loader, or clear status.
-- Flag all loads marked [LOAD-CHECK] or [TT4-NEEDED] and all [CANADIAN] loads.
 
 2. Picking & Short Risk:
-- How many loads show Picking/Short, Loaded Short, or Ready/Short among the loads currently being worked? How many loads have not been started?
-- Given cases-to-pick and current staffing, are we at risk of falling further behind?
+- How many loads have not been started?
+- Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why. 
 - How big is the risk? Explain what are the risk factors. 
-- Can we get ahead?
+- Can we get ahead? Yes or no and why
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
 - Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from.
@@ -807,6 +806,7 @@ Include what-if scenarios: if X happens, here is what to do.
 Only use data, do not guess
 Talk about how you are heading the second shift for success. 
 When suggesting to think about moving staff specify from where to where. 
+Remember even though we have 62 loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. 
 """
 
     try:
