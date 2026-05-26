@@ -558,7 +558,7 @@ def analyze_board_with_groq(
     ]
 
     prompt = f"""
-You are an experienced warehouse operations manager analyzing a live outbound load board screenshot for a distribution center.
+You are an experienced warehouse operations first shift manager analyzing a live outbound load board screenshot for a distribution center.
 
 Here is today's operational context:
 - Day: {day}, Shift: {shift}
@@ -576,9 +576,9 @@ The rows in the right highlited in gray are the picks and pulls for that orders,
 
 The board is treating picking by tickets, i want it by cases. Our average is 60 cases per picking ticket. Talk to me in cases, not tickets
 
-The rows in blank on the board means it is not been worked on right now. R/S means Ready/Short 
+The rows in blank on the board means it is not been worked on right now. R/S means Ready to load but still Short on full pallets.  
 
-The average we use is: we pick 185 cases per hour, load 1 trailer per hour, unload 44 pallets per hour and move 25 full pallets per hour for full pallets and replenishments.
+The average we use is: we pick 185 cases per hour per worker allocated, load 1 trailer per hour per worker allocated, unload 44 pallets per hour and move 25 full pallets per hour per worker allocated for full pallets and replenishments.
 
 The board has different color for the customers: yellow cell means it needs a load check, light blue cell it means it need to have a TT4, red font means is a Canadian load.
 
@@ -589,27 +589,21 @@ destination, carrier, appointment time, door, trailer, status, comments, live/dr
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
-- How many loads total are shown? How many are we picking, how many are late how many ready to load and be specific on what day they are from.
-- Break them down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc.
+- Break them down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc. Specify how many loads we have completed today and the total for the day. Specify if the late loads are occupying a door and which one. 
 
-
-2. Late & At-Risk Loads:
-- List every load marked LATE or with concerning comments like No Driver, Cut, Short, Loaded Short, Picking/Short, or R/S, and explain what is happening with it. 
-- Explain the real service risk, explain why. 
-
-3. Picking & Short Risk:
-- How many loads show Picking/Short or Loaded Short?
-- Given cases-to-pick and current staffing, are we at risk of falling further behind?
-- Given all this information how far ahead we can finish this shift?
+2. Picking & Short Risk:
+- How many loads show Picking/Short, Loaded Short or Ready/Short, only out of the ones that are being worked at the moment.
+- Given cases-to-pick and current staffing, are we at risk of falling further behind? How big is the risk? Can we get ahead?
+- Given all this information how far ahead we can finish this shift? Give me the load appointment times we should be picking by end of this shift. 
 - Should we consider sending people to manufacturing to reduce short risk? 
 
-4. Live Loads vs. Drops:
-- Are any live loads at risk? How can we prioritize them?
+3. Prioritization
+- Are there any loads we should prioritize? How can we prioritize them?
 
-5. Cross-Analysis with Staffing:
+4. Cross-Analysis with Staffing:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
-- based on Staffing and demand, what should be an achievable goal for today?
+- based on Staffing and demand, what should be an achievable goal for this shift? How ahead/behind we should finish this shift?
 
 
 6. Top 3 Action Items:
