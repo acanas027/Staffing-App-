@@ -7,8 +7,6 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
 import shutil
-import base64
-from PIL import Image
 from openai import OpenAI
 
 
@@ -495,26 +493,48 @@ def build_recommendations(
     return recommendations
 
 
-# BOARD SCREENSHOT ANALYSIS WITH GROQ AI
+# BOARD EXCEL ANALYSIS WITH GROQ AI
 
-def encode_image_to_base64(image_file) -> str:
-    image_file.seek(0)
+def read_board_file_to_text(board_file):
+    board_file.seek(0)
+    file_name = board_file.name.lower()
 
-    image = Image.open(image_file).convert("RGB")
+    try:
+        if file_name.endswith(".csv"):
+            df = pd.read_csv(board_file)
+            df = df.dropna(how="all")
+            df = df.dropna(axis=1, how="all")
+            df = df.fillna("")
+            board_text = df.to_csv(index=False)
+            return board_text
 
-    max_width = 1600
-    max_height = 1600
+        excel_data = pd.read_excel(board_file, sheet_name=None)
 
-    image.thumbnail((max_width, max_height))
+        board_sections = []
 
-    buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=85)
+        for sheet_name, df in excel_data.items():
+            df = df.dropna(how="all")
+            df = df.dropna(axis=1, how="all")
+            df = df.fillna("")
 
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+            if df.empty:
+                continue
+
+            section = f"\n--- SHEET: {sheet_name} ---\n"
+            section += df.to_csv(index=False)
+            board_sections.append(section)
+
+        if not board_sections:
+            return "No readable board data found in the uploaded file."
+
+        return "\n".join(board_sections)
+
+    except Exception as e:
+        return f"Could not read board file: {str(e)}"
 
 
 def analyze_board_with_groq(
-    image_b64,
+    board_text,
     day,
     shift,
     total_cases,
@@ -533,7 +553,7 @@ def analyze_board_with_groq(
 
     if client is None:
         return (
-            " Board analysis could not be completed because GROQ_API_KEY is missing. "
+            "Board analysis could not be completed because GROQ_API_KEY is missing. "
             "Add GROQ_API_KEY in Streamlit Cloud Secrets."
         )
 
@@ -558,7 +578,7 @@ def analyze_board_with_groq(
     ]
 
     prompt = f"""
-You are an experienced warehouse operations first shift manager analyzing a live outbound load board screenshot for a distribution center.
+You are an experienced warehouse operations first shift manager analyzing an outbound load board from an Excel/CSV file for a distribution center.
 
 Here is today's operational context:
 - Day: {day}, Shift: {shift}
@@ -572,67 +592,71 @@ Here is today's operational context:
 Current staffing vs. what we need:
 {staffing_summary}
 
-The rows in the right highlited in gray are the picks and pulls for that orders, you can just add them with the other picks and pulls.
+Important board rules and operation rules:
+- The board data below came from Excel/CSV, not a screenshot.
+- Read every row carefully: destination, carrier, appointment time, door, trailer, status, comments, live/drop, and warning notes.
+- The highlighted gray rows from the old screenshot process represented picks and pulls for those orders. In Excel, if there are pick/pull fields, add them into the workload.
+- The board treats picking by tickets. I want the analysis in cases. Our average is 60 cases per picking ticket. Talk to me in cases, not tickets.
+- Blank status on the board means the load is not being worked on right now.
+- R/S means Ready to load but still short on full pallets.
+- Our average productivity:
+  - Picking: 185 cases per hour per worker allocated
+  - Loading: 1 trailer per hour per worker allocated
+  - Unloading: 44 pallets per hour per worker allocated
+  - Full pallets / replenishment movement: 25 full pallets per hour per worker allocated
+- Yellow customer cell means it needs a load check.
+- Light blue customer cell means it needs to have a TT4.
+- Red font means it is a Canadian load.
+- If color information is not visible in the Excel text, say it is unclear instead of guessing.
+- If a column or value is unclear, say unclear instead of inventing information.
 
-The board is treating picking by tickets, i want it by cases. Our average is 60 cases per picking ticket. Talk to me in cases, not tickets
-
-The rows in blank on the board means it is not been worked on right now. R/S means Ready to load but still Short on full pallets.  
-
-The average we use is: we pick 185 cases per hour per worker allocated, load 1 trailer per hour per worker allocated, unload 44 pallets per hour and move 25 full pallets per hour per worker allocated for full pallets and replenishments.
-
-The board has different color for the customers: yellow cell means it needs a load check, light blue cell it means it need to have a TT4, red font means is a Canadian load.
-
-Now look at the board screenshot attached. Read every row carefully:
-destination, carrier, appointment time, door, trailer, status, comments, live/drop, and any warning notes.
-
+Here is the outbound board data from the uploaded Excel/CSV file:
+{board_text}
 
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
-- Break them down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc. Specify how many loads we have completed today and the total for the day. Specify if the late loads are occupying a door and which one. 
+- Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, Completed, blank/not started, etc.
+- Specify how many loads we have completed today and the total for the day.
+- Specify if the late loads are occupying a door and which door.
+- Call out loads missing a door, trailer, loader, or clear status.
 
 2. Picking & Short Risk:
-- How many loads show Picking/Short, Loaded Short or Ready/Short, only out of the ones that are being worked at the moment.
-- Given cases-to-pick and current staffing, are we at risk of falling further behind? How big is the risk? Can we get ahead?
-- Given all this information how far ahead we can finish this shift? Give me the load appointment times we should be picking by end of this shift. 
-- Should we consider sending people to manufacturing to reduce short risk? 
+- How many loads show Picking/Short, Loaded Short, or Ready/Short, only out of the loads being worked right now.
+- Given cases-to-pick and current staffing, are we at risk of falling further behind?
+- How big is the risk?
+- Can we get ahead?
+- Given all this information, how far ahead can we finish this shift?
+- Give me the load appointment times we should be picking by the end of this shift.
+- Should we consider sending people to manufacturing to reduce short risk?
 
-3. Prioritization
-- Are there any loads we should prioritize? How can we prioritize them?
+3. Prioritization:
+- Are there any loads we should prioritize?
+- How should we prioritize them?
+- Call out live loads, CPU loads, Canadian loads, late loads, short loads, TT4 loads, and load-check loads if visible.
 
 4. Cross-Analysis with Staffing:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
-- based on Staffing and demand, what should be an achievable goal for this shift? How ahead/behind we should finish this shift?
+- Based on staffing and demand, what should be an achievable goal for this shift?
+- How ahead or behind should we finish this shift?
 
-
-6. Top 3 Action Items:
-- Be direct.
+5. Top 3 Action Items:
 - What are the 3 most important things the manager should do in the next 30 minutes?
-- What are the 3 most important things the manager should do in the next 2 hours to achive today's goal. 
+- What are the 3 most important things the manager should do in the next 2 hours to achieve today's goal?
 
 Keep the tone like a smart, experienced ops manager talking to another manager.
-No corporate fluff. Be clear, practical, and actionable.
+No corporate fluff.
+Be clear, practical, and actionable.
 """
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_b64}"
-                            },
-                        },
-                    ],
+                    "content": prompt,
                 }
             ],
             temperature=0.2,
@@ -660,7 +684,7 @@ def write_board_analysis_to_excel(wb, analysis_text):
     thin = Side(style="thin", color="B7B7B7")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws["A1"] = "Board Screenshot Analysis — AI Insights"
+    ws["A1"] = "Board Excel Analysis — AI Insights"
     ws["A1"].font = Font(size=16, bold=True, color=white)
     ws["A1"].fill = PatternFill("solid", fgColor=dark_blue)
     ws["A1"].alignment = Alignment(horizontal="center")
@@ -695,10 +719,7 @@ def write_board_analysis_to_excel(wb, analysis_text):
     ws.column_dimensions["A"].width = 110
 
 
-
-# Written Recomendations
-
-
+# WRITTEN RECOMMENDATIONS
 
 def write_recommendations_to_excel(wb, staff):
     ws_staff = wb["Staffing sheet 1ST Shift"]
@@ -931,9 +952,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.freeze_panes = "A7"
 
 
-
 # STREAMLIT INTERFACE
-
 
 st.sidebar.header("Daily Inputs")
 
@@ -974,16 +993,16 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("📋 Board Screenshot")
+st.subheader("📋 Outbound Board Excel / CSV")
 
-board_image = st.file_uploader(
-    "Upload a screenshot of the outbound load board (PNG or JPG)",
-    type=["png", "jpg", "jpeg"],
-    help="Groq AI will read the board and cross-analyze it with today's staffing and demand.",
+board_file = st.file_uploader(
+    "Upload the outbound load board Excel or CSV file",
+    type=["xlsx", "xls", "csv"],
+    help="Groq AI will read the board file and cross-analyze it with today's staffing and demand.",
 )
 
-if board_image:
-    st.image(board_image, caption="Board loaded — ready for analysis", use_container_width=True)
+if board_file:
+    st.success("Board file loaded — ready for analysis.")
 
 st.markdown("---")
 
@@ -1075,12 +1094,12 @@ if st.button("Generate Staffing Report"):
 
     board_analysis_text = None
 
-    if board_image is not None:
-        with st.spinner("Analyzing board screenshot..."):
-            image_b64 = encode_image_to_base64(board_image)
+    if board_file is not None:
+        with st.spinner("Analyzing board Excel/CSV with Groq AI..."):
+            board_text = read_board_file_to_text(board_file)
 
             board_analysis_text = analyze_board_with_groq(
-                image_b64=image_b64,
+                board_text=board_text,
                 day=day,
                 shift=shift,
                 total_cases=total_cases,
@@ -1127,9 +1146,9 @@ if st.button("Generate Staffing Report"):
 
     if board_analysis_text:
         st.markdown("---")
-        st.subheader("Board Screenshot Analysis — AI Insights")
+        st.subheader("Board Excel Analysis — AI Insights")
         st.info(
-            "The analysis below was generated by Groq AI reading the board screenshot "
+            "The analysis below was generated by Groq AI reading the board Excel/CSV file "
             "and cross-referencing it with today's staffing data and demand."
         )
         st.markdown(board_analysis_text)
