@@ -782,7 +782,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Can we get ahead? Yes or no and why
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
-- Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from.
+- Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks Specify people from what areas we can move staff from and to where.
 
 3. Prioritization:
 - Are there any loads we should prioritize? Be specific add load numbers
