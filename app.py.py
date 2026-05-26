@@ -495,9 +495,7 @@ def build_recommendations(
     return recommendations
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # BOARD SCREENSHOT ANALYSIS WITH GROQ AI
-# ─────────────────────────────────────────────────────────────────────────────
 
 def encode_image_to_base64(image_file) -> str:
     image_file.seek(0)
@@ -535,7 +533,7 @@ def analyze_board_with_groq(
 
     if client is None:
         return (
-            "⚠️ Board analysis could not be completed because GROQ_API_KEY is missing. "
+            " Board analysis could not be completed because GROQ_API_KEY is missing. "
             "Add GROQ_API_KEY in Streamlit Cloud Secrets."
         )
 
@@ -574,35 +572,50 @@ Here is today's operational context:
 Current staffing vs. what we need:
 {staffing_summary}
 
+The rows in the right highlited in gray are the picks and pulls for that orders, you can just add them with the other picks and pulls.
+
+The board is treating picking by tickets, i want it by cases. Our average is 60 cases per picking ticket. Talk to me in cases, not tickets
+
+The rows in blank on the board means it is not been worked on right now. R/S means Ready/Short 
+
+The average we use is: we pick 185 cases per hour, load 1 trailer per hour, unload 44 pallets per hour and move 25 full pallets per hour for full pallets and replenishments.
+
+The board has different color for the customers: yellow cell means it needs a load check, light blue cell it means it need to have a TT4, red font means is a Canadian load.
+
 Now look at the board screenshot attached. Read every row carefully:
 destination, carrier, appointment time, door, trailer, status, comments, live/drop, and any warning notes.
+
 
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
-- How many loads total are shown?
-- Break them down by status: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc.
-- Call out any loads missing a door, trailer, loader, or clear status.
+- How many loads total are shown? How many are we picking, how many are late how many ready to load and be specific on what day they are from.
+- Break them down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, etc.
+
 
 2. Late & At-Risk Loads:
-- List every load marked LATE or with concerning comments like No Driver, Cut, Short, Loaded Short, Picking/Short, or R/S.
-- Explain the real service risk.
+- List every load marked LATE or with concerning comments like No Driver, Cut, Short, Loaded Short, Picking/Short, or R/S, and explain what is happening with it. 
+- Explain the real service risk, explain why. 
 
 3. Picking & Short Risk:
 - How many loads show Picking/Short or Loaded Short?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind?
+- Given all this information how far ahead we can finish this shift?
+- Should we consider sending people to manufacturing to reduce short risk? 
 
 4. Live Loads vs. Drops:
-- How many are live loads if visible?
-- Are any live loads at risk?
+- Are any live loads at risk? How can we prioritize them?
 
 5. Cross-Analysis with Staffing:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
+- based on Staffing and demand, what should be an achievable goal for today?
+
 
 6. Top 3 Action Items:
 - Be direct.
 - What are the 3 most important things the manager should do in the next 30 minutes?
+- What are the 3 most important things the manager should do in the next 2 hours to achive today's goal. 
 
 Keep the tone like a smart, experienced ops manager talking to another manager.
 No corporate fluff. Be clear, practical, and actionable.
@@ -635,7 +648,7 @@ No corporate fluff. Be clear, practical, and actionable.
         return response.choices[0].message.content
 
     except Exception as e:
-        return f"⚠️ Board analysis could not be completed: {str(e)}"
+        return f"Board analysis could not be completed: {str(e)}"
 
 
 def write_board_analysis_to_excel(wb, analysis_text):
@@ -688,9 +701,9 @@ def write_board_analysis_to_excel(wb, analysis_text):
     ws.column_dimensions["A"].width = 110
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# END BOARD SCREENSHOT ANALYSIS SECTION
-# ─────────────────────────────────────────────────────────────────────────────
+
+# Written Recomendations
+
 
 
 def write_recommendations_to_excel(wb, staff):
@@ -924,9 +937,9 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.freeze_panes = "A7"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STREAMLIT USER INTERFACE
-# ─────────────────────────────────────────────────────────────────────────────
+
+# STREAMLIT INTERFACE
+
 
 st.sidebar.header("Daily Inputs")
 
@@ -1069,7 +1082,7 @@ if st.button("Generate Staffing Report"):
     board_analysis_text = None
 
     if board_image is not None:
-        with st.spinner("🤖 Analyzing board screenshot with Groq AI..."):
+        with st.spinner("Analyzing board screenshot..."):
             image_b64 = encode_image_to_base64(board_image)
 
             board_analysis_text = analyze_board_with_groq(
@@ -1120,7 +1133,7 @@ if st.button("Generate Staffing Report"):
 
     if board_analysis_text:
         st.markdown("---")
-        st.subheader("📋 Board Screenshot Analysis — AI Insights")
+        st.subheader("Board Screenshot Analysis — AI Insights")
         st.info(
             "The analysis below was generated by Groq AI reading the board screenshot "
             "and cross-referencing it with today's staffing data and demand."
