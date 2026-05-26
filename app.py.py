@@ -798,6 +798,9 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - What are the 3 most important things the manager should do in the next 30 minutes?
 - What are the 3 most important things the manager should do in the next 2 hours to achieve today's goal?
 
+
+Make sure every recommendation and suggested action is achievable and following the same direction. 
+Have somewhere where you clearly set the expectations for the shift and explain why. I want this easy to identify. 
 Keep the tone like a smart, experienced ops manager talking to another manager.
 No corporate fluff.
 Be clear, practical, and actionable.
