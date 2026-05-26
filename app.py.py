@@ -493,44 +493,104 @@ def build_recommendations(
     return recommendations
 
 
-# BOARD EXCEL ANALYSIS WITH GROQ AI
+# ── BOARD EXCEL READING ──────────────────────────────────────────────────────
+# Reads directly from Excel cell values — no OCR, no image processing.
+# openpyxl is used so we can also capture cell fill colors for status flags.
 
 def read_board_file_to_text(board_file):
+    """
+    Read the board Excel/CSV directly from cell values.
+    For Excel files we use openpyxl so we can detect fill colors on cells
+    (yellow = load check needed, light-blue = TT4 needed, red font = Canadian).
+    Returns a plain-text string the AI can reason over.
+    """
     board_file.seek(0)
     file_name = board_file.name.lower()
 
-    try:
-        if file_name.endswith(".csv"):
+    # ── CSV path ──────────────────────────────────────────────────────────────
+    if file_name.endswith(".csv"):
+        try:
             df = pd.read_csv(board_file)
-            df = df.dropna(how="all")
-            df = df.dropna(axis=1, how="all")
-            df = df.fillna("")
-            board_text = df.to_csv(index=False)
-            return board_text
+            df = df.dropna(how="all").dropna(axis=1, how="all").fillna("")
+            return df.to_csv(index=False)
+        except Exception as e:
+            return f"Could not read CSV board file: {e}"
 
-        excel_data = pd.read_excel(board_file, sheet_name=None)
+    # ── Excel path — cell-level read with color detection ────────────────────
+    try:
+        board_file.seek(0)
+        wb = load_workbook(board_file, data_only=True)   # data_only=True → formula results
+        sections = []
 
-        board_sections = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
 
-        for sheet_name, df in excel_data.items():
-            df = df.dropna(how="all")
-            df = df.dropna(axis=1, how="all")
-            df = df.fillna("")
+            # Collect rows, skipping completely empty ones
+            rows_data = []
+            headers = None
 
-            if df.empty:
+            for row_idx, row in enumerate(ws.iter_rows(), start=1):
+                row_values = []
+                color_flags = []
+
+                for cell in row:
+                    val = cell.value
+                    val_str = "" if val is None else str(val).strip()
+
+                    # Detect fill color flags
+                    fill = cell.fill
+                    fill_color = ""
+                    if fill and fill.fgColor and fill.fgColor.type == "rgb":
+                        fill_color = fill.fgColor.rgb.upper()  # e.g. "FFFFFF00" = yellow
+
+                    # Detect font color flags
+                    font = cell.font
+                    font_color = ""
+                    if font and font.color and font.color.type == "rgb":
+                        font_color = font.color.rgb.upper()
+
+                    # Annotate special cells inline so the AI sees them clearly
+                    flags = []
+                    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):        # yellow variants
+                        flags.append("[LOAD-CHECK]")
+                    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF",    # light-blue variants
+                                        "FFB0E0E6", "FF00BFFF"):
+                        flags.append("[TT4-NEEDED]")
+
+                    if font_color in ("FFFF0000", "00FF0000"):                  # red font
+                        flags.append("[CANADIAN]")
+
+                    annotated = val_str + (" " + " ".join(flags) if flags else "")
+                    row_values.append(annotated)
+
+                # Skip rows that are entirely blank
+                if all(v.strip() == "" for v in row_values):
+                    continue
+
+                if row_idx == 1:
+                    headers = row_values
+                else:
+                    rows_data.append(row_values)
+
+            if not rows_data:
                 continue
 
-            section = f"\n--- SHEET: {sheet_name} ---\n"
-            section += df.to_csv(index=False)
-            board_sections.append(section)
+            # Build a simple CSV-style block for this sheet
+            section_lines = [f"--- SHEET: {sheet_name} ---"]
+            if headers:
+                section_lines.append(",".join(headers))
+            for r in rows_data:
+                section_lines.append(",".join(r))
 
-        if not board_sections:
-            return "No readable board data found in the uploaded file."
+            sections.append("\n".join(section_lines))
 
-        return "\n".join(board_sections)
+        if not sections:
+            return "No readable board data found in the uploaded Excel file."
+
+        return "\n\n".join(sections)
 
     except Exception as e:
-        return f"Could not read board file: {str(e)}"
+        return f"Could not read Excel board file: {e}"
 
 
 def analyze_board_with_groq(
@@ -578,8 +638,100 @@ def analyze_board_with_groq(
     ]
 
     prompt = f"""
-You are an experienced warehouse operations first shift manager analyzing an outbound load board from an Excel/CSV file for a distribution center. I need you to be insightful, not just to tell me whats happening. Give me specific recomendations and add times and numbers to the goals for the day and explain why and how the goal is achivable. 
-Tell me what if scenarios. If this happens what should I do? 
+You are an experienced warehouse operations first shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
+
+Additional warehouse operation context:
+
+This is a high-volume outbound grocery distribution center operation.
+
+The outbound board represents live warehouse execution, not future planning.
+
+The manager using this system is focused on:
+- Preventing shorts
+- Keeping pickers productive
+- Avoiding late departures
+- Protecting dock flow
+- Prioritizing live loads correctly
+- Reducing congestion
+- Getting ahead instead of reacting late
+
+Operational priorities from highest to lowest:
+1. Prevent shorts on customer orders
+2. Protect outbound departures
+3. Maintain picking flow
+4. Prevent inbound congestion
+5. Use extra labor proactively
+
+Operational definitions:
+
+- RTL = Ready To Load
+  Product is staged and ready. Loader can execute.
+
+- R/S = Ready/Short
+  Load is mostly ready but missing full pallets or replenishment inventory.
+  This is a major operational risk and can quickly become late.
+
+- Picking = Order currently being picked.
+
+- Picking/Short = Picking in progress but inventory shortages are occurring.
+  This usually means replenishment or manufacturing support is needed.
+
+- Loaded Short = Trailer loaded but missing product.
+  This is a severe service risk.
+
+- Live = Trailer physically waiting at the dock.
+  Live loads always have higher priority than drop trailers.
+
+- Drop = Trailer can wait longer and has lower urgency.
+
+- Late = Appointment time already missed or at risk.
+
+Important labor behavior rules:
+
+- Pickers should stay picking whenever possible.
+- Tasking/replenishment exists mainly to protect pickers from running out of product.
+- If replenishment falls behind, pickers stop producing.
+- Loading labor should only be pulled if outbound risk is low.
+- Receiving and unloading can temporarily absorb delays better than picking.
+- Lead/Extra labor should be used proactively before the operation falls behind.
+
+Operational productivity assumptions:
+
+- 1 picker averages 185 cases/hour
+- 1 loader averages 1 trailer/hour
+- 1 unloader averages 44 pallets/hour
+- 1 replenishment/tasking worker averages 25 pallet moves/hour
+
+Risk interpretation rules:
+
+- Multiple Picking/Short loads means replenishment is failing.
+- Multiple R/S loads means outbound may miss appointments.
+- Late live loads are highest priority.
+- Loads with no door, no trailer, or no loader are operational risks.
+- If many loads are blank/not started, the operation is behind schedule.
+- If outbound workload is heavier than staffing, recommend labor moves immediately.
+
+Management philosophy:
+
+The goal is not only to survive the shift.
+The goal is to get ahead early enough that later appointments are protected.
+
+The manager prefers:
+- proactive recommendations
+- actionable labor moves
+- operational risk analysis
+- realistic achievable goals
+- time-based recommendations
+- practical warehouse language
+- direct communication without corporate fluff
+
+When making recommendations:
+- Specify EXACTLY where labor should move from and to
+- Explain WHY
+- Explain operational consequences if no action is taken
+- Give achievable operational goals for the next 30 minutes and next 2 hours
+- Prioritize live loads, shorts, and dock flow
+- Think like an experienced outbound operations manager
 
 Here is today's operational context:
 - Day: {day}, Shift: {shift}
@@ -593,45 +745,44 @@ Here is today's operational context:
 Current staffing vs. what we need:
 {staffing_summary}
 
-Important board rules and operation rules:
-- The board data below came from Excel/CSV, not a screenshot.
-- Read every row carefully: destination, carrier, appointment time, door, trailer, status, comments, live/drop, and warning notes.
-- The highlighted gray rows from the old screenshot process represented picks and pulls for those orders. In Excel, if there are pick/pull fields, add them into the workload.
-- The board treats picking by tickets. I want the analysis in cases. Our average is 60 cases per picking ticket. Talk to me in cases, not tickets.
-- Blank status on the board means the load is not being worked on right now.
+Board data rules and operation rules:
+- All data below was extracted directly from Excel cells — treat it as accurate.
+- Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
+- Cells annotated with [TT4-NEEDED] had a light-blue fill in Excel, meaning that load needs a TT4.
+- Cells annotated with [CANADIAN] had red font in Excel, meaning it is a Canadian load.
+- If a color annotation is absent, the cell had no special flag — do not guess.
+- Blank status on the board means the load is not currently being worked.
 - R/S means Ready to load but still short on full pallets.
 - Our average productivity:
   - Picking: 185 cases per hour per worker allocated
   - Loading: 1 trailer per hour per worker allocated
   - Unloading: 44 pallets per hour per worker allocated
   - Full pallets / replenishment movement: 25 full pallets per hour per worker allocated
-- Yellow customer cell means it needs a load check.
-- Light blue customer cell means it needs to have a TT4.
-- Red font means it is a Canadian load.
-- If color information is not visible in the Excel text, say it is unclear instead of guessing.
-- If a column or value is unclear, say unclear instead of inventing information.
+- Picking is measured in tickets on the board, but analyze everything in cases. Our average is 60 cases per picking ticket.
+- If a column or value is unclear or missing, say "unclear" — do not invent information.
 
-Here is the outbound board data from the uploaded Excel/CSV file:
+Here is the outbound board data extracted directly from the Excel file:
 {board_text}
 
-Read the board very carefully. 
+Read the board carefully row by row.
 
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
 - Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, Completed, blank/not started, etc.
-- Specify how many loads we have completed today out of the total for the day.
-- Specify if the late loads are occupying a door and which door.
-- Call out loads missing a door, trailer, loader, or clear status.
+- Specify how many loads are completed today out of the total for the day.
+- Specify if any late loads are occupying a door, and which door.
+- Call out any loads missing a door, trailer, loader, or clear status.
+- Flag all loads marked [LOAD-CHECK] or [TT4-NEEDED] and all [CANADIAN] loads.
 
 2. Picking & Short Risk:
-- How many loads show Picking/Short, Loaded Short, or Ready/Short, only out of the loads being worked right now. How many loads have not being started?
+- How many loads show Picking/Short, Loaded Short, or Ready/Short among the loads currently being worked? How many loads have not been started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind?
 - How big is the risk?
 - Can we get ahead?
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
-- Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from. 
+- Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from.
 
 3. Prioritization:
 - Are there any loads we should prioritize?
@@ -650,6 +801,8 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 Keep the tone like a smart, experienced ops manager talking to another manager.
 No corporate fluff.
 Be clear, practical, and actionable.
+Add times and case/pallet numbers to every goal so progress is measurable.
+Include what-if scenarios: if X happens, here is what to do.
 """
 
     try:
@@ -721,7 +874,7 @@ def write_board_analysis_to_excel(wb, analysis_text):
     ws.column_dimensions["A"].width = 110
 
 
-# WRITTEN RECOMMENDATIONS
+# ── WRITTEN RECOMMENDATIONS ──────────────────────────────────────────────────
 
 def write_recommendations_to_excel(wb, staff):
     ws_staff = wb["Staffing sheet 1ST Shift"]
@@ -954,7 +1107,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.freeze_panes = "A7"
 
 
-# STREAMLIT INTERFACE
+# ── STREAMLIT INTERFACE ──────────────────────────────────────────────────────
 
 st.sidebar.header("Daily Inputs")
 
@@ -1000,7 +1153,7 @@ st.subheader("📋 Outbound Board Excel / CSV")
 board_file = st.file_uploader(
     "Upload the outbound load board Excel or CSV file",
     type=["xlsx", "xls", "csv"],
-    help="Groq AI will read the board file and cross-analyze it with today's staffing and demand.",
+    help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
 
 if board_file:
@@ -1097,7 +1250,7 @@ if st.button("Generate Staffing Report"):
     board_analysis_text = None
 
     if board_file is not None:
-        with st.spinner("Analyzing board Excel/CSV with Groq AI..."):
+        with st.spinner("Reading board Excel file and analyzing with Groq AI..."):
             board_text = read_board_file_to_text(board_file)
 
             board_analysis_text = analyze_board_with_groq(
@@ -1150,8 +1303,8 @@ if st.button("Generate Staffing Report"):
         st.markdown("---")
         st.subheader("Board Excel Analysis — AI Insights")
         st.info(
-            "The analysis below was generated by Groq AI reading the board Excel/CSV file "
-            "and cross-referencing it with today's staffing data and demand."
+            "The analysis below was generated by Groq AI reading the board Excel/CSV file directly "
+            "from cell values, including color flags for load checks, TT4s, and Canadian loads."
         )
         st.markdown(board_analysis_text)
 
