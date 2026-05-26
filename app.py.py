@@ -641,7 +641,7 @@ def analyze_board_with_groq(
 You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
 Use short bullet points. don't over explain. 
 
-When reading: separate loads and their data by day, focus on today. 
+When reading: separate loads and their data by day, focus on today but still mention when they are still loads on the board from days before and what is happening with them. 
 
 
 Additional warehouse operation context:
@@ -806,7 +806,8 @@ Include what-if scenarios: if X happens, here is what to do.
 Only use data, do not guess
 Talk about how you are heading the second shift for success. 
 When suggesting to think about moving staff specify from where to where. 
-Remember even though we have 62 loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. 
+Remember even though we have 62 loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. Read the board and check the times. 
+When making suggestions that we should be ready to load up to a specific hour do not use a range, be specific. 
 """
 
     try:
