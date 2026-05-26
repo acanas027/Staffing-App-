@@ -493,7 +493,7 @@ def build_recommendations(
     return recommendations
 
 
-# ── BOARD EXCEL READING ──────────────────────────────────────────────────────
+# BOARD EXCEL READING 
 # Reads directly from Excel cell values — no OCR, no image processing.
 # openpyxl is used so we can also capture cell fill colors for status flags.
 
@@ -507,7 +507,7 @@ def read_board_file_to_text(board_file):
     board_file.seek(0)
     file_name = board_file.name.lower()
 
-    # ── CSV path ──────────────────────────────────────────────────────────────
+    # CSV path 
     if file_name.endswith(".csv"):
         try:
             df = pd.read_csv(board_file)
@@ -516,7 +516,7 @@ def read_board_file_to_text(board_file):
         except Exception as e:
             return f"Could not read CSV board file: {e}"
 
-    # ── Excel path — cell-level read with color detection ────────────────────
+    # Excel path — cell-level read with color detection 
     try:
         board_file.seek(0)
         wb = load_workbook(board_file, data_only=True)   # data_only=True → formula results
@@ -638,13 +638,15 @@ def analyze_board_with_groq(
     ]
 
     prompt = f"""
-You are an experienced warehouse operations first shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
+You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
+Use short bullet points. don't over explain. 
+
+When reading: separate loads and their data by day, focus on today. 
+
 
 Additional warehouse operation context:
-
 This is a high-volume outbound grocery distribution center operation.
-
-The outbound board represents live warehouse execution, not future planning.
+The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12. 
 
 The manager using this system is focused on:
 - Preventing shorts
@@ -748,7 +750,6 @@ Current staffing vs. what we need:
 Board data rules and operation rules:
 - All data below was extracted directly from Excel cells — treat it as accurate.
 - Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
-- Cells annotated with [TT4-NEEDED] had a light-blue fill in Excel, meaning that load needs a TT4.
 - Cells annotated with [CANADIAN] had red font in Excel, meaning it is a Canadian load.
 - If a color annotation is absent, the cell had no special flag — do not guess.
 - Blank status on the board means the load is not currently being worked.
@@ -778,7 +779,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 2. Picking & Short Risk:
 - How many loads show Picking/Short, Loaded Short, or Ready/Short among the loads currently being worked? How many loads have not been started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind?
-- How big is the risk?
+- How big is the risk? Explain what are the risk factors. 
 - Can we get ahead?
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
@@ -803,6 +804,9 @@ No corporate fluff.
 Be clear, practical, and actionable.
 Add times and case/pallet numbers to every goal so progress is measurable.
 Include what-if scenarios: if X happens, here is what to do.
+Only use data, do not guess
+Talk about how you are heading the second shift for success. 
+When suggesting to think about moving staff specify from where to where. 
 """
 
     try:
