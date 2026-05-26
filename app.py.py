@@ -614,27 +614,28 @@ Important board rules and operation rules:
 Here is the outbound board data from the uploaded Excel/CSV file:
 {board_text}
 
+Read the board very carefully. 
+
 Give me a clear, practical warehouse manager analysis in plain English covering:
 
 1. Board Summary:
 - Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Live, Drop, Completed, blank/not started, etc.
-- Specify how many loads we have completed today and the total for the day.
+- Specify how many loads we have completed today out of the total for the day.
 - Specify if the late loads are occupying a door and which door.
 - Call out loads missing a door, trailer, loader, or clear status.
 
 2. Picking & Short Risk:
-- How many loads show Picking/Short, Loaded Short, or Ready/Short, only out of the loads being worked right now.
+- How many loads show Picking/Short, Loaded Short, or Ready/Short, only out of the loads being worked right now. How many loads have not being started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind?
 - How big is the risk?
 - Can we get ahead?
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
-- Should we consider sending people to manufacturing to reduce short risk?
+- Should we consider sending people to manufacturing to reduce short risk? Specify people from what areas we can move staff from. 
 
 3. Prioritization:
 - Are there any loads we should prioritize?
-- How should we prioritize them?
-- Call out live loads, CPU loads, Canadian loads, late loads, short loads, TT4 loads, and load-check loads if visible.
+- How and why should we prioritize them?
 
 4. Cross-Analysis with Staffing:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
