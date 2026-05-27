@@ -1443,7 +1443,7 @@ st.text_area(
     height=500,
 )
 
-    st.download_button(
+st.download_button(
         label="Download Staffing Report",
         data=output,
         file_name="Staffing Report Generated.xlsx",
