@@ -645,7 +645,7 @@ When reading: separate loads and their data by day, focus on today but still men
 
 
 Additional warehouse operation context:
-This is a high-volume outbound grocery distribution center operation.
+This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 5 am to 4 pm with 9.5 workable hours. Setting up the second shift for success can varies, but if my morning shift have all loads RTL and the appointments are until 3pm that is still success, not behind. 
 The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12. 
 
 The manager using this system is focused on:
