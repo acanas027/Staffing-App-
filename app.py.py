@@ -637,7 +637,7 @@ Use short bullet points. don't over explain.
 When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
 
 Additional warehouse operation context:
-This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 5 am to 4 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 3pm that is still success, not behind.
+This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 6 am to 4:30 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 4pm that is still success, not behind. 
 The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12.
 
 The manager using this system is focused on:
