@@ -23,6 +23,207 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
+# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
+# Each entry: customer name (lowercase for matching), issue summary, DC requirements
+OC_CUSTOMER_LIST = [
+    {
+        "name": "target rialto",
+        "aliases": ["target"],
+        "customer_number": "4000265976",
+        "issue": "Damaged pallet quality, damaged cases and poor shrink wrap quality.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "sobey's",
+        "aliases": ["sobeys", "sobey"],
+        "customer_number": None,
+        "issue": (
+            "Automated system was gaining large amount of rejects. "
+            "Damaged pallet quality, damaged cases and poor shrink wrap quality "
+            "(shrink wrap tails causing issues with system)."
+        ),
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "sysco kc",
+        "aliases": ["sysco kansas city", "sysco olathe", "sysco kc olathe"],
+        "customer_number": None,
+        "issue": "Damaged white pallets. DC was not correcting broken white wood pallets before shipping.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "pfs virginia",
+        "aliases": ["pfs virgina", "pfs va"],
+        "customer_number": None,
+        "issue": "Customer receiving wrong product or shorted inventory.",
+        "requirements": (
+            "Photos taken of load. Loads flagged for an inventory control team member audit "
+            "PRIOR to loading. Check for accurate case counts and audit of correct product."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "metro toronto fresh dc",
+        "aliases": ["metro toronto", "metro fresh"],
+        "customer_number": None,
+        "issue": "Packaging issues with flaps opening on cases. Continuous pallet damage issues.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "jewel's",
+        "aliases": ["jewels", "jewel"],
+        "customer_number": None,
+        "issue": "CPU — strict pallet and load-quality expectations.",
+        "requirements": (
+            "Loads must ship on CHEP pallets in good condition. TT4 must be included and used correctly. "
+            "Verify pallet compliance before staging."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "acme",
+        "aliases": [],
+        "customer_number": None,
+        "issue": "CPU — strict on-time departure.",
+        "requirements": (
+            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
+            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
+            "is at risk of not being ready on time."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "awg",
+        "aliases": ["associated wholesale grocers"],
+        "customer_number": None,
+        "issue": "CPU — strict on-time departure.",
+        "requirements": (
+            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
+            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
+            "is at risk of not being ready on time."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "whataburger",
+        "aliases": ["whataburguer"],
+        "customer_number": None,
+        "issue": "Developing new product with customer — extra care required.",
+        "requirements": (
+            "Handle with care. Communicate any issues with product or staging immediately to supervisor."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+]
+
+
+def find_oc_customers_in_board(board_text):
+    """
+    Scan the board text for any Opportunity Customer names or aliases.
+    Returns a list of matched OC entries with the context they were found in.
+    """
+    board_lower = board_text.lower()
+    matches = []
+
+    for customer in OC_CUSTOMER_LIST:
+        search_terms = [customer["name"]] + customer.get("aliases", [])
+        found_terms = [term for term in search_terms if term.lower() in board_lower]
+
+        if found_terms:
+            matches.append({
+                "customer": customer,
+                "matched_on": found_terms,
+            })
+
+    return matches
+
+
+def build_oc_alert_text(oc_matches):
+    """
+    Build a plain-text OC alert block to inject into the AI prompt and display in the UI.
+    """
+    if not oc_matches:
+        return None
+
+    lines = [
+        "=== OPPORTUNITY CUSTOMER (OC) ALERT ===",
+        "The following loads belong to customers on the Opportunity Customer List.",
+        "These customers have a documented history of complaints and require special handling.",
+        "Flag these loads explicitly in your analysis and include action items for each.",
+        "",
+    ]
+
+    for match in oc_matches:
+        c = match["customer"]
+        lines.append(f"▶ CUSTOMER: {c['name'].upper()}")
+        lines.append(f"  Matched on: {', '.join(match['matched_on'])}")
+        lines.append(f"  Priority: {c['priority']}")
+        lines.append(f"  Issue History: {c['issue']}")
+        lines.append(f"  DC Requirements: {c['requirements']}")
+        if c["sign_off"]:
+            lines.append("  ⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
+        if c["pictures"]:
+            lines.append("  📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+        lines.append("")
+
+    lines += [
+        "IMPORTANT: For every OC load identified above:",
+        "1. Flag it clearly in your Board Summary section.",
+        "2. Add a dedicated OC Action section with specific steps before this load ships.",
+        "3. Recommend who should own the sign-off and photo process.",
+        "4. Include this as one of the Top 3 Action Items if the load is active or upcoming.",
+        "=== END OC ALERT ===",
+    ]
+
+    return "\n".join(lines)
+
+
 def get_groq_client():
     if "GROQ_API_KEY" not in st.secrets:
         return None
@@ -158,7 +359,6 @@ def calculate_needed(
     }
 
     needed = {
-        # ── CHANGE 1: Unloading now has a hard minimum of 2, same as Receiving ──
         "Unloading": max(2, whole_workers(raw_needed["Unloading"])),
         "Receiving": max(2, whole_workers(raw_needed["Receiving"])),
         "Picking": whole_workers(raw_needed["Picking"]),
@@ -497,16 +697,9 @@ def build_recommendations(
 # ── BOARD EXCEL READING ───────────────────────────────────────────────────────
 
 def read_board_file_to_text(board_file):
-    """
-    Read the board Excel/CSV directly from cell values.
-    For Excel files we use openpyxl so we can detect fill colors on cells
-    (yellow = load check needed, light-blue = TT4 needed, red font = Canadian).
-    Returns a plain-text string the AI can reason over.
-    """
     board_file.seek(0)
     file_name = board_file.name.lower()
 
-    # CSV path
     if file_name.endswith(".csv"):
         try:
             df = pd.read_csv(board_file)
@@ -515,7 +708,6 @@ def read_board_file_to_text(board_file):
         except Exception as e:
             return f"Could not read CSV board file: {e}"
 
-    # Excel path — cell-level read with color detection
     try:
         board_file.seek(0)
         wb = load_workbook(board_file, data_only=True)
@@ -600,6 +792,7 @@ def analyze_board_with_groq(
     cases_to_pick,
     inbound_pallets,
     notes,
+    oc_alert_text=None,
 ):
     client = get_groq_client()
 
@@ -629,7 +822,10 @@ def analyze_board_with_groq(
         if status == "YES"
     ]
 
-    # ── Shared base prompt used across all three passes ───────────────────────
+    oc_section = ""
+    if oc_alert_text:
+        oc_section = f"\n\n{oc_alert_text}\n"
+
     base_context = f"""
 You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
 Use short bullet points. don't over explain.
@@ -719,7 +915,7 @@ Today's operational context:
 
 Current staffing vs. what we need:
 {staffing_summary}
-
+{oc_section}
 Board data rules and operation rules:
 - All data below was extracted directly from Excel cells — treat it as accurate.
 - Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
@@ -739,7 +935,6 @@ Here is the outbound board data extracted directly from the Excel file:
 {board_text}
 """
 
-    # ── Structured output sections the final pass must cover ──────────────────
     output_structure = """
 Read the board carefully row by row.
 
@@ -750,7 +945,14 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Specify how many loads are completed today out of the total for the day.
 - Specify any late loads, from when, if they are occupying a door, and which door.
 
-2. Picking & Short Risk:
+2. ⚠ Opportunity Customer (OC) Alerts:
+- List every load on the board that belongs to a customer on the Opportunity Customer List.
+- For each OC load: state the load number, customer name, current status, appointment time, and EXACTLY what special actions are required before this load ships.
+- If pictures are required, state when they should be taken and who should own it.
+- If supervisor sign-off is required, state who should sign off and when.
+- If no OC customers are on the board today, state clearly: "No Opportunity Customers detected on today's board."
+
+3. Picking & Short Risk:
 - How many loads have not been started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why.
 - How big is the risk? Explain what are the risk factors.
@@ -759,17 +961,17 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Give me the load appointment times we should be picking by the end of this shift.
 - Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks? Specify people from what areas we can move staff from and to where.
 
-3. Prioritization:
+4. Prioritization:
 - Are there any loads we should prioritize? Be specific, add load numbers.
 - How and why should we prioritize them?
 
-4. Cross-Analysis with Staffing:
+5. Cross-Analysis with Staffing:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
 - Based on staffing and demand, what should be an achievable goal for this shift?
 - How ahead or behind should we finish this shift?
 
-5. Top 3 Action Items:
+6. Top 3 Action Items:
 - What are the 3 most important things the manager should do in the next 30 minutes?
 - What are the 3 most important things the manager should do in the next 2 hours to achieve today's goal?
 
@@ -785,10 +987,10 @@ Talk about how you are heading the second shift for success.
 When suggesting to think about moving staff specify from where to where.
 Remember even though we have loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. Read the board and check the times.
 When making suggestions that we should be ready to load up to a specific hour do not use a range, be specific.
+OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early in the analysis — never buried at the bottom.
 """
 
     try:
-        # ── PASS 1: Initial analysis ──────────────────────────────────────────
         initial_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -803,7 +1005,6 @@ When making suggestions that we should be ready to load up to a specific hour do
 
         initial_analysis = initial_response.choices[0].message.content
 
-        # ── PASS 2: Validation — check counts, contradictions, logic errors ───
         validation_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -816,6 +1017,8 @@ When making suggestions that we should be ready to load up to a specific hour do
                         "contradictory statements (e.g. saying a load is RTL and also Picking), "
                         "math errors in labor or case projections, recommendations that conflict with stated priorities, "
                         "and any invented data not present in the board. "
+                        "ALSO verify: if an Opportunity Customer (OC) was flagged in the context, confirm it was addressed "
+                        "explicitly in the analysis with correct requirements. If it was missed, flag it. "
                         "Be specific about each issue found. If something is correct, confirm it. "
                         "Do not rewrite the full analysis — only list what needs to be corrected and what is confirmed accurate. "
                         "Keep it concise and factual."
@@ -835,7 +1038,6 @@ When making suggestions that we should be ready to load up to a specific hour do
 
         validation_notes = validation_response.choices[0].message.content
 
-        # ── PASS 3: Final synthesis — apply corrections, produce clean output ─
         final_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -848,7 +1050,8 @@ When making suggestions that we should be ready to load up to a specific hour do
                         "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
                         "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
                         "as if you are delivering it directly to the shift manager. "
-                        "Follow the exact same output structure as the initial analysis."
+                        "Follow the exact same output structure as the initial analysis. "
+                        "Opportunity Customer (OC) alerts must appear early and be complete — never omit or shorten them."
                     ),
                 },
                 {
@@ -870,7 +1073,7 @@ When making suggestions that we should be ready to load up to a specific hour do
         return f"Board analysis could not be completed: {str(e)}"
 
 
-def write_board_analysis_to_excel(wb, analysis_text):
+def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     sheet_name = "Board Analysis"
 
     if sheet_name in wb.sheetnames:
@@ -880,8 +1083,10 @@ def write_board_analysis_to_excel(wb, analysis_text):
         ws = wb.create_sheet(sheet_name)
 
     dark_blue = "0F5B78"
+    orange = "C55A11"
     white = "FFFFFF"
     light_blue = "D9EAF7"
+    light_orange = "FCE4D6"
     thin = Side(style="thin", color="B7B7B7")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
@@ -899,18 +1104,53 @@ def write_board_analysis_to_excel(wb, analysis_text):
 
     current_row = 4
 
+    # ── OC Alert block at top of sheet if matches found ──────────────────────
+    if oc_matches:
+        ws.cell(current_row, 1).value = "⚠ OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
+        ws.cell(current_row, 1).font = Font(size=13, bold=True, color=white)
+        ws.cell(current_row, 1).fill = PatternFill("solid", fgColor=orange)
+        ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+        ws.row_dimensions[current_row].height = 22
+        current_row += 1
+
+        for match in oc_matches:
+            c = match["customer"]
+            oc_lines = [
+                f"CUSTOMER: {c['name'].upper()}  |  Priority: {c['priority']}",
+                f"Issue History: {c['issue']}",
+                f"DC Requirements: {c['requirements']}",
+            ]
+            if c["sign_off"]:
+                oc_lines.append("⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
+            if c["pictures"]:
+                oc_lines.append("📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+
+            for line in oc_lines:
+                cell = ws.cell(current_row, 1, line)
+                cell.font = Font(size=10, bold=("CUSTOMER:" in line or "⚠" in line or "📷" in line))
+                cell.fill = PatternFill("solid", fgColor=light_orange)
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                cell.border = border
+                ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+                ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
+                current_row += 1
+
+            current_row += 1
+
+        current_row += 1
+
+    # ── AI analysis lines ─────────────────────────────────────────────────────
     for line in analysis_text.split("\n"):
         cell = ws.cell(current_row, 1, line)
         cell.alignment = Alignment(wrap_text=True, vertical="top")
         cell.border = border
-
         ws.merge_cells(
             start_row=current_row,
             start_column=1,
             end_row=current_row,
             end_column=7,
         )
-
         ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
         current_row += 1
 
@@ -919,8 +1159,6 @@ def write_board_analysis_to_excel(wb, analysis_text):
 
     ws.column_dimensions["A"].width = 110
 
-
-# ── WRITTEN RECOMMENDATIONS ───────────────────────────────────────────────────
 
 def write_recommendations_to_excel(wb, staff):
     ws_staff = wb["Staffing sheet 1ST Shift"]
@@ -947,7 +1185,7 @@ def write_recommendations_to_excel(wb, staff):
             ws_crew[f"D{crew_row}"] = task
 
 
-def build_dashboard(wb, summary_table, present_recommendations, recommendations):
+def build_dashboard(wb, summary_table, present_recommendations, recommendations, oc_matches=None):
     if "Staffing Dashboard" in wb.sheetnames:
         ws_dash = wb["Staffing Dashboard"]
         ws_dash.delete_rows(1, ws_dash.max_row)
@@ -955,7 +1193,9 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
         ws_dash = wb.create_sheet("Staffing Dashboard")
 
     dark_blue = "0F5B78"
+    orange = "C55A11"
     light_blue = "D9EAF7"
+    light_orange = "FCE4D6"
     green = "C6EFCE"
     red = "FFC7CE"
     yellow = "FFEB9C"
@@ -1001,20 +1241,38 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
         ws_dash.merge_cells(start_row=3, start_column=col, end_row=3, end_column=col + 1)
         ws_dash.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col + 1)
 
-    ws_dash["A6"] = "Needed vs Assigned"
-    ws_dash["A6"].font = Font(size=14, bold=True)
+    # ── OC Alert banner on dashboard if matches found ─────────────────────────
+    oc_banner_row = 6
 
+    if oc_matches:
+        customer_names = ", ".join(m["customer"]["name"].upper() for m in oc_matches)
+        ws_dash.cell(oc_banner_row, 1).value = (
+            f"⚠ OC ALERT: Opportunity Customers on today's board — {customer_names} — See 'Board Analysis' tab for full requirements."
+        )
+        ws_dash.cell(oc_banner_row, 1).font = Font(bold=True, color=white, size=11)
+        ws_dash.cell(oc_banner_row, 1).fill = PatternFill("solid", fgColor=orange)
+        ws_dash.cell(oc_banner_row, 1).alignment = Alignment(horizontal="center", wrap_text=True)
+        ws_dash.merge_cells(start_row=oc_banner_row, start_column=1, end_row=oc_banner_row, end_column=11)
+        ws_dash.row_dimensions[oc_banner_row].height = 22
+        summary_label_row = oc_banner_row + 2
+    else:
+        summary_label_row = oc_banner_row
+
+    ws_dash.cell(summary_label_row, 1).value = "Needed vs Assigned"
+    ws_dash.cell(summary_label_row, 1).font = Font(size=14, bold=True)
+
+    header_row = summary_label_row + 1
     headers = ["Task", "Needed", "Assigned", "Difference", "Status"]
 
     for c, header in enumerate(headers, 1):
-        cell = ws_dash.cell(7, c)
+        cell = ws_dash.cell(header_row, c)
         cell.value = header
         cell.font = Font(bold=True, color=white)
         cell.fill = PatternFill("solid", fgColor=dark_blue)
         cell.border = border
         cell.alignment = Alignment(horizontal="center")
 
-    for r, (task, row) in enumerate(summary_table.iterrows(), 8):
+    for r, (task, row) in enumerate(summary_table.iterrows(), header_row + 1):
         values = [
             task,
             int(row["Needed"]),
@@ -1037,28 +1295,26 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
                 else:
                     cell.fill = PatternFill("solid", fgColor=yellow)
 
-    ws_dash["G6"] = "Written Recommendations / What-Ifs"
-    ws_dash["G6"].font = Font(size=14, bold=True)
+    ws_dash.cell(summary_label_row, 7).value = "Written Recommendations / What-Ifs"
+    ws_dash.cell(summary_label_row, 7).font = Font(size=14, bold=True)
 
-    rec_row = 7
+    rec_row = header_row
 
     for rec in recommendations:
-        ws_dash[f"G{rec_row}"] = f"• {rec}"
-        ws_dash[f"G{rec_row}"].alignment = Alignment(wrap_text=True, vertical="top")
-
+        ws_dash.cell(rec_row, 7).value = f"• {rec}"
+        ws_dash.cell(rec_row, 7).alignment = Alignment(wrap_text=True, vertical="top")
         ws_dash.merge_cells(
             start_row=rec_row,
             start_column=7,
             end_row=rec_row,
             end_column=11,
         )
-
         rec_row += 1
 
-    board_start = max(16, rec_row + 2)
+    board_start = max(header_row + len(summary_table) + 4, rec_row + 2)
 
-    ws_dash[f"A{board_start}"] = "Recommended Staffing Board"
-    ws_dash[f"A{board_start}"].font = Font(size=14, bold=True)
+    ws_dash.cell(board_start, 1).value = "Recommended Staffing Board"
+    ws_dash.cell(board_start, 1).font = Font(size=14, bold=True)
 
     board_headers = ["Name", "Skills", "Best Fit", "Recommended Task"]
 
@@ -1087,6 +1343,8 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
             if r % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=light_blue)
 
+    chart_anchor_row = board_start + len(present_recommendations) + 5
+
     bar = BarChart()
     bar.title = "Needed vs Assigned"
     bar.y_axis.title = "Workers"
@@ -1096,15 +1354,15 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
         ws_dash,
         min_col=2,
         max_col=3,
-        min_row=7,
-        max_row=7 + len(summary_table),
+        min_row=header_row,
+        max_row=header_row + len(summary_table),
     )
 
     cats = Reference(
         ws_dash,
         min_col=1,
-        min_row=8,
-        max_row=7 + len(summary_table),
+        min_row=header_row + 1,
+        max_row=header_row + len(summary_table),
     )
 
     bar.add_data(data, titles_from_data=True)
@@ -1113,7 +1371,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     bar.width = 15
     bar.legend.position = "r"
 
-    ws_dash.add_chart(bar, "E28")
+    ws_dash.add_chart(bar, f"E{chart_anchor_row}")
 
     pie = PieChart()
     pie.title = "Assigned Labor Distribution"
@@ -1121,15 +1379,15 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     pie_data = Reference(
         ws_dash,
         min_col=3,
-        min_row=7,
-        max_row=7 + len(summary_table),
+        min_row=header_row,
+        max_row=header_row + len(summary_table),
     )
 
     pie_cats = Reference(
         ws_dash,
         min_col=1,
-        min_row=8,
-        max_row=7 + len(summary_table),
+        min_row=header_row + 1,
+        max_row=header_row + len(summary_table),
     )
 
     pie.add_data(pie_data, titles_from_data=True)
@@ -1138,7 +1396,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     pie.width = 13
     pie.legend.position = "r"
 
-    ws_dash.add_chart(pie, "I28")
+    ws_dash.add_chart(pie, f"I{chart_anchor_row}")
 
     for col in range(1, 12):
         ws_dash.column_dimensions[get_column_letter(col)].width = 18
@@ -1150,7 +1408,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.column_dimensions["J"].width = 35
     ws_dash.column_dimensions["K"].width = 35
 
-    ws_dash.freeze_panes = "A7"
+    ws_dash.freeze_panes = f"A{header_row}"
 
 
 def build_email_draft(
@@ -1163,8 +1421,8 @@ def build_email_draft(
     present_recommendations,
     recommendations,
     board_analysis_text=None,
+    oc_matches=None,
 ):
-
     total_present = len(present_recommendations)
     total_needed = int(summary_table["Needed"].sum())
     total_assigned = int(summary_table["Assigned"].sum())
@@ -1175,7 +1433,6 @@ def build_email_draft(
     staffing_lines = []
 
     for task, row in summary_table.iterrows():
-
         staffing_lines.append(
             f"- {task}: "
             f"Need {int(row['Needed'])}, "
@@ -1187,6 +1444,18 @@ def build_email_draft(
     top_recommendations = "\n".join(
         [f"- {rec}" for rec in recommendations[:8]]
     )
+
+    oc_email_block = ""
+    if oc_matches:
+        oc_lines = ["\n⚠ OPPORTUNITY CUSTOMER ALERT:"]
+        for match in oc_matches:
+            c = match["customer"]
+            oc_lines.append(f"  - {c['name'].upper()} [{c['priority']}]: {c['requirements']}")
+            if c["sign_off"]:
+                oc_lines.append("    → Supervisor sign-off REQUIRED before shipping.")
+            if c["pictures"]:
+                oc_lines.append("    → 6 photos required (3 on dock, 3 loading). Email to manager.")
+        oc_email_block = "\n".join(oc_lines)
 
     body = f"""
 Good morning,
@@ -1204,13 +1473,13 @@ Daily Inputs:
 
 Staffing Summary:
 {chr(10).join(staffing_lines)}
+{oc_email_block}
 
 Key Recommendations / What-Ifs:
 {top_recommendations}
 """
 
     if board_analysis_text:
-
         body += f"""
 
 Board Analysis:
@@ -1278,6 +1547,19 @@ board_file = st.file_uploader(
 
 if board_file:
     st.success("Board file loaded — ready for analysis.")
+
+# ── OC List preview (expandable) ─────────────────────────────────────────────
+with st.expander("📋 View Opportunity Customer List (embedded)"):
+    oc_preview_rows = []
+    for c in OC_CUSTOMER_LIST:
+        oc_preview_rows.append({
+            "Customer": c["name"].title(),
+            "Priority": c["priority"],
+            "Issue": c["issue"],
+            "Sign-Off Required": "Yes" if c["sign_off"] else "No",
+            "Photos Required": "Yes" if c["pictures"] else "No",
+        })
+    st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
 
 st.markdown("---")
 
@@ -1365,13 +1647,25 @@ if st.button("Generate Staffing Report"):
 
     write_recommendations_to_excel(wb, staff)
 
-    build_dashboard(wb, summary_table, present_recommendations, recommendations)
-
     board_analysis_text = None
+    oc_matches = []
 
     if board_file is not None:
-        with st.spinner("Reading board file → running analysis → validating → finalizing..."):
+        with st.spinner("Reading board file → scanning for Opportunity Customers → running analysis → validating → finalizing..."):
             board_text = read_board_file_to_text(board_file)
+
+            # ── OC detection ─────────────────────────────────────────────────
+            oc_matches = find_oc_customers_in_board(board_text)
+            oc_alert_text = build_oc_alert_text(oc_matches)
+
+            if oc_matches:
+                customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
+                st.warning(
+                    f"⚠️ **Opportunity Customer Alert:** "
+                    f"The following customers were detected on today's board and require special handling: "
+                    f"**{', '.join(customer_names_found)}**. "
+                    f"See the OC Alerts section below for full requirements."
+                )
 
             board_analysis_text = analyze_board_with_groq(
                 board_text=board_text,
@@ -1388,9 +1682,12 @@ if st.button("Generate Staffing Report"):
                 cases_to_pick=cases_to_pick,
                 inbound_pallets=inbound_pallets,
                 notes=notes,
+                oc_alert_text=oc_alert_text,
             )
 
-            write_board_analysis_to_excel(wb, board_analysis_text)
+            write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
+
+    build_dashboard(wb, summary_table, present_recommendations, recommendations, oc_matches=oc_matches)
 
     output = BytesIO()
     wb.save(output)
@@ -1402,6 +1699,27 @@ if st.button("Generate Staffing Report"):
         pass
 
     st.success("Staffing report generated successfully.")
+
+    # ── OC Alerts UI block ────────────────────────────────────────────────────
+    if oc_matches:
+        st.markdown("---")
+        st.subheader("⚠️ Opportunity Customer Alerts")
+        st.error(
+            "The following customers on today's board are on the **Opportunity Customer List** "
+            "and require special DC actions before their loads ship."
+        )
+
+        for match in oc_matches:
+            c = match["customer"]
+            with st.expander(f"🔴 {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**Issue History:** {c['issue']}")
+                st.markdown(f"**DC Requirements:** {c['requirements']}")
+                if c["sign_off"]:
+                    st.markdown("🔒 **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                if c["pictures"]:
+                    st.markdown("📷 **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+    elif board_file is not None:
+        st.info("✅ No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
@@ -1445,6 +1763,7 @@ if st.button("Generate Staffing Report"):
         present_recommendations=present_recommendations,
         recommendations=recommendations,
         board_analysis_text=board_analysis_text,
+        oc_matches=oc_matches,
     )
 
     st.markdown("---")
