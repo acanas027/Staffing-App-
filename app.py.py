@@ -1438,9 +1438,9 @@ email_subject, email_body = build_email_draft(
         board_analysis_text=board_analysis_text,
     )
 
-    st.markdown("---")
-    st.subheader("Email Ready to Send")
+st.markdown("---")
+st.subheader("Email Ready to Send")
 
-    st.text_input("Email Subject", value=email_subject)
+st.text_input("Email Subject", value=email_subject)
 
-    st.text_area("Email Body", value=email_body, height=500)
+st.text_area("Email Body", value=email_body, height=500)
