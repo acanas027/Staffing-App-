@@ -158,7 +158,8 @@ def calculate_needed(
     }
 
     needed = {
-        "Unloading": whole_workers(raw_needed["Unloading"]),
+        # ── CHANGE 1: Unloading now has a hard minimum of 2, same as Receiving ──
+        "Unloading": max(2, whole_workers(raw_needed["Unloading"])),
         "Receiving": max(2, whole_workers(raw_needed["Receiving"])),
         "Picking": whole_workers(raw_needed["Picking"]),
         "Tasking": whole_workers(
@@ -493,7 +494,7 @@ def build_recommendations(
     return recommendations
 
 
-# BOARD EXCEL READING 
+# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
 
 def read_board_file_to_text(board_file):
     """
@@ -505,7 +506,7 @@ def read_board_file_to_text(board_file):
     board_file.seek(0)
     file_name = board_file.name.lower()
 
-    # CSV path 
+    # CSV path
     if file_name.endswith(".csv"):
         try:
             df = pd.read_csv(board_file)
@@ -514,54 +515,48 @@ def read_board_file_to_text(board_file):
         except Exception as e:
             return f"Could not read CSV board file: {e}"
 
-    # Excel path — cell-level read with color detection 
+    # Excel path — cell-level read with color detection
     try:
         board_file.seek(0)
-        wb = load_workbook(board_file, data_only=True)   # data_only=True → formula results
+        wb = load_workbook(board_file, data_only=True)
         sections = []
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
 
-            # Collect rows, skipping completely empty ones
             rows_data = []
             headers = None
 
             for row_idx, row in enumerate(ws.iter_rows(), start=1):
                 row_values = []
-                color_flags = []
 
                 for cell in row:
                     val = cell.value
                     val_str = "" if val is None else str(val).strip()
 
-                    # Detect fill color flags
                     fill = cell.fill
                     fill_color = ""
                     if fill and fill.fgColor and fill.fgColor.type == "rgb":
-                        fill_color = fill.fgColor.rgb.upper()  # e.g. "FFFFFF00" = yellow
+                        fill_color = fill.fgColor.rgb.upper()
 
-                    # Detect font color flags
                     font = cell.font
                     font_color = ""
                     if font and font.color and font.color.type == "rgb":
                         font_color = font.color.rgb.upper()
 
-                    # Annotate special cells inline so the AI sees them clearly
                     flags = []
-                    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):        # yellow variants
+                    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):
                         flags.append("[LOAD-CHECK]")
-                    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF",    # light-blue variants
+                    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF",
                                         "FFB0E0E6", "FF00BFFF"):
                         flags.append("[TT4-NEEDED]")
 
-                    if font_color in ("FFFF0000", "00FF0000"):                  # red font
+                    if font_color in ("FFFF0000", "00FF0000"):
                         flags.append("[CANADIAN]")
 
                     annotated = val_str + (" " + " ".join(flags) if flags else "")
                     row_values.append(annotated)
 
-                # Skip rows that are entirely blank
                 if all(v.strip() == "" for v in row_values):
                     continue
 
@@ -573,7 +568,6 @@ def read_board_file_to_text(board_file):
             if not rows_data:
                 continue
 
-            # Build a simple CSV-style block for this sheet
             section_lines = [f"--- SHEET: {sheet_name} ---"]
             if headers:
                 section_lines.append(",".join(headers))
@@ -635,16 +629,16 @@ def analyze_board_with_groq(
         if status == "YES"
     ]
 
-    prompt = f"""
+    # ── Shared base prompt used across all three passes ───────────────────────
+    base_context = f"""
 You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
-Use short bullet points. don't over explain. 
+Use short bullet points. don't over explain.
 
-When reading: separate loads and their data by day, focus on today but still mention when they are still loads on the board from days before, from what day and what is happening with them. 
-
+When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
 
 Additional warehouse operation context:
-This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 5 am to 4 pm with 9.5 workable hours. Setting up the second shift for success can varies, but if my morning shift have all loads RTL and the appointments are until 3pm that is still success, not behind. 
-The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12. 
+This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 5 am to 4 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 3pm that is still success, not behind.
+The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12.
 
 The manager using this system is focused on:
 - Preventing shorts
@@ -663,31 +657,16 @@ Operational priorities from highest to lowest:
 5. Use extra labor proactively
 
 Operational definitions:
-
-- RTL = Ready To Load
-  Product is staged and ready. Loader can execute.
-
-- R/S = Ready/Short
-  Load is mostly ready but missing full pallets or replenishment inventory.
-  This is a major operational risk and can quickly become late.
-
+- RTL = Ready To Load: Product is staged and ready. Loader can execute.
+- R/S = Ready/Short: Load is mostly ready but missing full pallets or replenishment inventory. This is a major operational risk and can quickly become late.
 - Picking = Order currently being picked.
-
-- Picking/Short = Picking in progress but inventory shortages are occurring.
-  This usually means replenishment or manufacturing support is needed.
-
-- Loaded Short = Trailer loaded but missing product.
-  This is a severe service risk.
-
-- Live = Trailer physically waiting at the dock.
-  Live loads always have higher priority than drop trailers.
-
+- Picking/Short = Picking in progress but inventory shortages are occurring. This usually means replenishment or manufacturing support is needed.
+- Loaded Short = Trailer loaded but missing product. This is a severe service risk.
+- Live = Trailer physically waiting at the dock. Live loads always have higher priority than drop trailers.
 - Drop = Trailer can wait longer and has lower urgency.
-
 - Late = Appointment time already missed or at risk.
 
 Important labor behavior rules:
-
 - Pickers should stay picking whenever possible.
 - Tasking/replenishment exists mainly to protect pickers from running out of product.
 - If replenishment falls behind, pickers stop producing.
@@ -696,14 +675,12 @@ Important labor behavior rules:
 - Lead/Extra labor should be used proactively before the operation falls behind.
 
 Operational productivity assumptions:
-
 - 1 picker averages 185 cases/hour
 - 1 loader averages 1 trailer/hour
 - 1 unloader averages 44 pallets/hour
 - 1 replenishment/tasking worker averages 25 pallet moves/hour
 
 Risk interpretation rules:
-
 - Multiple Picking/Short loads means replenishment is failing.
 - Multiple R/S loads means outbound may miss appointments.
 - Late live loads are highest priority.
@@ -712,10 +689,7 @@ Risk interpretation rules:
 - If outbound workload is heavier than staffing, recommend labor moves immediately.
 
 Management philosophy:
-
-The goal is not only to survive the shift.
-The goal is to get ahead early enough that later appointments are protected.
-We only sending people to manufacturing if it's going to benefit us.
+The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if it's going to benefit us.
 
 The manager prefers:
 - proactive recommendations
@@ -734,7 +708,7 @@ When making recommendations:
 - Prioritize live loads, shorts, and dock flow
 - Think like an experienced outbound operations manager
 
-Here is today's operational context:
+Today's operational context:
 - Day: {day}, Shift: {shift}
 - Total cases forecast for today: {total_cases:,}
 - Cases to pick this shift: {cases_to_pick:,.0f}
@@ -763,7 +737,10 @@ Board data rules and operation rules:
 
 Here is the outbound board data extracted directly from the Excel file:
 {board_text}
+"""
 
+    # ── Structured output sections the final pass must cover ──────────────────
+    output_structure = """
 Read the board carefully row by row.
 
 Give me a clear, practical warehouse manager analysis in plain English covering:
@@ -773,18 +750,17 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Specify how many loads are completed today out of the total for the day.
 - Specify any late loads, from when, if they are occupying a door, and which door.
 
-
 2. Picking & Short Risk:
 - How many loads have not been started?
-- Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why. 
-- How big is the risk? Explain what are the risk factors. 
+- Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why.
+- How big is the risk? Explain what are the risk factors.
 - Can we get ahead? Yes or no and why
 - Given all this information, how far ahead can we finish this shift?
 - Give me the load appointment times we should be picking by the end of this shift.
-- Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks Specify people from what areas we can move staff from and to where.
+- Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks? Specify people from what areas we can move staff from and to where.
 
 3. Prioritization:
-- Are there any loads we should prioritize? Be specific add load numbers
+- Are there any loads we should prioritize? Be specific, add load numbers.
 - How and why should we prioritize them?
 
 4. Cross-Analysis with Staffing:
@@ -797,35 +773,98 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - What are the 3 most important things the manager should do in the next 30 minutes?
 - What are the 3 most important things the manager should do in the next 2 hours to achieve today's goal?
 
-
-Make sure every recommendation and suggested action is achievable and following the same direction. 
-Have somewhere where you clearly set the expectations for the shift and explain why. I want this easy to identify. 
+Make sure every recommendation and suggested action is achievable and following the same direction.
+Have somewhere where you clearly set the expectations for the shift and explain why. I want this easy to identify.
 Keep the tone like a smart, experienced ops manager talking to another manager.
 No corporate fluff.
 Be clear, practical, and actionable.
 Add times and case/pallet numbers to every goal so progress is measurable.
 Include what-if scenarios: if X happens, here is what to do.
-Only use data, do not guess
-Talk about how you are heading the second shift for success. 
-When suggesting to think about moving staff specify from where to where. 
-Remember even though we have 62 loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. Read the board and check the times. 
-When making suggestions that we should be ready to load up to a specific hour do not use a range, be specific. 
+Only use data, do not guess.
+Talk about how you are heading the second shift for success.
+When suggesting to think about moving staff specify from where to where.
+Remember even though we have loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. Read the board and check the times.
+When making suggestions that we should be ready to load up to a specific hour do not use a range, be specific.
 """
 
     try:
-        response = client.chat.completions.create(
+        # ── PASS 1: Initial analysis ──────────────────────────────────────────
+        initial_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "user",
-                    "content": prompt,
+                    "content": base_context + output_structure,
                 }
             ],
             temperature=0.2,
             max_completion_tokens=2500,
         )
 
-        return response.choices[0].message.content
+        initial_analysis = initial_response.choices[0].message.content
+
+        # ── PASS 2: Validation — check counts, contradictions, logic errors ───
+        validation_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a meticulous warehouse operations auditor. "
+                        "Your only job is to validate the operational analysis below against the raw board data and operational context provided. "
+                        "Check for: incorrect load counts by status, wrong load numbers referenced, "
+                        "contradictory statements (e.g. saying a load is RTL and also Picking), "
+                        "math errors in labor or case projections, recommendations that conflict with stated priorities, "
+                        "and any invented data not present in the board. "
+                        "Be specific about each issue found. If something is correct, confirm it. "
+                        "Do not rewrite the full analysis — only list what needs to be corrected and what is confirmed accurate. "
+                        "Keep it concise and factual."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"=== ORIGINAL BOARD DATA AND CONTEXT ===\n{base_context}\n\n"
+                        f"=== INITIAL ANALYSIS TO VALIDATE ===\n{initial_analysis}"
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_completion_tokens=1200,
+        )
+
+        validation_notes = validation_response.choices[0].message.content
+
+        # ── PASS 3: Final synthesis — apply corrections, produce clean output ─
+        final_response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an experienced warehouse operations shift manager. "
+                        "You have an initial operational analysis and a validation audit that flags any errors or confirms accuracy. "
+                        "Your job is to produce the final, corrected, clean analysis. "
+                        "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
+                        "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
+                        "as if you are delivering it directly to the shift manager. "
+                        "Follow the exact same output structure as the initial analysis."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"=== INITIAL ANALYSIS ===\n{initial_analysis}\n\n"
+                        f"=== VALIDATION NOTES (apply these corrections) ===\n{validation_notes}\n\n"
+                        f"=== OUTPUT STRUCTURE TO FOLLOW ===\n{output_structure}"
+                    ),
+                },
+            ],
+            temperature=0.2,
+            max_completion_tokens=2500,
+        )
+
+        return final_response.choices[0].message.content
 
     except Exception as e:
         return f"Board analysis could not be completed: {str(e)}"
@@ -881,7 +920,7 @@ def write_board_analysis_to_excel(wb, analysis_text):
     ws.column_dimensions["A"].width = 110
 
 
-# ── WRITTEN RECOMMENDATIONS ──────────────────────────────────────────────────
+# ── WRITTEN RECOMMENDATIONS ───────────────────────────────────────────────────
 
 def write_recommendations_to_excel(wb, staff):
     ws_staff = wb["Staffing sheet 1ST Shift"]
@@ -1114,7 +1153,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.freeze_panes = "A7"
 
 
-# ── STREAMLIT INTERFACE ──────────────────────────────────────────────────────
+# ── STREAMLIT INTERFACE ───────────────────────────────────────────────────────
 
 st.sidebar.header("Daily Inputs")
 
@@ -1257,7 +1296,7 @@ if st.button("Generate Staffing Report"):
     board_analysis_text = None
 
     if board_file is not None:
-        with st.spinner("Reading board Excel file and analyzing with Groq AI..."):
+        with st.spinner("Reading board file → running analysis → validating → finalizing..."):
             board_text = read_board_file_to_text(board_file)
 
             board_analysis_text = analyze_board_with_groq(
