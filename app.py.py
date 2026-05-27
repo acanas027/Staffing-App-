@@ -1122,9 +1122,9 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
-                oc_lines.append("⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
+                oc_lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
             if c["pictures"]:
-                oc_lines.append("📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+                oc_lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
 
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
@@ -1537,10 +1537,10 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("📋 Outbound Board Excel / CSV")
+st.subheader(" Outbound Board Excel ")
 
 board_file = st.file_uploader(
-    "Upload the outbound load board Excel or CSV file",
+    "Upload the outbound load board Excel",
     type=["xlsx", "xls", "csv"],
     help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
@@ -1549,7 +1549,7 @@ if board_file:
     st.success("Board file loaded — ready for analysis.")
 
 # ── OC List preview (expandable) ─────────────────────────────────────────────
-with st.expander("📋 View Opportunity Customer List (embedded)"):
+with st.expander("View Opportunity Customer List (embedded)"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
         oc_preview_rows.append({
@@ -1661,7 +1661,7 @@ if st.button("Generate Staffing Report"):
             if oc_matches:
                 customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
                 st.warning(
-                    f"⚠️ **Opportunity Customer Alert:** "
+                    f" **Opportunity Customer Alert:** "
                     f"The following customers were detected on today's board and require special handling: "
                     f"**{', '.join(customer_names_found)}**. "
                     f"See the OC Alerts section below for full requirements."
