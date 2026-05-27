@@ -23,7 +23,7 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
-# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
+#  OPPORTUNITY CUSTOMER LIST 
 # Each entry: customer name (lowercase for matching), issue summary, DC requirements
 OC_CUSTOMER_LIST = [
     {
@@ -1700,26 +1700,7 @@ if st.button("Generate Staffing Report"):
 
     st.success("Staffing report generated successfully.")
 
-    # ── OC Alerts UI block ────────────────────────────────────────────────────
-    if oc_matches:
-        st.markdown("---")
-        st.subheader("⚠️ Opportunity Customer Alerts")
-        st.error(
-            "The following customers on today's board are on the **Opportunity Customer List** "
-            "and require special DC actions before their loads ship."
-        )
 
-        for match in oc_matches:
-            c = match["customer"]
-            with st.expander(f"🔴 {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
-                st.markdown(f"**Issue History:** {c['issue']}")
-                st.markdown(f"**DC Requirements:** {c['requirements']}")
-                if c["sign_off"]:
-                    st.markdown("🔒 **DC Supervisor Sign-Off REQUIRED before this load ships.**")
-                if c["pictures"]:
-                    st.markdown("📷 **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
-    elif board_file is not None:
-        st.info("✅ No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
@@ -1753,6 +1734,26 @@ if st.button("Generate Staffing Report"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+        # ── OC Alerts UI block ────────────────────────────────────────────────────
+    if oc_matches:
+        st.markdown("---")
+        st.subheader(" Opportunity Customer Alerts")
+        st.error(
+            "The following customers on today's board are on the **Opportunity Customer List** "
+            "and require special DC actions before their loads ship."
+        )
+
+        for match in oc_matches:
+            c = match["customer"]
+            with st.expander(f" {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**DC Requirements:** {c['requirements']}")
+                if c["sign_off"]:
+                    st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                if c["pictures"]:
+                    st.markdown("**Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+    elif board_file is not None:
+        st.info(" No Opportunity Customers detected on today's board.")
+        
     email_subject, email_body = build_email_draft(
         day=day,
         shift=shift,
