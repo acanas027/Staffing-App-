@@ -1419,32 +1419,6 @@ if st.button("Generate Staffing Report"):
         )
         st.markdown(board_analysis_text)
 
-email_subject, email_body = build_email_draft(
-    day=day,
-    shift=shift,
-    total_cases=total_cases,
-    hours_remaining=hours_remaining,
-    total_outbound_loads_day=total_outbound_loads_day,
-    summary_table=summary_table,
-    present_recommendations=present_recommendations,
-    recommendations=recommendations,
-    board_analysis_text=board_analysis_text,
-)
-
-st.markdown("---")
-st.subheader("Email Ready to Send")
-
-st.text_input(
-    "Email Subject",
-    value=email_subject
-)
-
-st.text_area(
-    "Email Body",
-    value=email_body,
-    height=500,
-)
-
 st.download_button(
         label="Download Staffing Report",
         data=output,
@@ -1452,4 +1426,21 @@ st.download_button(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    email_subject, email_body = build_email_draft(
+        day=day,
+        shift=shift,
+        total_cases=total_cases,
+        hours_remaining=hours_remaining,
+        total_outbound_loads_day=total_outbound_loads_day,
+        summary_table=summary_table,
+        present_recommendations=present_recommendations,
+        recommendations=recommendations,
+        board_analysis_text=board_analysis_text,
+    )
 
+    st.markdown("---")
+    st.subheader("Email Ready to Send")
+
+    st.text_input("Email Subject", value=email_subject)
+
+    st.text_area("Email Body", value=email_body, height=500)
