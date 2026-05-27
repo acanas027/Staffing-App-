@@ -1165,6 +1165,67 @@ def build_email_draft(
     board_analysis_text=None,
 ):
 
+    total_present = len(present_recommendations)
+    total_needed = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    overall_gap = total_assigned - total_needed
+
+    subject = f"{day} {shift} Shift Staffing Report"
+
+    staffing_lines = []
+
+    for task, row in summary_table.iterrows():
+
+        staffing_lines.append(
+            f"- {task}: "
+            f"Need {int(row['Needed'])}, "
+            f"Assigned {int(row['Assigned'])}, "
+            f"Gap {int(row['Difference'])} "
+            f"({row['Status']})"
+        )
+
+    top_recommendations = "\n".join(
+        [f"- {rec}" for rec in recommendations[:8]]
+    )
+
+    body = f"""
+Good morning,
+
+Here is the staffing report for {day} {shift} shift.
+
+Daily Inputs:
+- Total cases: {total_cases:,}
+- Total outbound loads: {total_outbound_loads_day}
+- Hours remaining: {hours_remaining}
+- Total present: {total_present}
+- Total needed: {total_needed}
+- Total assigned: {total_assigned}
+- Overall labor gap: {overall_gap}
+
+Staffing Summary:
+{chr(10).join(staffing_lines)}
+
+Key Recommendations / What-Ifs:
+{top_recommendations}
+"""
+
+    if board_analysis_text:
+
+        body += f"""
+
+Board Analysis:
+{board_analysis_text}
+"""
+
+    body += """
+
+The full staffing report is attached.
+
+Thanks,
+"""
+
+    return subject, body.strip()
+
 
 # ── STREAMLIT INTERFACE ───────────────────────────────────────────────────────
 
