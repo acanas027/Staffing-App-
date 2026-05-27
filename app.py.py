@@ -1163,7 +1163,7 @@ def build_email_draft(
     present_recommendations,
     recommendations,
     board_analysis_text=None,
-)
+):
 
 
 # ── STREAMLIT INTERFACE ───────────────────────────────────────────────────────
