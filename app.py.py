@@ -23,7 +23,7 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
-#  OPPORTUNITY CUSTOMER LIST 
+# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
 # Each entry: customer name (lowercase for matching), issue summary, DC requirements
 OC_CUSTOMER_LIST = [
     {
@@ -1122,9 +1122,9 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
-                oc_lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
+                oc_lines.append("⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
             if c["pictures"]:
-                oc_lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+                oc_lines.append("📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
 
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
@@ -1537,7 +1537,7 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader(" Outbound Board Excel ")
+st.subheader("Outbound Board Excel")
 
 board_file = st.file_uploader(
     "Upload the outbound load board Excel",
@@ -1549,7 +1549,7 @@ if board_file:
     st.success("Board file loaded — ready for analysis.")
 
 # ── OC List preview (expandable) ─────────────────────────────────────────────
-with st.expander("View Opportunity Customer List (embedded)"):
+with st.expander(" View Opportunity Customer List (embedded)"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
         oc_preview_rows.append({
@@ -1658,15 +1658,6 @@ if st.button("Generate Staffing Report"):
             oc_matches = find_oc_customers_in_board(board_text)
             oc_alert_text = build_oc_alert_text(oc_matches)
 
-            if oc_matches:
-                customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
-                st.warning(
-                    f" **Opportunity Customer Alert:** "
-                    f"The following customers were detected on today's board and require special handling: "
-                    f"**{', '.join(customer_names_found)}**. "
-                    f"See the OC Alerts section below for full requirements."
-                )
-
             board_analysis_text = analyze_board_with_groq(
                 board_text=board_text,
                 day=day,
@@ -1700,8 +1691,6 @@ if st.button("Generate Staffing Report"):
 
     st.success("Staffing report generated successfully.")
 
-
-
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
 
@@ -1727,14 +1716,7 @@ if st.button("Generate Staffing Report"):
         )
         st.markdown(board_analysis_text)
 
-    st.download_button(
-        label="Download Staffing Report",
-        data=output,
-        file_name="Staffing Report Generated.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-        # ── OC Alerts UI block ────────────────────────────────────────────────────
+    # ── OC Alerts UI block ────────────────────────────────────────────────────
     if oc_matches:
         st.markdown("---")
         st.subheader(" Opportunity Customer Alerts")
@@ -1745,7 +1727,8 @@ if st.button("Generate Staffing Report"):
 
         for match in oc_matches:
             c = match["customer"]
-            with st.expander(f" {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+            with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
                     st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
@@ -1753,7 +1736,14 @@ if st.button("Generate Staffing Report"):
                     st.markdown("**Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
     elif board_file is not None:
         st.info(" No Opportunity Customers detected on today's board.")
-        
+
+    st.download_button(
+        label="Download Staffing Report",
+        data=output,
+        file_name="Staffing Report Generated.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
     email_subject, email_body = build_email_draft(
         day=day,
         shift=shift,
