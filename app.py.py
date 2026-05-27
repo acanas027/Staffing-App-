@@ -1153,6 +1153,71 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations)
     ws_dash.freeze_panes = "A7"
 
 
+def build_email_draft(
+    day,
+    shift,
+    total_cases,
+    hours_remaining,
+    total_outbound_loads_day,
+    summary_table,
+    present_recommendations,
+    recommendations,
+    board_analysis_text=None,
+):
+    total_present = len(present_recommendations)
+    total_needed = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    overall_gap = total_assigned - total_needed
+
+    subject = f"{day} {shift} Shift Staffing Report"
+
+    staffing_lines = []
+    for task, row in summary_table.iterrows():
+        staffing_lines.append(
+            f"- {task}: Need {int(row['Needed'])}, Assigned {int(row['Assigned'])}, "
+            f"Gap {int(row['Difference'])} ({row['Status']})"
+        )
+
+    top_recommendations = "\n".join([f"- {rec}" for rec in recommendations[:8]])
+
+    body = f"""
+Good morning,
+
+Here is the staffing report for {day} {shift} shift.
+
+Daily Inputs:
+- Total cases: {total_cases:,}
+- Total outbound loads: {total_outbound_loads_day}
+- Hours remaining: {hours_remaining}
+- Total present: {total_present}
+- Total needed: {total_needed}
+- Total assigned: {total_assigned}
+- Overall labor gap: {overall_gap}
+
+Staffing Summary:
+{chr(10).join(staffing_lines)}
+
+Key Recommendations / What-Ifs:
+{top_recommendations}
+"""
+
+    if board_analysis_text:
+        body += f"""
+
+Board Analysis:
+{board_analysis_text}
+"""
+
+    body += """
+
+The full staffing report is attached.
+
+Thanks,
+"""
+
+    return subject, body.strip()
+
+
 # ── STREAMLIT INTERFACE ───────────────────────────────────────────────────────
 
 st.sidebar.header("Daily Inputs")
@@ -1194,10 +1259,10 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("📋 Outbound Board Excel / CSV")
+st.subheader(" Outbound Board Excel")
 
 board_file = st.file_uploader(
-    "Upload the outbound load board Excel or CSV file",
+    "Upload the outbound load board Excel file",
     type=["xlsx", "xls", "csv"],
     help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
@@ -1354,9 +1419,35 @@ if st.button("Generate Staffing Report"):
         )
         st.markdown(board_analysis_text)
 
+
+    email_subject, email_body = build_email_draft(
+    day=day,
+    shift=shift,
+    total_cases=total_cases,
+    hours_remaining=hours_remaining,
+    total_outbound_loads_day=total_outbound_loads_day,
+    summary_table=summary_table,
+    present_recommendations=present_recommendations,
+    recommendations=recommendations,
+    board_analysis_text=board_analysis_text,
+)
+
+st.markdown("---")
+st.subheader("Email Ready to Send")
+
+st.text_input("Email Subject", value=email_subject)
+
+st.text_area(
+    "Email Body",
+    value=email_body,
+    height=500,
+)
+
     st.download_button(
         label="Download Staffing Report",
         data=output,
         file_name="Staffing Report Generated.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
