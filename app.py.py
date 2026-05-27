@@ -1419,8 +1419,7 @@ if st.button("Generate Staffing Report"):
         )
         st.markdown(board_analysis_text)
 
-
-    email_subject, email_body = build_email_draft(
+email_subject, email_body = build_email_draft(
     day=day,
     shift=shift,
     total_cases=total_cases,
@@ -1435,7 +1434,10 @@ if st.button("Generate Staffing Report"):
 st.markdown("---")
 st.subheader("Email Ready to Send")
 
-st.text_input("Email Subject", value=email_subject)
+st.text_input(
+    "Email Subject",
+    value=email_subject
+)
 
 st.text_area(
     "Email Body",
