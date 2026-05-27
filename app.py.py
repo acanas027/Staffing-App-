@@ -494,8 +494,6 @@ def build_recommendations(
 
 
 # BOARD EXCEL READING 
-# Reads directly from Excel cell values — no OCR, no image processing.
-# openpyxl is used so we can also capture cell fill colors for status flags.
 
 def read_board_file_to_text(board_file):
     """
@@ -773,7 +771,8 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 1. Board Summary:
 - Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Completed, blank/not started, etc.
 - Specify how many loads are completed today out of the total for the day.
-- Specify if any late loads are occupying a door, and which door.
+- Specify any late loads, from when, if they are occupying a door, and which door.
+
 
 2. Picking & Short Risk:
 - How many loads have not been started?
