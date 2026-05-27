@@ -1426,7 +1426,7 @@ st.download_button(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    email_subject, email_body = build_email_draft(
+email_subject, email_body = build_email_draft(
         day=day,
         shift=shift,
         total_cases=total_cases,
