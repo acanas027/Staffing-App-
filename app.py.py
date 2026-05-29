@@ -6,6 +6,7 @@ from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.utils import get_column_letter
 from io import BytesIO
 import json
+import re
 import os
 import shutil
 from openai import OpenAI
@@ -698,10 +699,9 @@ def build_recommendations(
             "CPU loads referenced. Ensure loading labor is protected."
         )
 
-    return recommendations
-
-
-# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
+    return recommen# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
+# This section makes Python parse the board first, then sends verified JSON to AI.
+# The AI should interpret the data, not guess the data.
 
 BOARD_STATUS_KEYWORDS = [
     "Loaded Short",
@@ -751,15 +751,38 @@ def board_cell_flags(cell):
 def normalize_board_text(value):
     if value is None:
         return ""
-    return str(value).replace("\n", " ").strip()
+    text = str(value).replace("\n", " ").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
 
 
 def looks_like_load_number(value):
+    """
+    Real board load numbers are usually 5-9 digits.
+    This intentionally rejects dates, times, door numbers, and appointment times.
+    """
     text = normalize_board_text(value)
-    text = re.sub(r"\.0$", "", text)
+
+    if not text:
+        return ""
+
+    if re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", text):
+        return ""
+
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return ""
+
+    if re.fullmatch(r"\d{1,2}", text):
+        return ""
+
     text = re.sub(r"^LD", "", text, flags=re.IGNORECASE)
     digits = re.sub(r"[^0-9]", "", text)
-    return digits if 5 <= len(digits) <= 9 else ""
+
+    if 5 <= len(digits) <= 9:
+        return digits
+
+    return ""
 
 
 def detect_board_day(row_text):
@@ -776,16 +799,28 @@ def detect_board_date(row_text):
     return ""
 
 
+def detect_board_time_from_text(text):
+    text = normalize_board_text(text)
+
+    if not text:
+        return ""
+
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return normalize_time(text)
+
+    return ""
+
+
 def detect_board_time(row_values):
     for value in row_values:
-        candidate = normalize_time(value)
+        candidate = detect_board_time_from_text(value)
         if candidate:
             return candidate
     return ""
 
 
 def detect_board_status(row_text):
-    text = row_text.upper()
+    text = normalize_board_text(row_text).upper()
 
     if "LOADED SHORT" in text:
         return "Loaded Short"
@@ -809,36 +844,44 @@ def detect_board_status(row_text):
     return ""
 
 
+def clean_board_header_key(value):
+    return normalize_header(value)
+
+
 def build_header_map_from_row(row_values):
+    """
+    Builds a header map when the board has a real header row.
+    Uses careful matching so 'Load Type' does not accidentally become the load-number column.
+    """
     header_map = {}
 
     for idx, value in enumerate(row_values):
-        header = normalize_header(value)
+        header = clean_board_header_key(value)
 
         if not header:
             continue
 
-        if "LOAD" in header or header in ["LD", "LOADNUMBER", "LOADREF"]:
+        if header in ["LOAD", "LOADNUMBER", "LOADNO", "LOADREF", "LOADREFERENCE", "ORDER", "ORDERNUMBER"]:
             header_map["load"] = idx
-        elif "CUSTOMER" in header or "CUST" in header or "DEST" in header or "SHIPTO" in header or "CONSIGNEE" in header:
+        elif header in ["DESTINATION", "CUSTOMER", "CUSTOMERNAME", "CUST", "SHIPTO", "CONSIGNEE", "CONSIGNEENAME"]:
             header_map["customer"] = idx
         elif "CARRIER" in header:
             header_map["carrier"] = idx
-        elif "TIME" in header or "APPT" in header:
+        elif header in ["TIME", "APPT", "APPTTIME", "APPOINTMENTTIME", "PUAPPTTIME"]:
             header_map["time"] = idx
-        elif "DOOR" in header or "DOCK" in header:
+        elif header in ["DOOR", "DOCK"]:
             header_map["door"] = idx
-        elif "TRAILER" in header:
+        elif header in ["TRAILER", "TRLR", "TRAILERNUMBER"]:
             header_map["trailer"] = idx
-        elif "STATUS" in header or "STAT" in header:
+        elif header in ["STATUS", "STAT"]:
             header_map["status"] = idx
-        elif "TYPE" in header:
+        elif header in ["TYPE", "LOADTYPE"]:
             header_map["type"] = idx
-        elif "TT4" in header:
+        elif header == "TT4":
             header_map["tt4"] = idx
-        elif "LOADER" in header or "EMPLOYEE" in header or "ASSIGNED" in header:
+        elif header in ["LOADER", "EMPLOYEE", "ASSIGNED"]:
             header_map["loader"] = idx
-        elif "COMMENT" in header or "NOTE" in header:
+        elif header in ["COMMENTS", "COMMENT", "NOTES", "NOTE"]:
             header_map["comments"] = idx
         elif "PICK" in header:
             header_map["picks"] = idx
@@ -852,7 +895,7 @@ def row_looks_like_header(row_values):
     text = " ".join(str(v).upper() for v in row_values if str(v).strip())
     hits = 0
 
-    for word in ["LOAD", "CUSTOMER", "CARRIER", "TIME", "DOOR", "STATUS", "TRAILER", "LOADER"]:
+    for word in ["LOAD", "DESTINATION", "CUSTOMER", "CARRIER", "TIME", "DOOR", "STATUS", "TRAILER", "LOADER", "COMMENTS"]:
         if word in text:
             hits += 1
 
@@ -866,21 +909,6 @@ def get_by_header(row_values, header_map, key):
     return normalize_board_text(row_values[idx])
 
 
-def detect_door(row_values, header_map):
-    door = get_by_header(row_values, header_map, "door")
-    if door:
-        return door
-
-    for value in row_values:
-        text = normalize_board_text(value)
-        if re.fullmatch(r"\d{1,3}", text):
-            number = int(text)
-            if 1 <= number <= 99:
-                return text
-
-    return ""
-
-
 def detect_ticket_count(row_values, header_map, key):
     value = get_by_header(row_values, header_map, key)
     if value:
@@ -888,7 +916,29 @@ def detect_ticket_count(row_values, header_map, key):
     return 0
 
 
+def first_nonempty_index(row_values):
+    for idx, value in enumerate(row_values):
+        if normalize_board_text(value):
+            return idx
+    return 0
+
+
+def find_status_column_value(row_values):
+    for value in row_values:
+        status = detect_board_status(value)
+        if status:
+            return status
+    return ""
+
+
 def parse_board_rows_from_records(records, source_name):
+    """
+    Parses your board layout:
+    Load | Destination | Carrier | Time | Door | Trailer | Status | TT4 | Loader | Comments
+
+    It also works when the first column/header is blank, because it searches for the first real load number
+    and then reads the columns relative to that load number.
+    """
     board_rows = []
     current_day = ""
     current_date = ""
@@ -896,7 +946,7 @@ def parse_board_rows_from_records(records, source_name):
 
     for record in records:
         row_number = record["row_number"]
-        row_values = record["values"]
+        row_values = [normalize_board_text(v) for v in record["values"]]
         row_flags = record.get("flags", [])
         row_text = " ".join(v for v in row_values if v)
 
@@ -906,16 +956,18 @@ def parse_board_rows_from_records(records, source_name):
         detected_day = detect_board_day(row_text)
         detected_date = detect_board_date(row_text)
 
-        load_candidates = [looks_like_load_number(v) for v in row_values]
-        load_candidates = [v for v in load_candidates if v]
+        load_candidates = []
+        for v in row_values:
+            candidate = looks_like_load_number(v)
+            if candidate:
+                load_candidates.append(candidate)
+
         has_load = bool(load_candidates)
 
-        # Header rows should update the map only when they are not actual load rows.
         if row_looks_like_header(row_values) and not has_load:
             header_map = build_header_map_from_row(row_values)
             continue
 
-        # Day/date rows in your board usually have no load number.
         if (detected_day or detected_date) and not has_load:
             if detected_day:
                 current_day = detected_day
@@ -935,7 +987,7 @@ def parse_board_rows_from_records(records, source_name):
                 if looks_like_load_number(v) == load_number
             )
         except StopIteration:
-            load_idx = 0
+            load_idx = first_nonempty_index(row_values)
 
         def get_pos(offset):
             idx = load_idx + offset
@@ -943,21 +995,20 @@ def parse_board_rows_from_records(records, source_name):
                 return normalize_board_text(row_values[idx])
             return ""
 
-        # Header-based read first. Positional fallback second.
-        # This matches the usual board layout:
-        # Load, Destination, Carrier, Time, Door, Trailer, Status, TT4, Loader, Comments
         customer = get_by_header(row_values, header_map, "customer") or get_pos(1)
         carrier = get_by_header(row_values, header_map, "carrier") or get_pos(2)
+
         appt_time = (
             get_by_header(row_values, header_map, "time")
-            or normalize_time(get_pos(3))
+            or detect_board_time_from_text(get_pos(3))
             or detect_board_time(row_values)
         )
+
         door = get_by_header(row_values, header_map, "door") or get_pos(4)
         trailer = get_by_header(row_values, header_map, "trailer") or get_pos(5)
 
         status_raw = get_by_header(row_values, header_map, "status") or get_pos(6)
-        status = detect_board_status(status_raw) or detect_board_status(row_text)
+        status = detect_board_status(status_raw) or find_status_column_value(row_values)
 
         load_type = get_by_header(row_values, header_map, "type")
         tt4 = get_by_header(row_values, header_map, "tt4") or get_pos(7)
@@ -998,10 +1049,33 @@ def parse_board_rows_from_records(records, source_name):
 
     return board_rows
 
+
 def board_records_from_excel(board_file):
     board_file.seek(0)
-    wb = load_workbook(board_file, data_only=True)
+    file_name = board_file.name.lower()
     all_board_rows = []
+
+    if file_name.endswith(".xls"):
+        sheets = pd.read_excel(board_file, sheet_name=None, header=None, engine="xlrd")
+
+        for sheet_name, df in sheets.items():
+            df = df.fillna("")
+            records = []
+
+            for idx, row in df.iterrows():
+                records.append(
+                    {
+                        "row_number": int(idx) + 1,
+                        "values": [normalize_board_text(v) for v in row.tolist()],
+                        "flags": [],
+                    }
+                )
+
+            all_board_rows.extend(parse_board_rows_from_records(records, sheet_name))
+
+        return all_board_rows
+
+    wb = load_workbook(board_file, data_only=True)
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
@@ -1117,6 +1191,7 @@ def build_python_board_summary(board_rows):
         if "COMPLETED" in status_upper or status_upper == "COMPLETE":
             summary["completed_loads"] += 1
 
+    # Count blank/not-started only after known statuses.
         if not row.get("status"):
             summary["blank_or_not_started_loads"] += 1
             summary["blank_or_not_started_details"].append(row)
@@ -1206,6 +1281,11 @@ def read_board_file_to_text(board_file):
         payload = {
             "python_verified_summary": board_summary,
             "structured_load_rows": compact_rows,
+            "debug": {
+                "file_name": board_file.name,
+                "rows_parsed_by_python": len(board_rows),
+                "message": "If rows_parsed_by_python is 0, the board layout did not match parser rules or the file could not be read.",
+            },
             "instructions_for_ai": [
                 "Use python_verified_summary as the source of truth for counts.",
                 "Use structured_load_rows for load-level details, load numbers, customers, status, doors, times, flags, and comments.",
@@ -1222,10 +1302,18 @@ def read_board_file_to_text(board_file):
                 "error": f"Could not read board file: {str(e)}",
                 "python_verified_summary": {},
                 "structured_load_rows": [],
+                "debug": {
+                    "file_name": getattr(board_file, "name", "Unknown"),
+                    "rows_parsed_by_python": 0,
+                    "error": str(e),
+                },
             },
             indent=2,
             ensure_ascii=False,
         )
+
+
+       )
 
 def analyze_board_with_groq(
     board_text,
