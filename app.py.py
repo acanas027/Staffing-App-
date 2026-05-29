@@ -1184,12 +1184,13 @@ def compact_board_rows_for_ai(board_rows):
 
     return compact_rows
 
-
 def read_board_file_to_text(board_file):
+
     board_file.seek(0)
     file_name = board_file.name.lower()
 
     try:
+
         if file_name.endswith(".csv"):
             board_rows = board_records_from_csv(board_file)
         else:
@@ -1198,43 +1199,36 @@ def read_board_file_to_text(board_file):
         board_summary = build_python_board_summary(board_rows)
         compact_rows = compact_board_rows_for_ai(board_rows)
 
-        # Show parser result inside Streamlit so you can confirm Python is reading the board.
-        st.write("Board parser rows read:", len(board_rows))
-        if board_rows:
-            st.write("First board row parsed:", compact_rows[0])
-
         payload = {
             "python_verified_summary": board_summary,
             "structured_load_rows": compact_rows,
-            "debug": {
-                "file_name": board_file.name,
-                "rows_parsed_by_python": len(board_rows),
-                "message": "This data was parsed by Python and should be used by AI as the source of truth.",
-            },
             "instructions_for_ai": [
                 "Use python_verified_summary as the source of truth for counts.",
-                "Use structured_load_rows for load-level details, load numbers, customers, status, doors, times, flags, and comments.",
-                "Do not invent load numbers or counts that are not present in this JSON.",
-                "If a field is blank, say unclear instead of guessing.",
-            ],
+                "Use structured_load_rows for load-level details.",
+            ]
         }
 
-        return json.dumps(payload, indent=2, ensure_ascii=False)
+        return json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False
+        )
 
-        except Exception as e:
-            error_message = str(e)
+    except Exception as e:
 
-            st.error(f"BOARD PARSER ERROR: {error_message}")
-            st.exception(e)
+        error_message = str(e)
 
-            return json.dumps(
-                {
-                    "error": f"Could not read board file: {error_message}",
-                    "python_verified_summary": {},
-                    "structured_load_rows": [],
-               },
-                indent=2,
-                ensure_ascii=False,
+        st.error(f"BOARD PARSER ERROR: {error_message}")
+        st.exception(e)
+
+        return json.dumps(
+            {
+                "error": f"Could not read board file: {error_message}",
+                "python_verified_summary": {},
+                "structured_load_rows": [],
+            },
+            indent=2,
+            ensure_ascii=False
         )
 
 def analyze_board_with_groq(
