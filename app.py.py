@@ -1047,7 +1047,7 @@ OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early 
                         "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
                         "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
                         "as if you are delivering it directly to the shift manager. "
-                        "Make sure to count the loads per day from every cell, this number has to be accurate. 
+                        "Make sure to count the loads per day from every cell. "
                         "Follow the exact same output structure as the initial analysis. "
                         "Opportunity Customer (OC) alerts must appear early and be complete — never omit or shorten them."
                     ),
