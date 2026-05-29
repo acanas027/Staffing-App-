@@ -1300,20 +1300,18 @@ def read_board_file_to_text(board_file):
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        return json.dumps(
-            {
-                "error": f"Could not read board file: {str(e)}",
-                "python_verified_summary": {},
-                "structured_load_rows": [],
-                "debug": {
-                    "file_name": getattr(board_file, "name", "Unknown"),
-                    "rows_parsed_by_python": 0,
-                    "error": str(e),
-                },
-            },
-            indent=2,
-            ensure_ascii=False,
-        )
+    st.error(f"BOARD PARSER ERROR: {e}")
+    st.exception(e)
+
+    return json.dumps(
+        {
+            "error": f"Could not read board file: {str(e)}",
+            "python_verified_summary": {},
+            "structured_load_rows": [],
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
     
