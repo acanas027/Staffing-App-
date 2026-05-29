@@ -699,7 +699,10 @@ def build_recommendations(
             "CPU loads referenced. Ensure loading labor is protected."
         )
 
-    return recommen# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
+    
+    return recommendations
+
+# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
 # This section makes Python parse the board first, then sends verified JSON to AI.
 # The AI should interpret the data, not guess the data.
 
