@@ -22,145 +22,129 @@ if not os.path.exists(TEMPLATE_FILE):
     st.error("Template file not found. Put staffing_template.xlsx in the same folder as report.py.")
     st.stop()
 
+# ── OPPORTUNITY CUSTOMER LIST (Excel-driven) ─────────────────────────────────
+# Put this Excel file in the same folder as app.py / report.py in GitHub.
+OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
 
-# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
-# Each entry: customer name (lowercase for matching), issue summary, DC requirements
-OC_CUSTOMER_LIST = [
-    {
-        "name": "target rialto",
-        "aliases": ["target"],
-        "customer_number": "4000265976",
-        "issue": "Damaged pallet quality, damaged cases and poor shrink wrap quality.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "sobey's",
-        "aliases": ["sobeys", "sobey"],
-        "customer_number": None,
-        "issue": (
-            "Automated system was gaining large amount of rejects. "
-            "Damaged pallet quality, damaged cases and poor shrink wrap quality "
-            "(shrink wrap tails causing issues with system)."
-        ),
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "sysco kc",
-        "aliases": ["sysco kansas city", "sysco olathe", "sysco kc olathe"],
-        "customer_number": None,
-        "issue": "Damaged white pallets. DC was not correcting broken white wood pallets before shipping.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "pfs virginia",
-        "aliases": ["pfs virgina", "pfs va"],
-        "customer_number": None,
-        "issue": "Customer receiving wrong product or shorted inventory.",
-        "requirements": (
-            "Photos taken of load. Loads flagged for an inventory control team member audit "
-            "PRIOR to loading. Check for accurate case counts and audit of correct product."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "metro toronto fresh dc",
-        "aliases": ["metro toronto", "metro fresh"],
-        "customer_number": None,
-        "issue": "Packaging issues with flaps opening on cases. Continuous pallet damage issues.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "jewel's",
-        "aliases": ["jewels", "jewel"],
-        "customer_number": None,
-        "issue": "CPU — strict pallet and load-quality expectations.",
-        "requirements": (
-            "Loads must ship on CHEP pallets in good condition. TT4 must be included and used correctly. "
-            "Verify pallet compliance before staging."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "acme",
-        "aliases": [],
-        "customer_number": None,
-        "issue": "CPU — strict on-time departure.",
-        "requirements": (
-            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
-            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
-            "is at risk of not being ready on time."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "awg",
-        "aliases": ["associated wholesale grocers"],
-        "customer_number": None,
-        "issue": "CPU — strict on-time departure.",
-        "requirements": (
-            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
-            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
-            "is at risk of not being ready on time."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "whataburger",
-        "aliases": ["whataburguer"],
-        "customer_number": None,
-        "issue": "Developing new product with customer — extra care required.",
-        "requirements": (
-            "Handle with care. Communicate any issues with product or staging immediately to supervisor."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-]
+
+def clean_text(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def yes_no_to_bool(value):
+    return clean_text(value).upper() in ["Y", "YES", "TRUE", "1", "X"]
+
+
+def build_aliases(customer_name):
+    name = clean_text(customer_name).lower()
+
+    aliases = []
+
+    if name:
+        aliases.append(name)
+
+    cleaned = (
+        name.replace(" - all loads", "")
+        .replace("(olathe)", "")
+        .replace("'", "")
+        .replace("’", "")
+        .strip()
+    )
+
+    if cleaned and cleaned not in aliases:
+        aliases.append(cleaned)
+
+    words = cleaned.split()
+
+    if len(words) > 0:
+        aliases.append(words[0])
+
+    if "target" in cleaned:
+        aliases.append("target")
+
+    if "sysco kc" in cleaned or "sysco" in cleaned:
+        aliases += ["sysco", "sysco kansas city", "sysco olathe", "sysco kc olathe"]
+
+    if "sobey" in cleaned:
+        aliases += ["sobeys", "sobey", "sobey's"]
+
+    if "pfs" in cleaned:
+        aliases += ["pfs", "pfs virginia", "pfs virgina", "pfs va"]
+
+    if "metro toronto" in cleaned:
+        aliases += ["metro toronto", "metro fresh", "metro toronto fresh dc"]
+
+    if "jewel" in cleaned:
+        aliases += ["jewels", "jewel", "jewel's"]
+
+    if "whataburguer" in cleaned or "whataburger" in cleaned:
+        aliases += ["whataburger", "whataburguer"]
+
+    if "awg" in cleaned:
+        aliases += ["awg", "associated wholesale grocers"]
+
+    return list(dict.fromkeys([alias for alias in aliases if alias]))
+
+
+def load_oc_customer_list():
+    if not os.path.exists(OC_FILE):
+        st.warning(
+            f"OC customer list file not found: {OC_FILE}. "
+            "Opportunity Customer detection will be skipped."
+        )
+        return []
+
+    try:
+        df = pd.read_excel(
+            OC_FILE,
+            sheet_name="OC Customer List",
+            header=5
+        ).fillna("")
+
+        oc_list = []
+
+        for _, row in df.iterrows():
+            customer_name = clean_text(row.get("Customer Name", ""))
+
+            if not customer_name:
+                continue
+
+            if customer_name.lower() in ["market x", "example", "customer name"]:
+                continue
+
+            customer_number = clean_text(row.get("Customer #", ""))
+            issue = clean_text(row.get("Customer Profile-Why are they an OC?", ""))
+            requirements = clean_text(row.get("DC Requirements (Summarized)", ""))
+
+            sign_off = yes_no_to_bool(row.get("Sign Off \n(Y/N)", ""))
+            pictures = yes_no_to_bool(row.get("Pictures  \n(Y/N)", ""))
+
+            priority = "HIGH" if sign_off or pictures else "MEDIUM"
+
+            oc_list.append(
+                {
+                    "name": customer_name.lower(),
+                    "aliases": build_aliases(customer_name),
+                    "customer_number": customer_number,
+                    "issue": issue,
+                    "requirements": requirements,
+                    "sign_off": sign_off,
+                    "pictures": pictures,
+                    "priority": priority,
+                }
+            )
+
+        return oc_list
+
+    except Exception as e:
+        st.error(f"Could not read OC customer list Excel file: {e}")
+        return []
+
+
+OC_CUSTOMER_LIST = load_oc_customer_list()
+
 
 
 def find_oc_customers_in_board(board_text):
@@ -1547,7 +1531,7 @@ if board_file:
     st.success("Board file loaded — ready for analysis.")
 
 # ── OC List preview (expandable) ─────────────────────────────────────────────
-with st.expander(" View Opportunity Customer List (embedded)"):
+with st.expander(" View Opportunity Customer List from Excel"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
         oc_preview_rows.append({
