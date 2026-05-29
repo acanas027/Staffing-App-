@@ -26,149 +26,126 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
-# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
-OC_CUSTOMER_LIST = [
-    {
-        "name": "target rialto",
-        "aliases": ["target"],
-        "customer_number": "4000265976",
-        "issue": "Damaged pallet quality, damaged cases and poor shrink wrap quality.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "sobey's",
-        "aliases": ["sobeys", "sobey"],
-        "customer_number": None,
-        "issue": (
-            "Automated system was gaining large amount of rejects. "
-            "Damaged pallet quality, damaged cases and poor shrink wrap quality "
-            "(shrink wrap tails causing issues with system)."
-        ),
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "sysco kc",
-        "aliases": ["sysco kansas city", "sysco olathe", "sysco kc olathe"],
-        "customer_number": None,
-        "issue": "Damaged white pallets. DC was not correcting broken white wood pallets before shipping.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "pfs virginia",
-        "aliases": ["pfs virgina", "pfs va"],
-        "customer_number": None,
-        "issue": "Customer receiving wrong product or shorted inventory.",
-        "requirements": (
-            "Photos taken of load. Loads flagged for an inventory control team member audit "
-            "PRIOR to loading. Check for accurate case counts and audit of correct product."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "metro toronto fresh dc",
-        "aliases": ["metro toronto", "metro fresh"],
-        "customer_number": None,
-        "issue": "Packaging issues with flaps opening on cases. Continuous pallet damage issues.",
-        "requirements": (
-            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
-            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
-            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
-            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
-            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
-        ),
-        "sign_off": True,
-        "pictures": True,
-        "priority": "HIGH",
-    },
-    {
-        "name": "jewel's",
-        "aliases": ["jewels", "jewel"],
-        "customer_number": None,
-        "issue": "CPU — strict pallet and load-quality expectations.",
-        "requirements": (
-            "Loads must ship on CHEP pallets in good condition. TT4 must be included and used correctly. "
-            "Verify pallet compliance before staging."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "acme",
-        "aliases": [],
-        "customer_number": None,
-        "issue": "CPU — strict on-time departure.",
-        "requirements": (
-            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
-            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
-            "is at risk of not being ready on time."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "awg",
-        "aliases": ["associated wholesale grocers"],
-        "customer_number": None,
-        "issue": "CPU — strict on-time departure.",
-        "requirements": (
-            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
-            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
-            "is at risk of not being ready on time."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-    {
-        "name": "whataburger",
-        "aliases": ["whataburguer"],
-        "customer_number": None,
-        "issue": "Developing new product with customer — extra care required.",
-        "requirements": (
-            "Handle with care. Communicate any issues with product or staging immediately to supervisor."
-        ),
-        "sign_off": False,
-        "pictures": False,
-        "priority": "MEDIUM",
-    },
-]
+# ── OPPORTUNITY CUSTOMER LIST (loaded from Excel) ────────────────────────────
+# File must be in the same folder as report.py.
+# Sheet: "OC Customer List"
+# Row 6  = headers (skipped by name check)
+# Row 7  = example row — skipped (customer name contains "market x" / "example")
+# Rows 8+ = real data
+# Columns:
+#   A: Resers DC   B: Customer #   C: Customer Name   D: Address
+#   E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
+#   H: Pictures (Y/N)   I: Other (Y/N)
+
+OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
+OC_SHEET = "OC Customer List"
+OC_HEADER_ROW = 6   # 1-based row number of the header row
+OC_DATA_START = 8   # first real data row (row 7 is the example, skip it)
+
+
+@st.cache_data
+def load_oc_customer_list():
+    """
+    Read the OC Excel file and return a list of customer dicts identical in
+    shape to the old embedded OC_CUSTOMER_LIST.  Cached so it only reads once
+    per app session.
+    """
+    if not os.path.exists(OC_FILE):
+        st.error(
+            f"OC customer list file not found: '{OC_FILE}'. "
+            "Make sure it is in the same folder as report.py."
+        )
+        return []
+
+    try:
+        wb = load_workbook(OC_FILE, data_only=True)
+        if OC_SHEET not in wb.sheetnames:
+            st.error(f"Sheet '{OC_SHEET}' not found in {OC_FILE}.")
+            return []
+
+        ws = wb[OC_SHEET]
+        customers = []
+
+        for row_idx in range(OC_DATA_START, ws.max_row + 1):
+            raw_name = ws.cell(row_idx, 3).value  # col C
+            if not raw_name:
+                continue
+
+            name_clean = str(raw_name).strip().strip('"').lower()
+
+            # Skip the example row
+            if "market x" in name_clean or "example" in name_clean:
+                continue
+
+            raw_cust_num = ws.cell(row_idx, 2).value  # col B
+            raw_issue    = ws.cell(row_idx, 5).value  # col E
+            raw_reqs     = ws.cell(row_idx, 6).value  # col F
+            raw_signoff  = ws.cell(row_idx, 7).value  # col G
+            raw_pictures = ws.cell(row_idx, 8).value  # col H
+
+            issue = str(raw_issue).strip() if raw_issue else ""
+            reqs  = str(raw_reqs).strip()  if raw_reqs  else ""
+
+            sign_off = str(raw_signoff).strip().upper() == "Y" if raw_signoff else False
+            pictures = str(raw_pictures).strip().upper() == "Y" if raw_pictures else False
+
+            # Priority: HIGH if sign-off or pictures required, else MEDIUM
+            priority = "HIGH" if (sign_off or pictures) else "MEDIUM"
+
+            # Build search aliases from the customer name
+            # e.g. "Sobey's - All Loads" → also match "sobey", "sobeys", "sobey's"
+            base = name_clean.rstrip(" -").split(" - ")[0].strip()
+            aliases = []
+            # Strip common suffixes to get short-match terms
+            for suffix in [" - all loads", " all loads", " fresh dc", " (olathe)"]:
+                if base.endswith(suffix):
+                    aliases.append(base.replace(suffix, "").strip())
+            # Add apostrophe variants
+            if "'" in base:
+                aliases.append(base.replace("'", ""))
+                aliases.append(base.replace("'s", ""))
+            # Common known aliases
+            known_aliases = {
+                "target rialto":        ["target"],
+                "sobey's - all loads":  ["sobeys", "sobey", "sobey's"],
+                "sysco kc (olathe)":    ["sysco kc", "sysco kansas city", "sysco olathe", "sysco kc olathe"],
+                "pfs virgina":          ["pfs virginia", "pfs va"],
+                "metro toronto fresh dc": ["metro toronto", "metro fresh"],
+                "jewel's":              ["jewels", "jewel"],
+                "awg":                  ["associated wholesale grocers"],
+                "whataburguer":         ["whataburger"],
+            }
+            if name_clean in known_aliases:
+                aliases += known_aliases[name_clean]
+
+            # Deduplicate aliases, remove if same as name
+            aliases = list(dict.fromkeys(
+                a for a in aliases if a and a != name_clean
+            ))
+
+            customers.append({
+                "name": name_clean,
+                "aliases": aliases,
+                "customer_number": str(raw_cust_num).strip() if raw_cust_num else None,
+                "issue": issue,
+                "requirements": reqs,
+                "sign_off": sign_off,
+                "pictures": pictures,
+                "priority": priority,
+            })
+
+        return customers
+
+    except Exception as e:
+        st.error(f"Error loading OC customer list: {e}")
+        return []
 
 
 def find_oc_customers_in_board(board_text):
+    oc_list = load_oc_customer_list()
     board_lower = board_text.lower()
     matches = []
-    for customer in OC_CUSTOMER_LIST:
+    for customer in oc_list:
         search_terms = [customer["name"]] + customer.get("aliases", [])
         found_terms = [term for term in search_terms if term.lower() in board_lower]
         if found_terms:
@@ -1716,17 +1693,24 @@ if board_file:
             st.error(f"Preview failed: {e}")
             st.exception(e)
 
-with st.expander("📋 View Opportunity Customer List (embedded)"):
-    oc_preview_rows = []
-    for c in OC_CUSTOMER_LIST:
-        oc_preview_rows.append({
-            "Customer": c["name"].title(),
-            "Priority": c["priority"],
-            "Issue": c["issue"],
-            "Sign-Off Required": "Yes" if c["sign_off"] else "No",
-            "Photos Required": "Yes" if c["pictures"] else "No",
-        })
-    st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
+with st.expander("📋 View Opportunity Customer List (from Excel file)"):
+    oc_list_preview = load_oc_customer_list()
+    if oc_list_preview:
+        oc_preview_rows = []
+        for c in oc_list_preview:
+            oc_preview_rows.append({
+                "Customer": c["name"].title(),
+                "Customer #": c["customer_number"] or "—",
+                "Priority": c["priority"],
+                "Issue": c["issue"],
+                "DC Requirements": c["requirements"],
+                "Sign-Off Required": "Yes" if c["sign_off"] else "No",
+                "Photos Required": "Yes" if c["pictures"] else "No",
+            })
+        st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
+        st.caption(f"Loaded {len(oc_list_preview)} customers from '{OC_FILE}'")
+    else:
+        st.warning(f"No customers loaded. Check that '{OC_FILE}' exists in the app folder.")
 
 st.markdown("---")
 
