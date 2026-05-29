@@ -5,8 +5,6 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.utils import get_column_letter
 from io import BytesIO
-import json
-import re
 import os
 import shutil
 from openai import OpenAI
@@ -25,151 +23,145 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
-# ── OPPORTUNITY CUSTOMER LIST (Excel-driven) ─────────────────────────────────
-# Put this Excel file in the same folder as app.py / report.py in GitHub.
-# Expected file name matches the file you provided.
-OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
+# ── OPPORTUNITY CUSTOMER LIST (embedded) ─────────────────────────────────────
+# Each entry: customer name (lowercase for matching), issue summary, DC requirements
+OC_CUSTOMER_LIST = [
+    {
+        "name": "target rialto",
+        "aliases": ["target"],
+        "customer_number": "4000265976",
+        "issue": "Damaged pallet quality, damaged cases and poor shrink wrap quality.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "sobey's",
+        "aliases": ["sobeys", "sobey"],
+        "customer_number": None,
+        "issue": (
+            "Automated system was gaining large amount of rejects. "
+            "Damaged pallet quality, damaged cases and poor shrink wrap quality "
+            "(shrink wrap tails causing issues with system)."
+        ),
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "sysco kc",
+        "aliases": ["sysco kansas city", "sysco olathe", "sysco kc olathe"],
+        "customer_number": None,
+        "issue": "Damaged white pallets. DC was not correcting broken white wood pallets before shipping.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "pfs virginia",
+        "aliases": ["pfs virgina", "pfs va"],
+        "customer_number": None,
+        "issue": "Customer receiving wrong product or shorted inventory.",
+        "requirements": (
+            "Photos taken of load. Loads flagged for an inventory control team member audit "
+            "PRIOR to loading. Check for accurate case counts and audit of correct product."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "metro toronto fresh dc",
+        "aliases": ["metro toronto", "metro fresh"],
+        "customer_number": None,
+        "issue": "Packaging issues with flaps opening on cases. Continuous pallet damage issues.",
+        "requirements": (
+            "Pallet quality (No damages), Machine Wrap all Pallets, No loose flaps or glue, "
+            "No overhanging product off pallet, Compliant pallet pattern, Product in boxes, "
+            "No mixed product on pallet, No cases with mixed product, Use of cardboard corners "
+            "on double stacks. THREE pictures taken of load while on the dock, THREE pictures "
+            "taken while loading (nose, middle, tail) — 6 pictures total emailed out."
+        ),
+        "sign_off": True,
+        "pictures": True,
+        "priority": "HIGH",
+    },
+    {
+        "name": "jewel's",
+        "aliases": ["jewels", "jewel"],
+        "customer_number": None,
+        "issue": "CPU — strict pallet and load-quality expectations.",
+        "requirements": (
+            "Loads must ship on CHEP pallets in good condition. TT4 must be included and used correctly. "
+            "Verify pallet compliance before staging."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "acme",
+        "aliases": [],
+        "customer_number": None,
+        "issue": "CPU — strict on-time departure.",
+        "requirements": (
+            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
+            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
+            "is at risk of not being ready on time."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "awg",
+        "aliases": ["associated wholesale grocers"],
+        "customer_number": None,
+        "issue": "CPU — strict on-time departure.",
+        "requirements": (
+            "Load must be ready to ship BEFORE appointment time. Prioritize picking and staging "
+            "so there is no delay when driver arrives. Communicate with lead/supervisor if load "
+            "is at risk of not being ready on time."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+    {
+        "name": "whataburger",
+        "aliases": ["whataburguer"],
+        "customer_number": None,
+        "issue": "Developing new product with customer — extra care required.",
+        "requirements": (
+            "Handle with care. Communicate any issues with product or staging immediately to supervisor."
+        ),
+        "sign_off": False,
+        "pictures": False,
+        "priority": "MEDIUM",
+    },
+]
 
-
-def clean_text(value):
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def yes_no_to_bool(value):
-    return clean_text(value).upper() in ["Y", "YES", "TRUE", "1", "X"]
-
-
-def build_aliases(customer_name):
-    """
-    Builds practical match terms from the customer name.
-    This lets the board match shortened customer names like Target, Sobeys, Jewel, etc.
-    """
-    name = clean_text(customer_name).lower()
-
-    aliases = []
-
-    if name:
-        aliases.append(name)
-
-    cleaned = (
-        name.replace(" - all loads", "")
-        .replace("(olathe)", "")
-        .replace("'", "")
-        .replace("’", "")
-        .strip()
-    )
-
-    if cleaned and cleaned not in aliases:
-        aliases.append(cleaned)
-
-    words = cleaned.split()
-
-    if len(words) > 0:
-        aliases.append(words[0])
-
-    # Extra common aliases / misspellings
-    if "target" in cleaned:
-        aliases.append("target")
-
-    if "sysco kc" in cleaned or "sysco" in cleaned:
-        aliases += ["sysco", "sysco kansas city", "sysco olathe", "sysco kc olathe"]
-
-    if "sobey" in cleaned:
-        aliases += ["sobeys", "sobey", "sobey's"]
-
-    if "pfs" in cleaned:
-        aliases += ["pfs", "pfs virginia", "pfs virgina", "pfs va"]
-
-    if "metro toronto" in cleaned:
-        aliases += ["metro toronto", "metro fresh", "metro toronto fresh dc"]
-
-    if "jewel" in cleaned:
-        aliases += ["jewels", "jewel", "jewel's"]
-
-    if "whataburguer" in cleaned or "whataburger" in cleaned:
-        aliases += ["whataburger", "whataburguer"]
-
-    if "awg" in cleaned:
-        aliases += ["awg", "associated wholesale grocers"]
-
-    return list(dict.fromkeys([alias for alias in aliases if alias]))
-
-
-def load_oc_customer_list():
-    """
-    Reads Opportunity Customers from the Excel file instead of hardcoding them in Python.
-
-    File expected:
-    - Resers DCs Opportunity Cusotmer List.xlsx
-    - Sheet: OC Customer List
-    - Headers on Excel row 6, so pandas header=5
-
-    Expected columns:
-    - Customer Name
-    - Customer #
-    - Customer Profile-Why are they an OC?
-    - DC Requirements (Summarized)
-    - Sign Off \n(Y/N)
-    - Pictures  \n(Y/N)
-    """
-    if not os.path.exists(OC_FILE):
-        st.warning(
-            f"OC customer list file not found: {OC_FILE}. "
-            "Opportunity Customer detection will be skipped."
-        )
-        return []
-
-    try:
-        df = pd.read_excel(
-            OC_FILE,
-            sheet_name="OC Customer List",
-            header=5
-        ).fillna("")
-
-        oc_list = []
-
-        for _, row in df.iterrows():
-            customer_name = clean_text(row.get("Customer Name", ""))
-
-            if not customer_name:
-                continue
-
-            # Skip example/template rows if present
-            if customer_name.lower() in ["market x", "example", "customer name"]:
-                continue
-
-            customer_number = clean_text(row.get("Customer #", ""))
-            issue = clean_text(row.get("Customer Profile-Why are they an OC?", ""))
-            requirements = clean_text(row.get("DC Requirements (Summarized)", ""))
-
-            sign_off = yes_no_to_bool(row.get("Sign Off \n(Y/N)", ""))
-            pictures = yes_no_to_bool(row.get("Pictures  \n(Y/N)", ""))
-
-            priority = "HIGH" if sign_off or pictures else "MEDIUM"
-
-            oc_list.append(
-                {
-                    "name": customer_name.lower(),
-                    "aliases": build_aliases(customer_name),
-                    "customer_number": customer_number,
-                    "issue": issue,
-                    "requirements": requirements,
-                    "sign_off": sign_off,
-                    "pictures": pictures,
-                    "priority": priority,
-                }
-            )
-
-        return oc_list
-
-    except Exception as e:
-        st.error(f"Could not read OC customer list Excel file: {e}")
-        return []
-
-
-OC_CUSTOMER_LIST = load_oc_customer_list()
 
 def find_oc_customers_in_board(board_text):
     """
@@ -699,75 +691,101 @@ def build_recommendations(
             "CPU loads referenced. Ensure loading labor is protected."
         )
 
-    
     return recommendations
 
-# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
-# This section makes Python parse the board first, then sends verified JSON to AI.
-# The AI should interpret the data, not guess the data.
 
-BOARD_STATUS_KEYWORDS = [
-    "Loaded Short",
-    "Picking/Short",
-    "Picking Short",
-    "Ready/Short",
-    "R/S",
-    "RTL",
-    "Ready To Load",
-    "Picking",
-    "Completed",
-    "Complete",
-    "Loaded",
-    "Late",
-    "No Driver",
-]
+# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
+# Python reads the board first and sends clean structured JSON to the AI.
+# Board layout expected:
+# A Load/Day | B Destination/Date | C Carrier | D Time | E Door | F Trailer
+# G Status | H TT4 | I Loader | J Comments | K Pulls | L Picks
 
 BOARD_DAY_NAMES = [
     "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
 ]
 
 
-def board_cell_flags(cell):
-    flags = []
-
-    fill = cell.fill
-    fill_color = ""
-    if fill and fill.fgColor and fill.fgColor.type == "rgb":
-        fill_color = str(fill.fgColor.rgb).upper()
-
-    font = cell.font
-    font_color = ""
-    if font and font.color and font.color.type == "rgb":
-        font_color = str(font.color.rgb).upper()
-
-    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):
-        flags.append("LOAD-CHECK")
-    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF", "FFB0E0E6", "FF00BFFF"):
-        flags.append("TT4-NEEDED")
-
-    if font_color in ("FFFF0000", "00FF0000"):
-        flags.append("CANADIAN")
-
-    return flags
+def normalize_header(value):
+    if value is None:
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", str(value).strip().upper())
 
 
 def normalize_board_text(value):
     if value is None:
         return ""
+
+    if pd.isna(value):
+        return ""
+
+    if hasattr(value, "strftime"):
+        try:
+            # Excel time values
+            if value.__class__.__name__ == "time":
+                return value.strftime("%H:%M")
+            # Excel datetime values
+            if value.__class__.__name__ in ["datetime", "Timestamp"]:
+                return value.strftime("%m/%d/%Y")
+        except Exception:
+            pass
+
     text = str(value).replace("\n", " ").strip()
+
     if text.endswith(".0"):
         text = text[:-2]
+
     return text
 
 
-def looks_like_load_number(value):
-    """
-    Real board load numbers are usually 5-9 digits.
-    This intentionally rejects dates, times, door numbers, and appointment times.
-    """
+def normalize_board_date(value):
     text = normalize_board_text(value)
 
     if not text:
+        return ""
+
+    for fmt in ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"]:
+        try:
+            return pd.to_datetime(text, format=fmt).strftime("%m/%d/%Y")
+        except Exception:
+            pass
+
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.strftime("%m/%d/%Y")
+    except Exception:
+        pass
+
+    return text
+
+
+def normalize_board_time(value):
+    text = normalize_board_text(value)
+
+    if not text:
+        return ""
+
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        h, m = text.split(":")
+        return f"{int(h):02d}:{m}"
+
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.strftime("%H:%M")
+    except Exception:
+        pass
+
+    return text
+
+
+def looks_like_board_load(value):
+    text = normalize_board_text(value)
+
+    if not text:
+        return ""
+
+    if text in BOARD_DAY_NAMES:
         return ""
 
     if re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", text):
@@ -779,7 +797,6 @@ def looks_like_load_number(value):
     if re.fullmatch(r"\d{1,2}", text):
         return ""
 
-    text = re.sub(r"^LD", "", text, flags=re.IGNORECASE)
     digits = re.sub(r"[^0-9]", "", text)
 
     if 5 <= len(digits) <= 9:
@@ -788,265 +805,138 @@ def looks_like_load_number(value):
     return ""
 
 
-def detect_board_day(row_text):
-    for day_name in BOARD_DAY_NAMES:
-        if re.search(rf"\b{day_name}\b", row_text, flags=re.IGNORECASE):
-            return day_name
-    return ""
-
-
-def detect_board_date(row_text):
-    match = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", row_text)
-    if match:
-        return normalize_date(match.group(0)) or match.group(0)
-    return ""
-
-
-def detect_board_time_from_text(text):
-    text = normalize_board_text(text)
+def detect_board_status(value):
+    text = normalize_board_text(value).upper()
 
     if not text:
         return ""
 
-    if re.fullmatch(r"\d{1,2}:\d{2}", text):
-        return normalize_time(text)
-
-    return ""
-
-
-def detect_board_time(row_values):
-    for value in row_values:
-        candidate = detect_board_time_from_text(value)
-        if candidate:
-            return candidate
-    return ""
-
-
-def detect_board_status(row_text):
-    text = normalize_board_text(row_text).upper()
-
     if "LOADED SHORT" in text:
         return "Loaded Short"
+
     if "PICKING/SHORT" in text or "PICKING SHORT" in text:
         return "Picking/Short"
+
     if "READY/SHORT" in text or re.search(r"\bR/S\b", text):
         return "R/S"
+
     if re.search(r"\bRTL\b", text) or "READY TO LOAD" in text:
         return "RTL"
+
     if "NO DRIVER" in text:
         return "No Driver"
+
     if "PICKING" in text:
         return "Picking"
+
     if "COMPLETED" in text or re.search(r"\bCOMPLETE\b", text):
         return "Completed"
+
     if re.search(r"\bLATE\b", text):
         return "Late"
+
     if re.search(r"\bLOADED\b", text):
         return "Loaded"
 
     return ""
 
 
-def clean_board_header_key(value):
-    return normalize_header(value)
+def board_cell_flags(cell):
+    flags = []
+
+    fill_color = ""
+    font_color = ""
+
+    try:
+        fill = cell.fill
+        if fill and fill.fgColor:
+            if fill.fgColor.type == "rgb":
+                fill_color = str(fill.fgColor.rgb).upper()
+            elif fill.fgColor.type == "indexed":
+                fill_color = str(fill.fgColor.indexed).upper()
+    except Exception:
+        pass
+
+    try:
+        font = cell.font
+        if font and font.color and font.color.type == "rgb":
+            font_color = str(font.color.rgb).upper()
+    except Exception:
+        pass
+
+    # Yellow fill = load check
+    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00", "0000000D"):
+        flags.append("LOAD-CHECK")
+
+    # Light blue fill = TT4 needed
+    if fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF", "FFB0E0E6", "FF00BFFF"):
+        flags.append("TT4-NEEDED")
+
+    # Red font = Canadian
+    if font_color in ("FFFF0000", "00FF0000"):
+        flags.append("CANADIAN")
+
+    return flags
 
 
-def build_header_map_from_row(row_values):
-    """
-    Builds a header map when the board has a real header row.
-    Uses careful matching so 'Load Type' does not accidentally become the load-number column.
-    """
-    header_map = {}
-
-    for idx, value in enumerate(row_values):
-        header = clean_board_header_key(value)
-
-        if not header:
-            continue
-
-        if header in ["LOAD", "LOADNUMBER", "LOADNO", "LOADREF", "LOADREFERENCE", "ORDER", "ORDERNUMBER"]:
-            header_map["load"] = idx
-        elif header in ["DESTINATION", "CUSTOMER", "CUSTOMERNAME", "CUST", "SHIPTO", "CONSIGNEE", "CONSIGNEENAME"]:
-            header_map["customer"] = idx
-        elif "CARRIER" in header:
-            header_map["carrier"] = idx
-        elif header in ["TIME", "APPT", "APPTTIME", "APPOINTMENTTIME", "PUAPPTTIME"]:
-            header_map["time"] = idx
-        elif header in ["DOOR", "DOCK"]:
-            header_map["door"] = idx
-        elif header in ["TRAILER", "TRLR", "TRAILERNUMBER"]:
-            header_map["trailer"] = idx
-        elif header in ["STATUS", "STAT"]:
-            header_map["status"] = idx
-        elif header in ["TYPE", "LOADTYPE"]:
-            header_map["type"] = idx
-        elif header == "TT4":
-            header_map["tt4"] = idx
-        elif header in ["LOADER", "EMPLOYEE", "ASSIGNED"]:
-            header_map["loader"] = idx
-        elif header in ["COMMENTS", "COMMENT", "NOTES", "NOTE"]:
-            header_map["comments"] = idx
-        elif "PICK" in header:
-            header_map["picks"] = idx
-        elif "PULL" in header:
-            header_map["pulls"] = idx
-
-    return header_map
+def is_day_row(first_cell):
+    text = normalize_board_text(first_cell)
+    return text if text in BOARD_DAY_NAMES else ""
 
 
-def row_looks_like_header(row_values):
-    text = " ".join(str(v).upper() for v in row_values if str(v).strip())
-    hits = 0
-
-    for word in ["LOAD", "DESTINATION", "CUSTOMER", "CARRIER", "TIME", "DOOR", "STATUS", "TRAILER", "LOADER", "COMMENTS"]:
-        if word in text:
-            hits += 1
-
-    return hits >= 2
-
-
-def get_by_header(row_values, header_map, key):
-    idx = header_map.get(key)
-    if idx is None or idx >= len(row_values):
-        return ""
-    return normalize_board_text(row_values[idx])
-
-
-def detect_ticket_count(row_values, header_map, key):
-    value = get_by_header(row_values, header_map, key)
-    if value:
-        return parse_number(value)
-    return 0
-
-
-def first_nonempty_index(row_values):
-    for idx, value in enumerate(row_values):
-        if normalize_board_text(value):
-            return idx
-    return 0
-
-
-def find_status_column_value(row_values):
-    for value in row_values:
-        status = detect_board_status(value)
-        if status:
-            return status
-    return ""
-
-
-def parse_board_rows_from_records(records, source_name):
-    """
-    Parses your board layout:
-    Load | Destination | Carrier | Time | Door | Trailer | Status | TT4 | Loader | Comments
-
-    It also works when the first column/header is blank, because it searches for the first real load number
-    and then reads the columns relative to that load number.
-    """
+def parse_board_dataframe(df, source_name):
     board_rows = []
     current_day = ""
     current_date = ""
-    header_map = {}
 
-    for record in records:
-        row_number = record["row_number"]
-        row_values = [normalize_board_text(v) for v in record["values"]]
-        row_flags = record.get("flags", [])
-        row_text = " ".join(v for v in row_values if v)
+    df = df.fillna("")
 
-        if not row_text.strip():
+    for idx, row in df.iterrows():
+        values = [normalize_board_text(v) for v in row.tolist()]
+
+        while len(values) < 12:
+            values.append("")
+
+        first_cell = values[0]
+        day_found = is_day_row(first_cell)
+
+        if day_found:
+            current_day = day_found
+            current_date = normalize_board_date(values[1])
             continue
 
-        detected_day = detect_board_day(row_text)
-        detected_date = detect_board_date(row_text)
+        load_number = looks_like_board_load(values[0])
 
-        load_candidates = []
-        for v in row_values:
-            candidate = looks_like_load_number(v)
-            if candidate:
-                load_candidates.append(candidate)
-
-        has_load = bool(load_candidates)
-
-        if row_looks_like_header(row_values) and not has_load:
-            header_map = build_header_map_from_row(row_values)
+        if not load_number:
             continue
 
-        if (detected_day or detected_date) and not has_load:
-            if detected_day:
-                current_day = detected_day
-            if detected_date:
-                current_date = detected_date
-            continue
+        status = detect_board_status(values[6])
+        comments = values[9]
 
-        if not has_load:
-            continue
-
-        load_number = get_by_header(row_values, header_map, "load")
-        load_number = looks_like_load_number(load_number) or load_candidates[0]
-
-        try:
-            load_idx = next(
-                i for i, v in enumerate(row_values)
-                if looks_like_load_number(v) == load_number
-            )
-        except StopIteration:
-            load_idx = first_nonempty_index(row_values)
-
-        def get_pos(offset):
-            idx = load_idx + offset
-            if 0 <= idx < len(row_values):
-                return normalize_board_text(row_values[idx])
-            return ""
-
-        customer = get_by_header(row_values, header_map, "customer") or get_pos(1)
-        carrier = get_by_header(row_values, header_map, "carrier") or get_pos(2)
-
-        appt_time = (
-            get_by_header(row_values, header_map, "time")
-            or detect_board_time_from_text(get_pos(3))
-            or detect_board_time(row_values)
-        )
-
-        door = get_by_header(row_values, header_map, "door") or get_pos(4)
-        trailer = get_by_header(row_values, header_map, "trailer") or get_pos(5)
-
-        status_raw = get_by_header(row_values, header_map, "status") or get_pos(6)
-        status = detect_board_status(status_raw) or find_status_column_value(row_values)
-
-        load_type = get_by_header(row_values, header_map, "type")
-        tt4 = get_by_header(row_values, header_map, "tt4") or get_pos(7)
-        loader = get_by_header(row_values, header_map, "loader") or get_pos(8)
-        comments = get_by_header(row_values, header_map, "comments") or get_pos(9)
-
-        picks = detect_ticket_count(row_values, header_map, "picks")
-        pulls = detect_ticket_count(row_values, header_map, "pulls")
-
-        if not comments:
-            comments = row_text
-
-        flags = sorted(set(row_flags))
+        if not status:
+            status = detect_board_status(" ".join(values))
 
         board_rows.append(
             {
                 "source": source_name,
-                "row_number": row_number,
+                "row_number": int(idx) + 1,
                 "day": current_day,
                 "date": current_date,
                 "load_number": load_number,
-                "customer": customer,
-                "carrier": carrier,
-                "appt_time": appt_time,
-                "door": door,
-                "trailer": trailer,
+                "customer": values[1],
+                "carrier": values[2],
+                "appt_time": normalize_board_time(values[3]),
+                "door": values[4],
+                "trailer": values[5],
                 "status": status,
-                "type": load_type,
-                "tt4": tt4,
-                "loader": loader,
+                "type": "Live" if "LIVE" in values[5].upper() else ("Drop" if "DROP" in values[5].upper() else ""),
+                "tt4": values[7],
+                "loader": values[8],
                 "comments": comments,
-                "picks": picks,
-                "pulls": pulls,
-                "flags": flags,
-                "raw_row": row_text,
+                "pulls": parse_number(values[10]),
+                "picks": parse_number(values[11]),
+                "flags": [],
+                "raw_row": " | ".join(v for v in values if v),
             }
         )
 
@@ -1058,52 +948,87 @@ def board_records_from_excel(board_file):
     file_name = board_file.name.lower()
     all_board_rows = []
 
+    # .xls cannot preserve colors here, but it can still read values.
     if file_name.endswith(".xls"):
         sheets = pd.read_excel(board_file, sheet_name=None, header=None, engine="xlrd")
 
         for sheet_name, df in sheets.items():
-            df = df.fillna("")
-            records = []
-
-            for idx, row in df.iterrows():
-                records.append(
-                    {
-                        "row_number": int(idx) + 1,
-                        "values": [normalize_board_text(v) for v in row.tolist()],
-                        "flags": [],
-                    }
-                )
-
-            all_board_rows.extend(parse_board_rows_from_records(records, sheet_name))
+            all_board_rows.extend(parse_board_dataframe(df, sheet_name))
 
         return all_board_rows
 
+    # .xlsx reads values and color flags.
     wb = load_workbook(board_file, data_only=True)
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        records = []
+        current_day = ""
+        current_date = ""
 
-        for row_idx, row in enumerate(ws.iter_rows(), start=1):
+        for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
 
-            for cell in row:
-                val_str = normalize_board_text(cell.value)
-                values.append(val_str)
+            for col_idx in range(1, 13):
+                cell = ws.cell(row_idx, col_idx)
+                values.append(normalize_board_text(cell.value))
 
                 for flag in board_cell_flags(cell):
                     flags.append(flag)
 
-            records.append(
-                {
-                    "row_number": row_idx,
-                    "values": values,
-                    "flags": sorted(set(flags)),
-                }
-            )
+            first_cell = values[0]
+            day_found = is_day_row(first_cell)
 
-        all_board_rows.extend(parse_board_rows_from_records(records, sheet_name))
+            if day_found:
+                current_day = day_found
+                current_date = normalize_board_date(values[1])
+                continue
+
+            load_number = looks_like_board_load(values[0])
+
+            if not load_number:
+                continue
+
+            status = detect_board_status(values[6])
+
+            if not status:
+                status = detect_board_status(" ".join(values))
+
+            type_value = ""
+            trailer_text = values[5].upper()
+
+            if "LIVE" in trailer_text:
+                type_value = "Live"
+            elif "DROP" in trailer_text:
+                type_value = "Drop"
+            elif "CPU" in trailer_text:
+                type_value = "CPU - Live"
+
+            row_flags = sorted(set(flags))
+
+            board_rows_item = {
+                "source": sheet_name,
+                "row_number": row_idx,
+                "day": current_day,
+                "date": current_date,
+                "load_number": load_number,
+                "customer": values[1],
+                "carrier": values[2],
+                "appt_time": normalize_board_time(values[3]),
+                "door": values[4],
+                "trailer": values[5],
+                "status": status,
+                "type": type_value,
+                "tt4": values[7],
+                "loader": values[8],
+                "comments": values[9],
+                "pulls": parse_number(values[10]),
+                "picks": parse_number(values[11]),
+                "flags": row_flags,
+                "raw_row": " | ".join(v for v in values if v),
+            }
+
+            all_board_rows.append(board_rows_item)
 
     return all_board_rows
 
@@ -1111,18 +1036,7 @@ def board_records_from_excel(board_file):
 def board_records_from_csv(board_file):
     board_file.seek(0)
     df = pd.read_csv(board_file, header=None).fillna("")
-    records = []
-
-    for idx, row in df.iterrows():
-        records.append(
-            {
-                "row_number": int(idx) + 1,
-                "values": [normalize_board_text(v) for v in row.tolist()],
-                "flags": [],
-            }
-        )
-
-    return parse_board_rows_from_records(records, "CSV Board")
+    return parse_board_dataframe(df, "CSV Board")
 
 
 def build_python_board_summary(board_rows):
@@ -1194,7 +1108,6 @@ def build_python_board_summary(board_rows):
         if "COMPLETED" in status_upper or status_upper == "COMPLETE":
             summary["completed_loads"] += 1
 
-    # Count blank/not-started only after known statuses.
         if not row.get("status"):
             summary["blank_or_not_started_loads"] += 1
             summary["blank_or_not_started_details"].append(row)
@@ -1227,14 +1140,16 @@ def build_python_board_summary(board_rows):
         else:
             summary["loads_missing_loader"] += 1
 
-    # Remove exact duplicate priority rows.
     seen = set()
     unique_priority = []
+
     for item in summary["priority_load_details"]:
         key = (item.get("load_number"), item.get("row_number"), item.get("source"))
+
         if key not in seen:
             seen.add(key)
             unique_priority.append(item)
+
     summary["priority_load_details"] = unique_priority
 
     return summary
@@ -1281,13 +1196,18 @@ def read_board_file_to_text(board_file):
         board_summary = build_python_board_summary(board_rows)
         compact_rows = compact_board_rows_for_ai(board_rows)
 
+        # Show parser result inside Streamlit so you can confirm Python is reading the board.
+        st.write("Board parser rows read:", len(board_rows))
+        if board_rows:
+            st.write("First board row parsed:", compact_rows[0])
+
         payload = {
             "python_verified_summary": board_summary,
             "structured_load_rows": compact_rows,
             "debug": {
                 "file_name": board_file.name,
                 "rows_parsed_by_python": len(board_rows),
-                "message": "If rows_parsed_by_python is 0, the board layout did not match parser rules or the file could not be read.",
+                "message": "This data was parsed by Python and should be used by AI as the source of truth.",
             },
             "instructions_for_ai": [
                 "Use python_verified_summary as the source of truth for counts.",
@@ -1300,21 +1220,21 @@ def read_board_file_to_text(board_file):
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        st.error(f"BOARD PARSER ERROR: {e}")
+        error_message = str(e)
+
+        st.error(f"BOARD PARSER ERROR: {error_message}")
         st.exception(e)
 
-    return json.dumps(
-        {
-            "error": f"Could not read board file: {str(e)}",
-            "python_verified_summary": {},
-            "structured_load_rows": [],
-        },
-        indent=2,
-        ensure_ascii=False,
-    )
+        return json.dumps(
+            {
+                "error": f"Could not read board file: {error_message}",
+                "python_verified_summary": {},
+                "structured_load_rows": [],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
-
-    
 
 def analyze_board_with_groq(
     board_text,
@@ -1366,27 +1286,23 @@ def analyze_board_with_groq(
         oc_section = f"\n\n{oc_alert_text}\n"
 
     base_context = f"""
-You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). Python has already parsed the board into structured JSON. Treat the Python-verified counts and structured load rows as the source of truth.
+You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
 Use short bullet points. don't over explain.
-Use the structured load rows and Python summary instead of guessing from raw Excel text. 
-The idea is to get as ahead as possible with the current resources. 
 
 When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
-Don't assume the load number for the day. Look for today's day and then count how many load number it has under it, until the next day appears. 
 
 Additional warehouse operation context:
 This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 6 am to 4:30 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 4pm that is still success, not behind. 
 The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12.
 
 The manager using this system is focused on:
+- Preventing shorts
+- Keeping pickers productive
 - Avoiding late departures
 - Protecting dock flow
 - Prioritizing live loads correctly
 - Reducing congestion
 - Getting ahead instead of reacting late
-- Preventing shorts
-- Keeping pickers productive
-
 
 Operational priorities from highest to lowest:
 1. Prevent shorts on customer orders
@@ -1410,6 +1326,7 @@ Important labor behavior rules:
 - Tasking/replenishment exists mainly to protect pickers from running out of product.
 - If replenishment falls behind, pickers stop producing.
 - Loading labor should only be pulled if outbound risk is low.
+- Receiving and unloading can temporarily absorb delays better than picking.
 - Lead/Extra labor should be used proactively before the operation falls behind.
 
 Operational productivity assumptions:
@@ -1422,13 +1339,14 @@ Risk interpretation rules:
 - Multiple Picking/Short loads means replenishment is failing.
 - Multiple R/S loads means outbound may miss appointments.
 - Late live loads are highest priority.
-- the operation is behind schedule when we are don't have ready to load the loads for the time of the day it is. 
+- Loads with no door, no trailer, or no loader are operational risks.
+- If many loads are blank/not started, the operation is behind schedule.
 - If outbound workload is heavier than staffing, recommend labor moves immediately.
 
 Management philosophy:
-The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if we are overstaffed.
+The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if it's going to benefit us.
 
-The manager needs:
+The manager prefers:
 - proactive recommendations
 - actionable labor moves
 - operational risk analysis
@@ -1441,7 +1359,7 @@ When making recommendations:
 - Specify EXACTLY where labor should move from and to
 - Explain WHY
 - Explain operational consequences if no action is taken
-- Give achievable operational goals for the next 30 minutes and next 2 hours and the end of the shift
+- Give achievable operational goals for the next 30 minutes and next 2 hours
 - Prioritize live loads, shorts, and dock flow
 - Think like an experienced outbound operations manager
 
@@ -1458,17 +1376,21 @@ Current staffing vs. what we need:
 {staffing_summary}
 {oc_section}
 Board data rules and operation rules:
-- The data below was extracted and summarized by Python before being sent to you. Use the JSON counts as the source of truth.
+- All data below was extracted directly from Excel cells — treat it as accurate.
 - Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
 - Cells annotated with [CANADIAN] had red font in Excel, meaning it is a Canadian load.
 - If a color annotation is absent, the cell had no special flag — do not guess.
 - Blank status on the board means the load is not currently being worked.
 - R/S means Ready to load but still short on full pallets.
+- Our average productivity:
+  - Picking: 185 cases per hour per worker allocated
+  - Loading: 1 trailer per hour per worker allocated
+  - Unloading: 44 pallets per hour per worker allocated
+  - Full pallets / replenishment movement: 25 full pallets per hour per worker allocated
 - Picking is measured in tickets on the board, but analyze everything in cases. Our average is 60 cases per picking ticket.
-- If a column or value is unclear or missing, say "unclear" — do not guess information.
-- Read the structured JSON rows and give insights based only on those rows and verified counts. 
+- If a column or value is unclear or missing, say "unclear" — do not invent information.
 
-Here is the Python-verified structured board data. Use this JSON as the source of truth for counts and load-level details:
+Here is the outbound board data extracted directly from the Excel file:
 {board_text}
 """
 
@@ -1482,7 +1404,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Specify how many loads are completed today out of the total for the day.
 - Specify any late loads, from when, if they are occupying a door, and which door.
 
-2. Opportunity Customer (OC) Alerts:
+2. ⚠ Opportunity Customer (OC) Alerts:
 - List every load on the board that belongs to a customer on the Opportunity Customer List.
 - For each OC load: state the load number, customer name, current status, appointment time, and EXACTLY what special actions are required before this load ships.
 - If pictures are required, state when they should be taken and who should own it.
@@ -1493,6 +1415,9 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - How many loads have not been started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why.
 - How big is the risk? Explain what are the risk factors.
+- Can we get ahead? Yes or no and why
+- Given all this information, how far ahead can we finish this shift?
+- Give me the load appointment times we should be picking by the end of this shift.
 - Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks? Specify people from what areas we can move staff from and to where.
 
 4. Prioritization:
@@ -1503,9 +1428,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
 - Based on staffing and demand, what should be an achievable goal for this shift?
-- Can we get ahead? Yes or no and why. What is an achievable goal for the end of shift?
-- Given all this information, how far ahead or behind are we forecasted to finish this shift?
-- Give me the load appointment times we should be picking and have RTL by the end of this shift based on the above stated goal.
+- How ahead or behind should we finish this shift?
 
 6. Top 3 Action Items:
 - What are the 3 most important things the manager should do in the next 30 minutes?
@@ -1586,7 +1509,6 @@ OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early 
                         "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
                         "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
                         "as if you are delivering it directly to the shift manager. "
-                        "Make sure to count the loads per day from every cell. "
                         "Follow the exact same output structure as the initial analysis. "
                         "Opportunity Customer (OC) alerts must appear early and be complete — never omit or shorten them."
                     ),
@@ -1594,7 +1516,6 @@ OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early 
                 {
                     "role": "user",
                     "content": (
-                        f"=== PYTHON-VERIFIED BOARD DATA AND OPERATIONAL CONTEXT ===\n{base_context}\n\n"
                         f"=== INITIAL ANALYSIS ===\n{initial_analysis}\n\n"
                         f"=== VALIDATION NOTES (apply these corrections) ===\n{validation_notes}\n\n"
                         f"=== OUTPUT STRUCTURE TO FOLLOW ===\n{output_structure}"
@@ -2075,10 +1996,10 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("Outbound Board Excel")
+st.subheader("📋 Outbound Board Excel / CSV")
 
 board_file = st.file_uploader(
-    "Upload the outbound load board Excel",
+    "Upload the outbound load board Excel or CSV file",
     type=["xlsx", "xls", "csv"],
     help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
@@ -2087,7 +2008,7 @@ if board_file:
     st.success("Board file loaded — ready for analysis.")
 
 # ── OC List preview (expandable) ─────────────────────────────────────────────
-with st.expander("View Opportunity Customer List from Excel"):
+with st.expander("📋 View Opportunity Customer List (embedded)"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
         oc_preview_rows.append({
@@ -2196,6 +2117,15 @@ if st.button("Generate Staffing Report"):
             oc_matches = find_oc_customers_in_board(board_text)
             oc_alert_text = build_oc_alert_text(oc_matches)
 
+            if oc_matches:
+                customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
+                st.warning(
+                    f"⚠️ **Opportunity Customer Alert:** "
+                    f"The following customers were detected on today's board and require special handling: "
+                    f"**{', '.join(customer_names_found)}**. "
+                    f"See the OC Alerts section below for full requirements."
+                )
+
             board_analysis_text = analyze_board_with_groq(
                 board_text=board_text,
                 day=day,
@@ -2229,6 +2159,27 @@ if st.button("Generate Staffing Report"):
 
     st.success("Staffing report generated successfully.")
 
+    # ── OC Alerts UI block ────────────────────────────────────────────────────
+    if oc_matches:
+        st.markdown("---")
+        st.subheader("⚠️ Opportunity Customer Alerts")
+        st.error(
+            "The following customers on today's board are on the **Opportunity Customer List** "
+            "and require special DC actions before their loads ship."
+        )
+
+        for match in oc_matches:
+            c = match["customer"]
+            with st.expander(f"🔴 {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**Issue History:** {c['issue']}")
+                st.markdown(f"**DC Requirements:** {c['requirements']}")
+                if c["sign_off"]:
+                    st.markdown("🔒 **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                if c["pictures"]:
+                    st.markdown("📷 **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+    elif board_file is not None:
+        st.info("✅ No Opportunity Customers detected on today's board.")
+
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
 
@@ -2253,27 +2204,6 @@ if st.button("Generate Staffing Report"):
             "from cell values, including color flags for load checks, TT4s, and Canadian loads."
         )
         st.markdown(board_analysis_text)
-
-    # ── OC Alerts UI block ────────────────────────────────────────────────────
-    if oc_matches:
-        st.markdown("---")
-        st.subheader(" Opportunity Customer Alerts")
-        st.error(
-            "The following customers on today's board are on the **Opportunity Customer List** "
-            "and require special DC actions before their loads ship."
-        )
-
-        for match in oc_matches:
-            c = match["customer"]
-            with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
-                st.markdown(f"**Issue History:** {c['issue']}")
-                st.markdown(f"**DC Requirements:** {c['requirements']}")
-                if c["sign_off"]:
-                    st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
-                if c["pictures"]:
-                    st.markdown("**Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
-    elif board_file is not None:
-        st.info(" No Opportunity Customers detected on today's board.")
 
     st.download_button(
         label="Download Staffing Report",
