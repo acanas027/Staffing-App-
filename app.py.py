@@ -1300,8 +1300,8 @@ def read_board_file_to_text(board_file):
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     except Exception as e:
-    st.error(f"BOARD PARSER ERROR: {e}")
-    st.exception(e)
+        st.error(f"BOARD PARSER ERROR: {e}")
+        st.exception(e)
 
     return json.dumps(
         {
