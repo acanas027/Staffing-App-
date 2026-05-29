@@ -1313,7 +1313,7 @@ def read_board_file_to_text(board_file):
         )
 
 
-    )
+    
 
 def analyze_board_with_groq(
     board_text,
