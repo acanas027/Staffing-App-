@@ -7,6 +7,8 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
 import shutil
+import re 
+import json
 from openai import OpenAI
 
 
@@ -1219,22 +1221,21 @@ def read_board_file_to_text(board_file):
 
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
-    except Exception as e:
-        error_message = str(e)
+        except Exception as e:
+            error_message = str(e)
 
-        st.error(f"BOARD PARSER ERROR: {error_message}")
-        st.exception(e)
+            st.error(f"BOARD PARSER ERROR: {error_message}")
+            st.exception(e)
 
-        return json.dumps(
-            {
-                "error": f"Could not read board file: {error_message}",
-                "python_verified_summary": {},
-                "structured_load_rows": [],
-            },
-            indent=2,
-            ensure_ascii=False,
+            return json.dumps(
+                {
+                    "error": f"Could not read board file: {error_message}",
+                    "python_verified_summary": {},
+                    "structured_load_rows": [],
+               },
+                indent=2,
+                ensure_ascii=False,
         )
-
 
 def analyze_board_with_groq(
     board_text,
