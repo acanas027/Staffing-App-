@@ -829,21 +829,25 @@ def analyze_board_with_groq(
     base_context = f"""
 You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
 Use short bullet points. don't over explain.
+Read cell by cell of the board to understand what is happening. 
+The idea is to get as ahead as possible with the current resources. 
 
 When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
+Don't assume the load number for the day. Look for today's day and then count how many load number it has under it, until the next day appears. 
 
 Additional warehouse operation context:
 This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 6 am to 4:30 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 4pm that is still success, not behind. 
 The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12.
 
 The manager using this system is focused on:
-- Preventing shorts
-- Keeping pickers productive
 - Avoiding late departures
 - Protecting dock flow
 - Prioritizing live loads correctly
 - Reducing congestion
 - Getting ahead instead of reacting late
+- Preventing shorts
+- Keeping pickers productive
+
 
 Operational priorities from highest to lowest:
 1. Prevent shorts on customer orders
@@ -867,7 +871,6 @@ Important labor behavior rules:
 - Tasking/replenishment exists mainly to protect pickers from running out of product.
 - If replenishment falls behind, pickers stop producing.
 - Loading labor should only be pulled if outbound risk is low.
-- Receiving and unloading can temporarily absorb delays better than picking.
 - Lead/Extra labor should be used proactively before the operation falls behind.
 
 Operational productivity assumptions:
@@ -880,14 +883,13 @@ Risk interpretation rules:
 - Multiple Picking/Short loads means replenishment is failing.
 - Multiple R/S loads means outbound may miss appointments.
 - Late live loads are highest priority.
-- Loads with no door, no trailer, or no loader are operational risks.
-- If many loads are blank/not started, the operation is behind schedule.
+- the operation is behind schedule when we are don't have ready to load the loads for the time of the day it is. 
 - If outbound workload is heavier than staffing, recommend labor moves immediately.
 
 Management philosophy:
-The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if it's going to benefit us.
+The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if we are overstaffed.
 
-The manager prefers:
+The manager needs:
 - proactive recommendations
 - actionable labor moves
 - operational risk analysis
@@ -900,7 +902,7 @@ When making recommendations:
 - Specify EXACTLY where labor should move from and to
 - Explain WHY
 - Explain operational consequences if no action is taken
-- Give achievable operational goals for the next 30 minutes and next 2 hours
+- Give achievable operational goals for the next 30 minutes and next 2 hours and the end of the shift
 - Prioritize live loads, shorts, and dock flow
 - Think like an experienced outbound operations manager
 
@@ -923,13 +925,9 @@ Board data rules and operation rules:
 - If a color annotation is absent, the cell had no special flag — do not guess.
 - Blank status on the board means the load is not currently being worked.
 - R/S means Ready to load but still short on full pallets.
-- Our average productivity:
-  - Picking: 185 cases per hour per worker allocated
-  - Loading: 1 trailer per hour per worker allocated
-  - Unloading: 44 pallets per hour per worker allocated
-  - Full pallets / replenishment movement: 25 full pallets per hour per worker allocated
 - Picking is measured in tickets on the board, but analyze everything in cases. Our average is 60 cases per picking ticket.
-- If a column or value is unclear or missing, say "unclear" — do not invent information.
+- If a column or value is unclear or missing, say "unclear" — do not guess information.
+-Read every cell and give your insights based on text, no color. 
 
 Here is the outbound board data extracted directly from the Excel file:
 {board_text}
@@ -945,7 +943,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Specify how many loads are completed today out of the total for the day.
 - Specify any late loads, from when, if they are occupying a door, and which door.
 
-2. ⚠ Opportunity Customer (OC) Alerts:
+2. Opportunity Customer (OC) Alerts:
 - List every load on the board that belongs to a customer on the Opportunity Customer List.
 - For each OC load: state the load number, customer name, current status, appointment time, and EXACTLY what special actions are required before this load ships.
 - If pictures are required, state when they should be taken and who should own it.
@@ -956,9 +954,6 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - How many loads have not been started?
 - Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why.
 - How big is the risk? Explain what are the risk factors.
-- Can we get ahead? Yes or no and why
-- Given all this information, how far ahead can we finish this shift?
-- Give me the load appointment times we should be picking by the end of this shift.
 - Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks? Specify people from what areas we can move staff from and to where.
 
 4. Prioritization:
@@ -969,7 +964,9 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Given staffing gaps or surpluses, which problems can we actually fix right now?
 - Where should labor move first?
 - Based on staffing and demand, what should be an achievable goal for this shift?
-- How ahead or behind should we finish this shift?
+- Can we get ahead? Yes or no and why. What is an achievable goal for the end of shift?
+- Given all this information, how far ahead or behind are we forecasted to finish this shift?
+- Give me the load appointment times we should be picking and have RTL by the end of this shift based on the above stated goal.
 
 6. Top 3 Action Items:
 - What are the 3 most important things the manager should do in the next 30 minutes?
@@ -1050,6 +1047,7 @@ OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early 
                         "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
                         "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
                         "as if you are delivering it directly to the shift manager. "
+                        "Make sure to count the loads per day from every cell, this number has to be accurate. 
                         "Follow the exact same output structure as the initial analysis. "
                         "Opportunity Customer (OC) alerts must appear early and be complete — never omit or shorten them."
                     ),
