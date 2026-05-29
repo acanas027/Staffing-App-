@@ -5,6 +5,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.utils import get_column_letter
 from io import BytesIO
+import json
 import os
 import shutil
 from openai import OpenAI
@@ -22,8 +23,10 @@ if not os.path.exists(TEMPLATE_FILE):
     st.error("Template file not found. Put staffing_template.xlsx in the same folder as report.py.")
     st.stop()
 
+
 # ── OPPORTUNITY CUSTOMER LIST (Excel-driven) ─────────────────────────────────
 # Put this Excel file in the same folder as app.py / report.py in GitHub.
+# Expected file name matches the file you provided.
 OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
 
 
@@ -38,6 +41,10 @@ def yes_no_to_bool(value):
 
 
 def build_aliases(customer_name):
+    """
+    Builds practical match terms from the customer name.
+    This lets the board match shortened customer names like Target, Sobeys, Jewel, etc.
+    """
     name = clean_text(customer_name).lower()
 
     aliases = []
@@ -61,6 +68,7 @@ def build_aliases(customer_name):
     if len(words) > 0:
         aliases.append(words[0])
 
+    # Extra common aliases / misspellings
     if "target" in cleaned:
         aliases.append("target")
 
@@ -89,6 +97,22 @@ def build_aliases(customer_name):
 
 
 def load_oc_customer_list():
+    """
+    Reads Opportunity Customers from the Excel file instead of hardcoding them in Python.
+
+    File expected:
+    - Resers DCs Opportunity Cusotmer List.xlsx
+    - Sheet: OC Customer List
+    - Headers on Excel row 6, so pandas header=5
+
+    Expected columns:
+    - Customer Name
+    - Customer #
+    - Customer Profile-Why are they an OC?
+    - DC Requirements (Summarized)
+    - Sign Off \n(Y/N)
+    - Pictures  \n(Y/N)
+    """
     if not os.path.exists(OC_FILE):
         st.warning(
             f"OC customer list file not found: {OC_FILE}. "
@@ -111,6 +135,7 @@ def load_oc_customer_list():
             if not customer_name:
                 continue
 
+            # Skip example/template rows if present
             if customer_name.lower() in ["market x", "example", "customer name"]:
                 continue
 
@@ -144,8 +169,6 @@ def load_oc_customer_list():
 
 
 OC_CUSTOMER_LIST = load_oc_customer_list()
-
-
 
 def find_oc_customers_in_board(board_text):
     """
@@ -680,86 +703,520 @@ def build_recommendations(
 
 # ── BOARD EXCEL READING ───────────────────────────────────────────────────────
 
+BOARD_STATUS_KEYWORDS = [
+    "Loaded Short",
+    "Picking/Short",
+    "Picking Short",
+    "Ready/Short",
+    "R/S",
+    "RTL",
+    "Ready To Load",
+    "Picking",
+    "Completed",
+    "Complete",
+    "Loaded",
+    "Late",
+    "No Driver",
+]
+
+BOARD_DAY_NAMES = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+]
+
+
+def board_cell_flags(cell):
+    flags = []
+
+    fill = cell.fill
+    fill_color = ""
+    if fill and fill.fgColor and fill.fgColor.type == "rgb":
+        fill_color = str(fill.fgColor.rgb).upper()
+
+    font = cell.font
+    font_color = ""
+    if font and font.color and font.color.type == "rgb":
+        font_color = str(font.color.rgb).upper()
+
+    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):
+        flags.append("LOAD-CHECK")
+    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF", "FFB0E0E6", "FF00BFFF"):
+        flags.append("TT4-NEEDED")
+
+    if font_color in ("FFFF0000", "00FF0000"):
+        flags.append("CANADIAN")
+
+    return flags
+
+
+def normalize_board_text(value):
+    if value is None:
+        return ""
+    return str(value).replace("\n", " ").strip()
+
+
+def looks_like_load_number(value):
+    text = normalize_board_text(value)
+    text = re.sub(r"\.0$", "", text)
+    text = re.sub(r"^LD", "", text, flags=re.IGNORECASE)
+    digits = re.sub(r"[^0-9]", "", text)
+    return digits if 5 <= len(digits) <= 9 else ""
+
+
+def detect_board_day(row_text):
+    for day_name in BOARD_DAY_NAMES:
+        if re.search(rf"\b{day_name}\b", row_text, flags=re.IGNORECASE):
+            return day_name
+    return ""
+
+
+def detect_board_date(row_text):
+    match = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", row_text)
+    if match:
+        return normalize_date(match.group(0)) or match.group(0)
+    return ""
+
+
+def detect_board_time(row_values):
+    for value in row_values:
+        candidate = normalize_time(value)
+        if candidate:
+            return candidate
+    return ""
+
+
+def detect_board_status(row_text):
+    text = row_text.upper()
+
+    if "LOADED SHORT" in text:
+        return "Loaded Short"
+    if "PICKING/SHORT" in text or "PICKING SHORT" in text:
+        return "Picking/Short"
+    if "READY/SHORT" in text or re.search(r"\bR/S\b", text):
+        return "R/S"
+    if re.search(r"\bRTL\b", text) or "READY TO LOAD" in text:
+        return "RTL"
+    if "NO DRIVER" in text:
+        return "No Driver"
+    if "PICKING" in text:
+        return "Picking"
+    if "COMPLETED" in text or re.search(r"\bCOMPLETE\b", text):
+        return "Completed"
+    if re.search(r"\bLATE\b", text):
+        return "Late"
+    if re.search(r"\bLOADED\b", text):
+        return "Loaded"
+
+    return ""
+
+
+def build_header_map_from_row(row_values):
+    header_map = {}
+
+    for idx, value in enumerate(row_values):
+        header = normalize_header(value)
+
+        if not header:
+            continue
+
+        if "LOAD" in header or header in ["LD", "LOADNUMBER", "LOADREF"]:
+            header_map["load"] = idx
+        elif "CUSTOMER" in header or "CUST" in header or "DEST" in header or "SHIPTO" in header or "CONSIGNEE" in header:
+            header_map["customer"] = idx
+        elif "CARRIER" in header:
+            header_map["carrier"] = idx
+        elif "TIME" in header or "APPT" in header:
+            header_map["time"] = idx
+        elif "DOOR" in header or "DOCK" in header:
+            header_map["door"] = idx
+        elif "TRAILER" in header:
+            header_map["trailer"] = idx
+        elif "STATUS" in header or "STAT" in header:
+            header_map["status"] = idx
+        elif "TYPE" in header:
+            header_map["type"] = idx
+        elif "TT4" in header:
+            header_map["tt4"] = idx
+        elif "LOADER" in header or "EMPLOYEE" in header or "ASSIGNED" in header:
+            header_map["loader"] = idx
+        elif "COMMENT" in header or "NOTE" in header:
+            header_map["comments"] = idx
+        elif "PICK" in header:
+            header_map["picks"] = idx
+        elif "PULL" in header:
+            header_map["pulls"] = idx
+
+    return header_map
+
+
+def row_looks_like_header(row_values):
+    text = " ".join(str(v).upper() for v in row_values if str(v).strip())
+    hits = 0
+
+    for word in ["LOAD", "CUSTOMER", "CARRIER", "TIME", "DOOR", "STATUS", "TRAILER", "LOADER"]:
+        if word in text:
+            hits += 1
+
+    return hits >= 2
+
+
+def get_by_header(row_values, header_map, key):
+    idx = header_map.get(key)
+    if idx is None or idx >= len(row_values):
+        return ""
+    return normalize_board_text(row_values[idx])
+
+
+def detect_door(row_values, header_map):
+    door = get_by_header(row_values, header_map, "door")
+    if door:
+        return door
+
+    for value in row_values:
+        text = normalize_board_text(value)
+        if re.fullmatch(r"\d{1,3}", text):
+            number = int(text)
+            if 1 <= number <= 99:
+                return text
+
+    return ""
+
+
+def detect_ticket_count(row_values, header_map, key):
+    value = get_by_header(row_values, header_map, key)
+    if value:
+        return parse_number(value)
+    return 0
+
+
+def parse_board_rows_from_records(records, source_name):
+    board_rows = []
+    current_day = ""
+    current_date = ""
+    header_map = {}
+
+    for record in records:
+        row_number = record["row_number"]
+        row_values = record["values"]
+        row_flags = record.get("flags", [])
+        row_text = " ".join(v for v in row_values if v)
+
+        if not row_text.strip():
+            continue
+
+        detected_day = detect_board_day(row_text)
+        detected_date = detect_board_date(row_text)
+
+        load_candidates = [looks_like_load_number(v) for v in row_values]
+        load_candidates = [v for v in load_candidates if v]
+        has_load = bool(load_candidates)
+
+        if row_looks_like_header(row_values):
+            header_map = build_header_map_from_row(row_values)
+            continue
+
+        if (detected_day or detected_date) and not has_load:
+            if detected_day:
+                current_day = detected_day
+            if detected_date:
+                current_date = detected_date
+            continue
+
+        if not has_load:
+            continue
+
+        load_number = get_by_header(row_values, header_map, "load")
+        load_number = looks_like_load_number(load_number) or load_candidates[0]
+
+        status = get_by_header(row_values, header_map, "status")
+        status = detect_board_status(status) or detect_board_status(row_text)
+
+        customer = get_by_header(row_values, header_map, "customer")
+        carrier = get_by_header(row_values, header_map, "carrier")
+        appt_time = get_by_header(row_values, header_map, "time") or detect_board_time(row_values)
+        door = detect_door(row_values, header_map)
+        trailer = get_by_header(row_values, header_map, "trailer")
+        load_type = get_by_header(row_values, header_map, "type")
+        tt4 = get_by_header(row_values, header_map, "tt4")
+        loader = get_by_header(row_values, header_map, "loader")
+        comments = get_by_header(row_values, header_map, "comments")
+        picks = detect_ticket_count(row_values, header_map, "picks")
+        pulls = detect_ticket_count(row_values, header_map, "pulls")
+
+        # Fallbacks when the board has no reliable headers.
+        non_empty = [v for v in row_values if v]
+        if not customer:
+            for value in non_empty:
+                if value == load_number:
+                    continue
+                if normalize_time(value):
+                    continue
+                if detect_board_status(value):
+                    continue
+                if re.fullmatch(r"\d{1,4}", value):
+                    continue
+                customer = value
+                break
+
+        if not comments:
+            comments = row_text
+
+        flags = sorted(set(row_flags))
+
+        board_rows.append(
+            {
+                "source": source_name,
+                "row_number": row_number,
+                "day": current_day,
+                "date": current_date,
+                "load_number": load_number,
+                "customer": customer,
+                "carrier": carrier,
+                "appt_time": appt_time,
+                "door": door,
+                "trailer": trailer,
+                "status": status,
+                "type": load_type,
+                "tt4": tt4,
+                "loader": loader,
+                "comments": comments,
+                "picks": picks,
+                "pulls": pulls,
+                "flags": flags,
+                "raw_row": row_text,
+            }
+        )
+
+    return board_rows
+
+
+def board_records_from_excel(board_file):
+    board_file.seek(0)
+    wb = load_workbook(board_file, data_only=True)
+    all_board_rows = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        records = []
+
+        for row_idx, row in enumerate(ws.iter_rows(), start=1):
+            values = []
+            flags = []
+
+            for cell in row:
+                val_str = normalize_board_text(cell.value)
+                values.append(val_str)
+
+                for flag in board_cell_flags(cell):
+                    flags.append(flag)
+
+            records.append(
+                {
+                    "row_number": row_idx,
+                    "values": values,
+                    "flags": sorted(set(flags)),
+                }
+            )
+
+        all_board_rows.extend(parse_board_rows_from_records(records, sheet_name))
+
+    return all_board_rows
+
+
+def board_records_from_csv(board_file):
+    board_file.seek(0)
+    df = pd.read_csv(board_file, header=None).fillna("")
+    records = []
+
+    for idx, row in df.iterrows():
+        records.append(
+            {
+                "row_number": int(idx) + 1,
+                "values": [normalize_board_text(v) for v in row.tolist()],
+                "flags": [],
+            }
+        )
+
+    return parse_board_rows_from_records(records, "CSV Board")
+
+
+def build_python_board_summary(board_rows):
+    summary = {
+        "loads_read_from_board": len(board_rows),
+        "loads_by_day": {},
+        "loads_by_date": {},
+        "status_counts": {},
+        "late_loads": 0,
+        "rtl_loads": 0,
+        "rs_loads": 0,
+        "picking_loads": 0,
+        "picking_short_loads": 0,
+        "loaded_short_loads": 0,
+        "completed_loads": 0,
+        "blank_or_not_started_loads": 0,
+        "live_loads": 0,
+        "drop_loads": 0,
+        "cpu_loads": 0,
+        "tt4_needed_loads": 0,
+        "load_check_loads": 0,
+        "canadian_loads": 0,
+        "loads_with_loader_assigned": 0,
+        "loads_missing_loader": 0,
+        "late_load_details": [],
+        "rs_load_details": [],
+        "picking_short_details": [],
+        "loaded_short_details": [],
+        "rtl_details": [],
+        "blank_or_not_started_details": [],
+        "priority_load_details": [],
+    }
+
+    for row in board_rows:
+        day_key = row.get("day") or "Unknown Day"
+        date_key = row.get("date") or "Unknown Date"
+        status = row.get("status") or "Blank/Not Started"
+        status_upper = status.upper()
+        raw_upper = row.get("raw_row", "").upper()
+        flags = row.get("flags", [])
+
+        summary["loads_by_day"][day_key] = summary["loads_by_day"].get(day_key, 0) + 1
+        summary["loads_by_date"][date_key] = summary["loads_by_date"].get(date_key, 0) + 1
+        summary["status_counts"][status] = summary["status_counts"].get(status, 0) + 1
+
+        if "LATE" in status_upper or " LATE " in f" {raw_upper} ":
+            summary["late_loads"] += 1
+            summary["late_load_details"].append(row)
+
+        if status_upper == "RTL" or "READY TO LOAD" in status_upper:
+            summary["rtl_loads"] += 1
+            summary["rtl_details"].append(row)
+
+        if status_upper in ["R/S", "READY/SHORT"] or "R/S" in raw_upper:
+            summary["rs_loads"] += 1
+            summary["rs_load_details"].append(row)
+
+        if status_upper == "PICKING":
+            summary["picking_loads"] += 1
+
+        if "PICKING/SHORT" in status_upper or "PICKING SHORT" in status_upper:
+            summary["picking_short_loads"] += 1
+            summary["picking_short_details"].append(row)
+
+        if "LOADED SHORT" in status_upper:
+            summary["loaded_short_loads"] += 1
+            summary["loaded_short_details"].append(row)
+
+        if "COMPLETED" in status_upper or status_upper == "COMPLETE":
+            summary["completed_loads"] += 1
+
+        if not row.get("status"):
+            summary["blank_or_not_started_loads"] += 1
+            summary["blank_or_not_started_details"].append(row)
+
+        if "LIVE" in raw_upper:
+            summary["live_loads"] += 1
+            summary["priority_load_details"].append(row)
+
+        if "DROP" in raw_upper:
+            summary["drop_loads"] += 1
+
+        if "CPU" in raw_upper:
+            summary["cpu_loads"] += 1
+            summary["priority_load_details"].append(row)
+
+        if "TT4-NEEDED" in flags:
+            summary["tt4_needed_loads"] += 1
+            summary["priority_load_details"].append(row)
+
+        if "LOAD-CHECK" in flags:
+            summary["load_check_loads"] += 1
+            summary["priority_load_details"].append(row)
+
+        if "CANADIAN" in flags:
+            summary["canadian_loads"] += 1
+            summary["priority_load_details"].append(row)
+
+        if row.get("loader"):
+            summary["loads_with_loader_assigned"] += 1
+        else:
+            summary["loads_missing_loader"] += 1
+
+    # Remove exact duplicate priority rows.
+    seen = set()
+    unique_priority = []
+    for item in summary["priority_load_details"]:
+        key = (item.get("load_number"), item.get("row_number"), item.get("source"))
+        if key not in seen:
+            seen.add(key)
+            unique_priority.append(item)
+    summary["priority_load_details"] = unique_priority
+
+    return summary
+
+
+def compact_board_rows_for_ai(board_rows):
+    compact_rows = []
+
+    for row in board_rows:
+        compact_rows.append(
+            {
+                "day": row.get("day", ""),
+                "date": row.get("date", ""),
+                "load": row.get("load_number", ""),
+                "customer": row.get("customer", ""),
+                "carrier": row.get("carrier", ""),
+                "time": row.get("appt_time", ""),
+                "door": row.get("door", ""),
+                "trailer": row.get("trailer", ""),
+                "status": row.get("status", ""),
+                "type": row.get("type", ""),
+                "tt4": row.get("tt4", ""),
+                "loader": row.get("loader", ""),
+                "picks": row.get("picks", 0),
+                "pulls": row.get("pulls", 0),
+                "flags": row.get("flags", []),
+                "comments": row.get("comments", ""),
+            }
+        )
+
+    return compact_rows
+
+
 def read_board_file_to_text(board_file):
     board_file.seek(0)
     file_name = board_file.name.lower()
 
-    if file_name.endswith(".csv"):
-        try:
-            df = pd.read_csv(board_file)
-            df = df.dropna(how="all").dropna(axis=1, how="all").fillna("")
-            return df.to_csv(index=False)
-        except Exception as e:
-            return f"Could not read CSV board file: {e}"
-
     try:
-        board_file.seek(0)
-        wb = load_workbook(board_file, data_only=True)
-        sections = []
+        if file_name.endswith(".csv"):
+            board_rows = board_records_from_csv(board_file)
+        else:
+            board_rows = board_records_from_excel(board_file)
 
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
+        board_summary = build_python_board_summary(board_rows)
+        compact_rows = compact_board_rows_for_ai(board_rows)
 
-            rows_data = []
-            headers = None
+        payload = {
+            "python_verified_summary": board_summary,
+            "structured_load_rows": compact_rows,
+            "instructions_for_ai": [
+                "Use python_verified_summary as the source of truth for counts.",
+                "Use structured_load_rows for load-level details, load numbers, customers, status, doors, times, flags, and comments.",
+                "Do not invent load numbers or counts that are not present in this JSON.",
+                "If a field is blank, say unclear instead of guessing.",
+            ],
+        }
 
-            for row_idx, row in enumerate(ws.iter_rows(), start=1):
-                row_values = []
-
-                for cell in row:
-                    val = cell.value
-                    val_str = "" if val is None else str(val).strip()
-
-                    fill = cell.fill
-                    fill_color = ""
-                    if fill and fill.fgColor and fill.fgColor.type == "rgb":
-                        fill_color = fill.fgColor.rgb.upper()
-
-                    font = cell.font
-                    font_color = ""
-                    if font and font.color and font.color.type == "rgb":
-                        font_color = font.color.rgb.upper()
-
-                    flags = []
-                    if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00"):
-                        flags.append("[LOAD-CHECK]")
-                    elif fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF",
-                                        "FFB0E0E6", "FF00BFFF"):
-                        flags.append("[TT4-NEEDED]")
-
-                    if font_color in ("FFFF0000", "00FF0000"):
-                        flags.append("[CANADIAN]")
-
-                    annotated = val_str + (" " + " ".join(flags) if flags else "")
-                    row_values.append(annotated)
-
-                if all(v.strip() == "" for v in row_values):
-                    continue
-
-                if row_idx == 1:
-                    headers = row_values
-                else:
-                    rows_data.append(row_values)
-
-            if not rows_data:
-                continue
-
-            section_lines = [f"--- SHEET: {sheet_name} ---"]
-            if headers:
-                section_lines.append(",".join(headers))
-            for r in rows_data:
-                section_lines.append(",".join(r))
-
-            sections.append("\n".join(section_lines))
-
-        if not sections:
-            return "No readable board data found in the uploaded Excel file."
-
-        return "\n\n".join(sections)
+        return json.dumps(payload, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        return f"Could not read Excel board file: {e}"
-
+        return json.dumps(
+            {
+                "error": f"Could not read board file: {str(e)}",
+                "python_verified_summary": {},
+                "structured_load_rows": [],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
 
 def analyze_board_with_groq(
     board_text,
@@ -811,9 +1268,9 @@ def analyze_board_with_groq(
         oc_section = f"\n\n{oc_alert_text}\n"
 
     base_context = f"""
-You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
+You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). Python has already parsed the board into structured JSON. Treat the Python-verified counts and structured load rows as the source of truth.
 Use short bullet points. don't over explain.
-Read cell by cell of the board to understand what is happening. 
+Use the structured load rows and Python summary instead of guessing from raw Excel text. 
 The idea is to get as ahead as possible with the current resources. 
 
 When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
@@ -903,7 +1360,7 @@ Current staffing vs. what we need:
 {staffing_summary}
 {oc_section}
 Board data rules and operation rules:
-- All data below was extracted directly from Excel cells — treat it as accurate.
+- The data below was extracted and summarized by Python before being sent to you. Use the JSON counts as the source of truth.
 - Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
 - Cells annotated with [CANADIAN] had red font in Excel, meaning it is a Canadian load.
 - If a color annotation is absent, the cell had no special flag — do not guess.
@@ -911,9 +1368,9 @@ Board data rules and operation rules:
 - R/S means Ready to load but still short on full pallets.
 - Picking is measured in tickets on the board, but analyze everything in cases. Our average is 60 cases per picking ticket.
 - If a column or value is unclear or missing, say "unclear" — do not guess information.
--Read every cell and give your insights based on text, no color. 
+- Read the structured JSON rows and give insights based only on those rows and verified counts. 
 
-Here is the outbound board data extracted directly from the Excel file:
+Here is the Python-verified structured board data. Use this JSON as the source of truth for counts and load-level details:
 {board_text}
 """
 
@@ -1039,6 +1496,7 @@ OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early 
                 {
                     "role": "user",
                     "content": (
+                        f"=== PYTHON-VERIFIED BOARD DATA AND OPERATIONAL CONTEXT ===\n{base_context}\n\n"
                         f"=== INITIAL ANALYSIS ===\n{initial_analysis}\n\n"
                         f"=== VALIDATION NOTES (apply these corrections) ===\n{validation_notes}\n\n"
                         f"=== OUTPUT STRUCTURE TO FOLLOW ===\n{output_structure}"
@@ -1531,7 +1989,7 @@ if board_file:
     st.success("Board file loaded — ready for analysis.")
 
 # ── OC List preview (expandable) ─────────────────────────────────────────────
-with st.expander(" View Opportunity Customer List from Excel"):
+with st.expander("View Opportunity Customer List from Excel"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
         oc_preview_rows.append({
