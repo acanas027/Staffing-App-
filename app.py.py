@@ -1637,6 +1637,85 @@ board_file = st.file_uploader(
 if board_file:
     st.success("Board file loaded — ready for analysis.")
 
+    with st.expander("🔍 Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
+        try:
+            board_file.seek(0)
+            file_name_lower = board_file.name.lower()
+            if file_name_lower.endswith(".csv"):
+                preview_rows = board_records_from_csv(board_file)
+            else:
+                preview_rows = board_records_from_excel(board_file)
+
+            if not preview_rows:
+                st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5–9 digit load numbers in column A.")
+            else:
+                # ── Summary counts ────────────────────────────────────────────
+                preview_summary = build_python_board_summary(preview_rows)
+                total = preview_summary["loads_read_from_board"]
+
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("Total Loads", total)
+                col2.metric("RTL", preview_summary["rtl_loads"])
+                col3.metric("Picking/Short", preview_summary["picking_short_loads"])
+                col4.metric("R/S", preview_summary["rs_loads"])
+                col5.metric("Loaded Short", preview_summary["loaded_short_loads"])
+
+                col6, col7, col8, col9, col10 = st.columns(5)
+                col6.metric("Picking", preview_summary["picking_loads"])
+                col7.metric("Blank/Not Started", preview_summary["blank_or_not_started_loads"])
+                col8.metric("Live Loads", preview_summary["live_loads"])
+                col9.metric("CPU Loads", preview_summary["cpu_loads"])
+                col10.metric("Late", preview_summary["late_loads"])
+
+                st.caption(f"Loads by day: {preview_summary['loads_by_day']}")
+
+                # ── Full parsed table ─────────────────────────────────────────
+                st.markdown("**Every load row Python extracted from the file:**")
+                preview_df = pd.DataFrame([
+                    {
+                        "Day": r.get("day", ""),
+                        "Date": r.get("date", ""),
+                        "Load #": r.get("load_number", ""),
+                        "Customer": r.get("customer", ""),
+                        "Carrier": r.get("carrier", ""),
+                        "Time": r.get("appt_time", ""),
+                        "Door": r.get("door", ""),
+                        "Trailer": r.get("trailer", ""),
+                        "Status": r.get("status", "") or "—",
+                        "Type": r.get("type", ""),
+                        "TT4": r.get("tt4", ""),
+                        "Loader": r.get("loader", ""),
+                        "Picks": r.get("picks", 0),
+                        "Pulls": r.get("pulls", 0),
+                        "Flags": ", ".join(r.get("flags", [])),
+                        "Comments": r.get("comments", ""),
+                    }
+                    for r in preview_rows
+                ])
+                st.dataframe(preview_df, use_container_width=True, height=400)
+
+                # ── Quick sanity checks ───────────────────────────────────────
+                st.markdown("**Quick sanity checks:**")
+                issues = []
+                blank_time = [r["load_number"] for r in preview_rows if not r.get("appt_time")]
+                if blank_time:
+                    issues.append(f"⚠️ {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
+                blank_customer = [r["load_number"] for r in preview_rows if not r.get("customer")]
+                if blank_customer:
+                    issues.append(f"⚠️ {len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
+                no_day = [r["load_number"] for r in preview_rows if not r.get("day")]
+                if no_day:
+                    issues.append(f"⚠️ {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
+                if issues:
+                    for issue in issues:
+                        st.warning(issue)
+                else:
+                    st.success("✅ All loads have time, customer, and day context — parse looks clean.")
+
+        except Exception as e:
+            st.error(f"Preview failed: {e}")
+            st.exception(e)
+
 with st.expander("📋 View Opportunity Customer List (embedded)"):
     oc_preview_rows = []
     for c in OC_CUSTOMER_LIST:
