@@ -910,10 +910,12 @@ def parse_board_rows_from_records(records, source_name):
         load_candidates = [v for v in load_candidates if v]
         has_load = bool(load_candidates)
 
-        if row_looks_like_header(row_values):
+        # Header rows should update the map only when they are not actual load rows.
+        if row_looks_like_header(row_values) and not has_load:
             header_map = build_header_map_from_row(row_values)
             continue
 
+        # Day/date rows in your board usually have no load number.
         if (detected_day or detected_date) and not has_load:
             if detected_day:
                 current_day = detected_day
@@ -927,35 +929,43 @@ def parse_board_rows_from_records(records, source_name):
         load_number = get_by_header(row_values, header_map, "load")
         load_number = looks_like_load_number(load_number) or load_candidates[0]
 
-        status = get_by_header(row_values, header_map, "status")
-        status = detect_board_status(status) or detect_board_status(row_text)
+        try:
+            load_idx = next(
+                i for i, v in enumerate(row_values)
+                if looks_like_load_number(v) == load_number
+            )
+        except StopIteration:
+            load_idx = 0
 
-        customer = get_by_header(row_values, header_map, "customer")
-        carrier = get_by_header(row_values, header_map, "carrier")
-        appt_time = get_by_header(row_values, header_map, "time") or detect_board_time(row_values)
-        door = detect_door(row_values, header_map)
-        trailer = get_by_header(row_values, header_map, "trailer")
+        def get_pos(offset):
+            idx = load_idx + offset
+            if 0 <= idx < len(row_values):
+                return normalize_board_text(row_values[idx])
+            return ""
+
+        # Header-based read first. Positional fallback second.
+        # This matches the usual board layout:
+        # Load, Destination, Carrier, Time, Door, Trailer, Status, TT4, Loader, Comments
+        customer = get_by_header(row_values, header_map, "customer") or get_pos(1)
+        carrier = get_by_header(row_values, header_map, "carrier") or get_pos(2)
+        appt_time = (
+            get_by_header(row_values, header_map, "time")
+            or normalize_time(get_pos(3))
+            or detect_board_time(row_values)
+        )
+        door = get_by_header(row_values, header_map, "door") or get_pos(4)
+        trailer = get_by_header(row_values, header_map, "trailer") or get_pos(5)
+
+        status_raw = get_by_header(row_values, header_map, "status") or get_pos(6)
+        status = detect_board_status(status_raw) or detect_board_status(row_text)
+
         load_type = get_by_header(row_values, header_map, "type")
-        tt4 = get_by_header(row_values, header_map, "tt4")
-        loader = get_by_header(row_values, header_map, "loader")
-        comments = get_by_header(row_values, header_map, "comments")
+        tt4 = get_by_header(row_values, header_map, "tt4") or get_pos(7)
+        loader = get_by_header(row_values, header_map, "loader") or get_pos(8)
+        comments = get_by_header(row_values, header_map, "comments") or get_pos(9)
+
         picks = detect_ticket_count(row_values, header_map, "picks")
         pulls = detect_ticket_count(row_values, header_map, "pulls")
-
-        # Fallbacks when the board has no reliable headers.
-        non_empty = [v for v in row_values if v]
-        if not customer:
-            for value in non_empty:
-                if value == load_number:
-                    continue
-                if normalize_time(value):
-                    continue
-                if detect_board_status(value):
-                    continue
-                if re.fullmatch(r"\d{1,4}", value):
-                    continue
-                customer = value
-                break
 
         if not comments:
             comments = row_text
@@ -987,7 +997,6 @@ def parse_board_rows_from_records(records, source_name):
         )
 
     return board_rows
-
 
 def board_records_from_excel(board_file):
     board_file.seek(0)
