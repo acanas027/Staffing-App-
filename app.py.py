@@ -20,13 +20,23 @@ st.write("Enter daily inputs, select who is present, and generate the staffing r
 
 TEMPLATE_FILE = "staffing_template.xlsx"
 
-
 if not os.path.exists(TEMPLATE_FILE):
     st.error("Template file not found. Put staffing_template.xlsx in the same folder as report.py.")
     st.stop()
 
 
+# ============================================================
 #  OPPORTUNITY CUSTOMER LIST (loaded from Excel)
+#  File must be in the same folder as report.py.
+#  Sheet: "OC Customer List"
+#  Row 6  = headers (skipped by name check)
+#  Row 7  = example row — skipped (name contains "market x" / "example")
+#  Rows 8+ = real data
+#  Columns:
+#    A: Resers DC   B: Customer #   C: Customer Name   D: Address
+#    E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
+#    H: Pictures (Y/N)   I: Other (Y/N)
+# ============================================================
 OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
 OC_SHEET = "OC Customer List"
 OC_HEADER_ROW = 6
@@ -35,6 +45,10 @@ OC_DATA_START = 8
 
 @st.cache_data
 def load_oc_customer_list():
+    """
+    Read the OC Excel file and return a list of customer dicts.
+    Cached so it only reads once per app session.
+    """
     if not os.path.exists(OC_FILE):
         st.error(
             f"OC customer list file not found: '{OC_FILE}'. "
@@ -52,7 +66,7 @@ def load_oc_customer_list():
         customers = []
 
         for row_idx in range(OC_DATA_START, ws.max_row + 1):
-            raw_name = ws.cell(row_idx, 3).value
+            raw_name = ws.cell(row_idx, 3).value  # col C
             if not raw_name:
                 continue
 
@@ -61,11 +75,11 @@ def load_oc_customer_list():
             if "market x" in name_clean or "example" in name_clean:
                 continue
 
-            raw_cust_num = ws.cell(row_idx, 2).value
-            raw_issue    = ws.cell(row_idx, 5).value
-            raw_reqs     = ws.cell(row_idx, 6).value
-            raw_signoff  = ws.cell(row_idx, 7).value
-            raw_pictures = ws.cell(row_idx, 8).value
+            raw_cust_num = ws.cell(row_idx, 2).value  # col B
+            raw_issue    = ws.cell(row_idx, 5).value  # col E
+            raw_reqs     = ws.cell(row_idx, 6).value  # col F
+            raw_signoff  = ws.cell(row_idx, 7).value  # col G
+            raw_pictures = ws.cell(row_idx, 8).value  # col H
 
             issue = str(raw_issue).strip() if raw_issue else ""
             reqs  = str(raw_reqs).strip()  if raw_reqs  else ""
@@ -84,14 +98,14 @@ def load_oc_customer_list():
                 aliases.append(base.replace("'", ""))
                 aliases.append(base.replace("'s", ""))
             known_aliases = {
-                "target rialto":        ["target"],
-                "sobey's - all loads":  ["sobeys", "sobey", "sobey's"],
-                "sysco kc (olathe)":    ["sysco kc", "sysco kansas city", "sysco olathe", "sysco kc olathe"],
-                "pfs virgina":          ["pfs virginia", "pfs va"],
+                "target rialto":          ["target"],
+                "sobey's - all loads":    ["sobeys", "sobey", "sobey's"],
+                "sysco kc (olathe)":      ["sysco kc", "sysco kansas city", "sysco olathe", "sysco kc olathe"],
+                "pfs virgina":            ["pfs virginia", "pfs va"],
                 "metro toronto fresh dc": ["metro toronto", "metro fresh"],
-                "jewel's":              ["jewels", "jewel"],
-                "awg":                  ["associated wholesale grocers"],
-                "whataburguer":         ["whataburger"],
+                "jewel's":                ["jewels", "jewel"],
+                "awg":                    ["associated wholesale grocers"],
+                "whataburguer":           ["whataburger"],
             }
             if name_clean in known_aliases:
                 aliases += known_aliases[name_clean]
@@ -173,35 +187,27 @@ def get_groq_client():
 
 
 # ============================================================
-#  SHIFT-AWARE NAME LOADING
-#  1st shift: Inputs col E (rows 3+)
-#  2nd shift: Inputs col N (rows 3+)
-#  NOTE: @st.cache_data intentionally removed — caching caused
-#  stale empty lists when switching shifts.
+#  NAME LOADING
+#  Reads directly from the staffing sheets (col A), filtered
+#  by the selected shift. No caching — avoids stale lists
+#  when the user switches between 1st and 2nd shift.
+#  1st shift: "Staffing sheet 1ST Shift"  col A rows 2+
+#  2nd shift: "Staffing Sheet 2nd Shift"  col A rows 2+
 # ============================================================
 def load_names_for_shift(shift):
-    wb = load_workbook(TEMPLATE_FILE, data_only=False)
-    ws = wb["Inputs"]
-    names = []
-    consecutive_empty = 0
-
+    wb = load_workbook(TEMPLATE_FILE, data_only=True)
     if shift == "1st":
-        col = 5   # column E
-        start_row = 3
+        ws = wb["Staffing sheet 1ST Shift"]
     else:
-        col = 14  # column N
-        start_row = 3  # row 2 is the "Name" header, names start at row 3
-
-    for row in range(start_row, ws.max_row + 1):
-        name = ws.cell(row, col).value
-        if name and str(name).strip():
-            names.append(str(name).strip())
-            consecutive_empty = 0
-        else:
-            consecutive_empty += 1
-            if consecutive_empty >= 10:
-                break
-    return names
+        ws = wb["Staffing Sheet 2nd Shift"]
+    names = []
+    for row in range(2, ws.max_row + 1):
+        val = ws.cell(row, 1).value
+        if val and str(val).strip():
+            names.append(str(val).strip())
+        elif names:
+            break
+    return sorted(names)
 
 
 def whole_workers(value):
@@ -265,22 +271,22 @@ def calculate_needed(
     if msb_open == "YES":
         inbound_pallets += 640
     raw_needed = {
-        "Unloading": (inbound_pallets / 4) / (44 * hours_remaining),
-        "Receiving": (inbound_pallets / 4) / (44 * hours_remaining),
-        "Putaway": (inbound_pallets / 2) / (25 * hours_remaining),
-        "Picking": cases_to_pick / (185 * hours_remaining),
+        "Unloading":     (inbound_pallets / 4) / (44 * hours_remaining),
+        "Receiving":     (inbound_pallets / 4) / (44 * hours_remaining),
+        "Putaway":       (inbound_pallets / 2) / (25 * hours_remaining),
+        "Picking":       cases_to_pick / (185 * hours_remaining),
         "Replenishment": (cases_to_pick / 70) / (25 * 8.5),
-        "Full Pallets": full_pallets / (25 * hours_remaining),
-        "Loading": total_outbound_loads_actual / hours_remaining,
+        "Full Pallets":  full_pallets / (25 * hours_remaining),
+        "Loading":       total_outbound_loads_actual / hours_remaining,
     }
     needed = {
         "Unloading": max(2, whole_workers(raw_needed["Unloading"])),
-        "Receiving": max(2, whole_workers(raw_needed["Receiving"])),
-        "Picking": whole_workers(raw_needed["Picking"]),
-        "Tasking": whole_workers(
+        "Receiving":  max(2, whole_workers(raw_needed["Receiving"])),
+        "Picking":    whole_workers(raw_needed["Picking"]),
+        "Tasking":    whole_workers(
             raw_needed["Putaway"] + raw_needed["Replenishment"] + raw_needed["Full Pallets"]
         ),
-        "Loading": whole_workers(raw_needed["Loading"]),
+        "Loading":    whole_workers(raw_needed["Loading"]),
     }
     return needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets
 
@@ -315,10 +321,10 @@ def generate_recommendations(staff, needed):
 
     best_fit_steps = [
         ("Unloading", "Unload", "U"),
-        ("Loading", "Load", "L"),
+        ("Loading",   "Load",   "L"),
         ("Receiving", "Receiv", "R"),
-        ("Picking", "Pick", "P"),
-        ("Tasking", "Task", "T"),
+        ("Picking",   "Pick",   "P"),
+        ("Tasking",   "Task",   "T"),
     ]
     for task, fit_text, skill in best_fit_steps:
         for idx in present_indexes:
@@ -406,13 +412,13 @@ def build_summary(staff, needed):
         staff["Present"].astype(str).str.strip().str.lower().eq("x")
         & staff["Recommended Task"].astype(str).str.strip().ne("")
     ].copy()
-    needed_list = pd.Series(needed, name="Needed")
+    needed_list   = pd.Series(needed, name="Needed")
     assigned_list = present_recommendations["Recommended Task"].value_counts().rename("Assigned")
     summary_table = pd.concat([needed_list, assigned_list], axis=1).fillna(0)
-    summary_table["Needed"] = summary_table["Needed"].astype(int)
-    summary_table["Assigned"] = summary_table["Assigned"].astype(int)
+    summary_table["Needed"]     = summary_table["Needed"].astype(int)
+    summary_table["Assigned"]   = summary_table["Assigned"].astype(int)
     summary_table["Difference"] = summary_table["Assigned"] - summary_table["Needed"]
-    summary_table["Status"] = summary_table["Difference"].apply(
+    summary_table["Status"]     = summary_table["Difference"].apply(
         lambda x: "Good" if x == 0 else ("Overstaffed" if x > 0 else "Understaffed")
     )
     return present_recommendations, summary_table
@@ -437,12 +443,12 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         else:
             recommendations.append(f"{task}: Staffing is balanced.")
 
-    picking_gap = int(summary_table.loc["Picking", "Difference"]) if "Picking" in summary_table.index else 0
-    tasking_gap = int(summary_table.loc["Tasking", "Difference"]) if "Tasking" in summary_table.index else 0
-    receiving_gap = int(summary_table.loc["Receiving", "Difference"]) if "Receiving" in summary_table.index else 0
-    unloading_gap = int(summary_table.loc["Unloading", "Difference"]) if "Unloading" in summary_table.index else 0
-    loading_gap = int(summary_table.loc["Loading", "Difference"]) if "Loading" in summary_table.index else 0
-    lead_gap = int(summary_table.loc["Lead/Extra", "Difference"]) if "Lead/Extra" in summary_table.index else 0
+    picking_gap   = int(summary_table.loc["Picking",    "Difference"]) if "Picking"    in summary_table.index else 0
+    tasking_gap   = int(summary_table.loc["Tasking",    "Difference"]) if "Tasking"    in summary_table.index else 0
+    receiving_gap = int(summary_table.loc["Receiving",  "Difference"]) if "Receiving"  in summary_table.index else 0
+    unloading_gap = int(summary_table.loc["Unloading",  "Difference"]) if "Unloading"  in summary_table.index else 0
+    loading_gap   = int(summary_table.loc["Loading",    "Difference"]) if "Loading"    in summary_table.index else 0
+    lead_gap      = int(summary_table.loc["Lead/Extra", "Difference"]) if "Lead/Extra" in summary_table.index else 0
 
     if picking_gap < 0:
         recommendations.append("High picking short risk detected. Consider moving tasking labor into replenishment to protect pickers.")
@@ -466,7 +472,7 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         recommendations.append("Consider deep cleaning, trailer audits, replenishment cleanup, or cross-training.")
         recommendations.append("Extra labor could be used proactively to prevent later picking shortages.")
 
-    inbound_pressure = raw_needed["Unloading"] + raw_needed["Receiving"] + raw_needed["Putaway"]
+    inbound_pressure  = raw_needed["Unloading"] + raw_needed["Receiving"] + raw_needed["Putaway"]
     outbound_pressure = raw_needed["Picking"] + raw_needed["Loading"]
     if inbound_pressure > outbound_pressure * 1.3:
         recommendations.append("Inbound workload is significantly heavier than outbound.")
@@ -481,19 +487,21 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         recommendations.append("Enough shift time remains to strategically rebalance labor before bottlenecks form.")
 
     lower_notes = notes.lower()
-    if "late" in lower_notes:
+    if "late"  in lower_notes:
         recommendations.append("Manager notes mention late loads. Prioritize outbound execution and trailer readiness.")
     if "short" in lower_notes:
         recommendations.append("Manager notes indicate short risk. Protect replenishment and picking flow.")
-    if "live" in lower_notes:
+    if "live"  in lower_notes:
         recommendations.append("Live loads detected in notes. Prioritize those doors before drop trailers.")
-    if "cpu" in lower_notes:
+    if "cpu"   in lower_notes:
         recommendations.append("CPU loads referenced. Ensure loading labor is protected.")
 
     return recommendations
 
 
+# ============================================================
 #  BOARD EXCEL READING
+# ============================================================
 BOARD_DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
 
@@ -670,24 +678,24 @@ def board_records_from_excel(board_file):
                 trailer_text = values[5].upper()
                 type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
                 all_rows.append({
-                    "source": sheet_name,
-                    "day": current_day,
-                    "date": current_date,
+                    "source":     sheet_name,
+                    "day":        current_day,
+                    "date":       current_date,
                     "load_number": load_number,
-                    "customer": values[1],
-                    "carrier": values[2],
-                    "appt_time": normalize_board_time(values[3]),
-                    "door": values[4],
-                    "trailer": values[5],
-                    "status": status,
-                    "type": type_value,
-                    "tt4": values[7],
-                    "loader": values[8],
-                    "comments": values[9],
-                    "pulls": parse_number(values[10]),
-                    "picks": parse_number(values[11]),
-                    "flags": [],
-                    "raw_row": " | ".join(v for v in values if v),
+                    "customer":   values[1],
+                    "carrier":    values[2],
+                    "appt_time":  normalize_board_time(values[3]),
+                    "door":       values[4],
+                    "trailer":    values[5],
+                    "status":     status,
+                    "type":       type_value,
+                    "tt4":        values[7],
+                    "loader":     values[8],
+                    "comments":   values[9],
+                    "pulls":      parse_number(values[10]),
+                    "picks":      parse_number(values[11]),
+                    "flags":      [],
+                    "raw_row":    " | ".join(v for v in values if v),
                 })
         return all_rows
 
@@ -749,25 +757,25 @@ def board_records_from_excel(board_file):
                 type_value = "Drop"
 
             all_rows.append({
-                "source": sheet_name,
-                "row_number": row_idx,
-                "day": current_day,
-                "date": current_date,
+                "source":      sheet_name,
+                "row_number":  row_idx,
+                "day":         current_day,
+                "date":        current_date,
                 "load_number": load_number,
-                "customer": values[1],
-                "carrier": values[2],
-                "appt_time": normalize_board_time(values[3]),
-                "door": values[4],
-                "trailer": values[5],
-                "status": status,
-                "type": type_value,
-                "tt4": values[7],
-                "loader": values[8],
-                "comments": values[9],
-                "pulls": parse_number(values[10]),
-                "picks": parse_number(values[11]),
-                "flags": sorted(set(flags)),
-                "raw_row": " | ".join(v for v in values if v),
+                "customer":    values[1],
+                "carrier":     values[2],
+                "appt_time":   normalize_board_time(values[3]),
+                "door":        values[4],
+                "trailer":     values[5],
+                "status":      status,
+                "type":        type_value,
+                "tt4":         values[7],
+                "loader":      values[8],
+                "comments":    values[9],
+                "pulls":       parse_number(values[10]),
+                "picks":       parse_number(values[11]),
+                "flags":       sorted(set(flags)),
+                "raw_row":     " | ".join(v for v in values if v),
             })
 
     return all_rows
@@ -800,24 +808,24 @@ def board_records_from_csv(board_file):
         trailer_text = values[5].upper()
         type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
         all_rows.append({
-            "source": "CSV Board",
-            "day": current_day,
-            "date": current_date,
+            "source":      "CSV Board",
+            "day":         current_day,
+            "date":        current_date,
             "load_number": load_number,
-            "customer": values[1],
-            "carrier": values[2],
-            "appt_time": normalize_board_time(values[3]),
-            "door": values[4],
-            "trailer": values[5],
-            "status": status,
-            "type": type_value,
-            "tt4": values[7],
-            "loader": values[8],
-            "comments": values[9],
-            "pulls": parse_number(values[10]),
-            "picks": parse_number(values[11]),
-            "flags": [],
-            "raw_row": " | ".join(v for v in values if v),
+            "customer":    values[1],
+            "carrier":     values[2],
+            "appt_time":   normalize_board_time(values[3]),
+            "door":        values[4],
+            "trailer":     values[5],
+            "status":      status,
+            "type":        type_value,
+            "tt4":         values[7],
+            "loader":      values[8],
+            "comments":    values[9],
+            "pulls":       parse_number(values[10]),
+            "picks":       parse_number(values[11]),
+            "flags":       [],
+            "raw_row":     " | ".join(v for v in values if v),
         })
     return all_rows
 
@@ -862,19 +870,19 @@ def board_records_from_inbound_sheet(board_file):
             continue
 
         all_rows.append({
-            "source": inbound_sheet,
-            "day": current_day,
-            "date": current_date,
+            "source":      inbound_sheet,
+            "day":         current_day,
+            "date":        current_date,
             "load_number": load_number,
-            "carrier": normalize_board_text(ws.cell(row_idx, 2).value),
-            "appt_time": normalize_board_time(ws.cell(row_idx, 3).value),
-            "type": normalize_board_text(ws.cell(row_idx, 4).value),
-            "trailer": normalize_board_text(ws.cell(row_idx, 5).value),
-            "status": normalize_board_text(ws.cell(row_idx, 6).value),
-            "receiver": normalize_board_text(ws.cell(row_idx, 7).value),
-            "origin": normalize_board_text(ws.cell(row_idx, 8).value),
-            "or_number": normalize_board_text(ws.cell(row_idx, 9).value),
-            "notes": normalize_board_text(ws.cell(row_idx, 10).value),
+            "carrier":     normalize_board_text(ws.cell(row_idx, 2).value),
+            "appt_time":   normalize_board_time(ws.cell(row_idx, 3).value),
+            "type":        normalize_board_text(ws.cell(row_idx, 4).value),
+            "trailer":     normalize_board_text(ws.cell(row_idx, 5).value),
+            "status":      normalize_board_text(ws.cell(row_idx, 6).value),
+            "receiver":    normalize_board_text(ws.cell(row_idx, 7).value),
+            "origin":      normalize_board_text(ws.cell(row_idx, 8).value),
+            "or_number":   normalize_board_text(ws.cell(row_idx, 9).value),
+            "notes":       normalize_board_text(ws.cell(row_idx, 10).value),
         })
 
     return all_rows
@@ -895,16 +903,16 @@ def build_python_inbound_summary(inbound_rows):
         day_key = row.get("day") or "Unknown Day"
         summary["loads_by_day"][day_key] = summary["loads_by_day"].get(day_key, 0) + 1
 
-        type_upper = row.get("type", "").upper()
+        type_upper   = row.get("type",   "").upper()
         status_upper = row.get("status", "").upper()
 
-        if "LIVE" in type_upper:
+        if "LIVE"   in type_upper:
             summary["live_loads"] += 1
-        if "DROP" in type_upper:
+        if "DROP"   in type_upper:
             summary["drop_loads"] += 1
         if "ON LOT" in status_upper:
             summary["on_lot"] += 1
-        if "DOOR" in status_upper:
+        if "DOOR"   in status_upper:
             summary["at_door"] += 1
         if row.get("receiver"):
             summary["loads_with_receiver"] += 1
@@ -916,46 +924,46 @@ def build_python_inbound_summary(inbound_rows):
 
 def build_python_board_summary(board_rows):
     summary = {
-        "loads_read_from_board": len(board_rows),
-        "loads_by_day": {},
-        "loads_by_date": {},
-        "status_counts": {},
-        "late_loads": 0,
-        "rtl_loads": 0,
-        "rs_loads": 0,
-        "picking_loads": 0,
-        "picking_short_loads": 0,
-        "loaded_short_loads": 0,
-        "completed_loads": 0,
-        "blank_or_not_started_loads": 0,
-        "live_loads": 0,
-        "drop_loads": 0,
-        "cpu_loads": 0,
-        "tt4_needed_loads": 0,
-        "load_check_loads": 0,
-        "canadian_loads": 0,
-        "loads_with_loader_assigned": 0,
-        "loads_missing_loader": 0,
-        "late_load_details": [],
-        "rs_load_details": [],
-        "picking_short_details": [],
-        "loaded_short_details": [],
-        "rtl_details": [],
+        "loads_read_from_board":        len(board_rows),
+        "loads_by_day":                 {},
+        "loads_by_date":                {},
+        "status_counts":                {},
+        "late_loads":                   0,
+        "rtl_loads":                    0,
+        "rs_loads":                     0,
+        "picking_loads":                0,
+        "picking_short_loads":          0,
+        "loaded_short_loads":           0,
+        "completed_loads":              0,
+        "blank_or_not_started_loads":   0,
+        "live_loads":                   0,
+        "drop_loads":                   0,
+        "cpu_loads":                    0,
+        "tt4_needed_loads":             0,
+        "load_check_loads":             0,
+        "canadian_loads":               0,
+        "loads_with_loader_assigned":   0,
+        "loads_missing_loader":         0,
+        "late_load_details":            [],
+        "rs_load_details":              [],
+        "picking_short_details":        [],
+        "loaded_short_details":         [],
+        "rtl_details":                  [],
         "blank_or_not_started_details": [],
-        "priority_load_details": [],
+        "priority_load_details":        [],
     }
 
     for row in board_rows:
-        day_key = row.get("day") or "Unknown Day"
-        date_key = row.get("date") or "Unknown Date"
-        status = row.get("status") or "Blank/Not Started"
+        day_key      = row.get("day")    or "Unknown Day"
+        date_key     = row.get("date")   or "Unknown Date"
+        status       = row.get("status") or "Blank/Not Started"
         status_upper = status.upper()
-        raw_upper = row.get("raw_row", "").upper()
-        flags = row.get("flags", [])
+        raw_upper    = row.get("raw_row", "").upper()
+        flags        = row.get("flags", [])
 
-        summary["loads_by_day"][day_key] = summary["loads_by_day"].get(day_key, 0) + 1
+        summary["loads_by_day"][day_key]   = summary["loads_by_day"].get(day_key, 0)   + 1
         summary["loads_by_date"][date_key] = summary["loads_by_date"].get(date_key, 0) + 1
-        summary["status_counts"][status] = summary["status_counts"].get(status, 0) + 1
+        summary["status_counts"][status]   = summary["status_counts"].get(status, 0)   + 1
 
         if "LATE" in status_upper or "LATE " in f" {raw_upper} ":
             summary["late_loads"] += 1
@@ -1014,35 +1022,45 @@ def build_python_board_summary(board_rows):
 
 
 def compact_board_rows_for_ai(board_rows):
+    """Strip raw_row and row_number — send only what the AI needs."""
     compact_rows = []
     for row in board_rows:
         compact_rows.append({
-            "day": row.get("day", ""),
-            "date": row.get("date", ""),
-            "load": row.get("load_number", ""),
+            "day":      row.get("day", ""),
+            "date":     row.get("date", ""),
+            "load":     row.get("load_number", ""),
             "customer": row.get("customer", ""),
-            "carrier": row.get("carrier", ""),
-            "time": row.get("appt_time", ""),
-            "door": row.get("door", ""),
-            "trailer": row.get("trailer", ""),
-            "status": row.get("status", ""),
-            "type": row.get("type", ""),
-            "tt4": row.get("tt4", ""),
-            "loader": row.get("loader", ""),
-            "picks": row.get("picks", 0),
-            "pulls": row.get("pulls", 0),
-            "flags": row.get("flags", []),
+            "carrier":  row.get("carrier", ""),
+            "time":     row.get("appt_time", ""),
+            "door":     row.get("door", ""),
+            "trailer":  row.get("trailer", ""),
+            "status":   row.get("status", ""),
+            "type":     row.get("type", ""),
+            "tt4":      row.get("tt4", ""),
+            "loader":   row.get("loader", ""),
+            "picks":    row.get("picks", 0),
+            "pulls":    row.get("pulls", 0),
+            "flags":    row.get("flags", []),
             "comments": row.get("comments", ""),
         })
     return compact_rows
 
 
 def slim_summary_for_ai(board_summary):
+    """Drop all *_details arrays — they duplicate row data and waste tokens."""
     detail_keys = {k for k in board_summary if k.endswith("_details")}
     return {k: v for k, v in board_summary.items() if k not in detail_keys}
 
 
 def actionable_rows_for_ai(board_rows):
+    """
+    Two buckets sent to the AI:
+    1. actionable — loads needing attention (notable status, flagged, or blank).
+       Full detail so the AI can recommend specific actions.
+    2. completed — slim records (load, customer, appt time, day) so the AI can
+       judge pacing (how many done vs remaining, are we ahead or behind schedule).
+    Plain "Loaded" rows with no flag are omitted entirely — done and no action needed.
+    """
     COMPLETED_STATUSES = {"Completed", "Complete"}
     SKIP_STATUSES = {"Loaded"}
     actionable = []
@@ -1050,9 +1068,9 @@ def actionable_rows_for_ai(board_rows):
     for row in board_rows:
         status = (row.get("status") or "").strip()
         flags  = row.get("flags", [])
-        is_blank = not status
-        is_completed = status in COMPLETED_STATUSES
-        is_skip = status in SKIP_STATUSES and not flags
+        is_blank       = not status
+        is_completed   = status in COMPLETED_STATUSES
+        is_skip        = status in SKIP_STATUSES and not flags
         notable_status = status and not is_completed and not is_skip
 
         if is_completed:
@@ -1081,12 +1099,17 @@ def actionable_rows_for_ai(board_rows):
 
 
 def read_board_file_to_text(board_file):
+    """
+    Main entry point: reads outbound and inbound sheets, builds Python-verified
+    summaries, and returns a compact JSON string for the AI prompt.
+    Only scalar counts go in the summary. Only actionable rows are sent.
+    """
     board_file.seek(0)
     file_name = board_file.name.lower()
 
     try:
         if file_name.endswith(".csv"):
-            board_rows = board_records_from_csv(board_file)
+            board_rows   = board_records_from_csv(board_file)
             inbound_rows = []
         else:
             board_rows = board_records_from_excel(board_file)
@@ -1100,8 +1123,8 @@ def read_board_file_to_text(board_file):
         payload = {
             "python_verified_outbound_summary": slim_summary_for_ai(board_summary),
             "python_verified_inbound_summary":  inbound_summary,
-            "actionable_outbound_rows": actionable_rows,
-            "completed_outbound_rows": completed_rows,
+            "actionable_outbound_rows":         actionable_rows,
+            "completed_outbound_rows":          completed_rows,
             "instructions_for_ai": [
                 "Use python_verified_outbound_summary for ALL outbound counts — do not recount from rows.",
                 "Use python_verified_inbound_summary for ALL inbound counts.",
@@ -1128,7 +1151,13 @@ def read_board_file_to_text(board_file):
         }, indent=2, ensure_ascii=False)
 
 
+# ============================================================
+#  SINGLE-CALL GROQ ANALYSIS
+#  Python does ALL counting. AI gets only pre-computed summaries
+#  + the compact load rows for context.
+# ============================================================
 def _rows_to_table(rows, columns):
+    """Format a list of dicts as a compact pipe-delimited text table."""
     if not rows:
         return "(none)"
     header = " | ".join(columns)
@@ -1152,14 +1181,14 @@ def analyze_board_with_groq(
         )
 
     try:
-        board_payload    = json.loads(board_text)
-        py_summary       = board_payload.get("python_verified_outbound_summary", {})
-        py_inbound       = board_payload.get("python_verified_inbound_summary", {})
-        actionable_rows  = board_payload.get("actionable_outbound_rows", [])
-        completed_rows   = board_payload.get("completed_outbound_rows", [])
+        board_payload   = json.loads(board_text)
+        py_summary      = board_payload.get("python_verified_outbound_summary", {})
+        py_inbound      = board_payload.get("python_verified_inbound_summary", {})
+        actionable_rows = board_payload.get("actionable_outbound_rows", [])
+        completed_rows  = board_payload.get("completed_outbound_rows", [])
     except Exception:
-        py_summary = {}
-        py_inbound = {}
+        py_summary      = {}
+        py_inbound      = {}
         actionable_rows = []
         completed_rows  = []
 
@@ -1301,17 +1330,17 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     else:
         ws = wb.create_sheet(sheet_name)
 
-    dark_blue = "0F5B78"
-    orange = "C55A11"
-    white = "FFFFFF"
-    light_blue = "D9EAF7"
+    dark_blue    = "0F5B78"
+    orange       = "C55A11"
+    white        = "FFFFFF"
+    light_blue   = "D9EAF7"
     light_orange = "FCE4D6"
-    thin = Side(style="thin", color="B7B7B7")
+    thin   = Side(style="thin", color="B7B7B7")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     ws["A1"] = "Board Excel Analysis — AI Insights"
-    ws["A1"].font = Font(size=16, bold=True, color=white)
-    ws["A1"].fill = PatternFill("solid", fgColor=dark_blue)
+    ws["A1"].font      = Font(size=16, bold=True, color=white)
+    ws["A1"].fill      = PatternFill("solid", fgColor=dark_blue)
     ws["A1"].alignment = Alignment(horizontal="center")
     ws.merge_cells("A1:G1")
     ws.row_dimensions[1].height = 28
@@ -1325,8 +1354,8 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
 
     if oc_matches:
         ws.cell(current_row, 1).value = "OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
-        ws.cell(current_row, 1).font = Font(size=13, bold=True, color=white)
-        ws.cell(current_row, 1).fill = PatternFill("solid", fgColor=orange)
+        ws.cell(current_row, 1).font      = Font(size=13, bold=True, color=white)
+        ws.cell(current_row, 1).fill      = PatternFill("solid", fgColor=orange)
         ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
         ws.row_dimensions[current_row].height = 22
@@ -1345,10 +1374,10 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 oc_lines.append("Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
-                cell.font = Font(size=10, bold=("CUSTOMER:" in line or "" in line or "" in line))
-                cell.fill = PatternFill("solid", fgColor=light_orange)
+                cell.font      = Font(size=10, bold=("CUSTOMER:" in line or "" in line or "" in line))
+                cell.fill      = PatternFill("solid", fgColor=light_orange)
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
-                cell.border = border
+                cell.border    = border
                 ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
                 ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
                 current_row += 1
@@ -1358,7 +1387,7 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     for line in analysis_text.split("\n"):
         cell = ws.cell(current_row, 1, line)
         cell.alignment = Alignment(wrap_text=True, vertical="top")
-        cell.border = border
+        cell.border    = border
         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
         ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
         current_row += 1
@@ -1369,10 +1398,9 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
 
 
 # ============================================================
-#  SHIFT-AWARE EXCEL WRITE-BACK
-#  1st shift: staffing sheet cols A,D,F,H(present),I(task); crew sheet col A→C,D
-#  2nd shift: staffing sheet cols A,D,F,H(present),I(task); no separate crew sheet
-#             (2nd shift uses "Staffing Sheet 2nd Shift", same column layout)
+#  EXCEL WRITE-BACK
+#  1st shift → "Staffing sheet 1ST Shift" col I + Crew Sheet
+#  2nd shift → "Staffing Sheet 2nd Shift" col I only
 # ============================================================
 def write_recommendations_to_excel(wb, staff, shift):
     if shift == "1st":
@@ -1382,11 +1410,10 @@ def write_recommendations_to_excel(wb, staff, shift):
 
     ws_staff = wb[sheet_name]
 
-    # Write Recommended Task into column I (col 9) for both shifts
     for excel_row, task in zip(range(2, len(staff) + 2), staff["Recommended Task"]):
         ws_staff[f"I{excel_row}"] = task
 
-    # Only update Crew Sheet for 1st shift (it maps 1st shift names)
+    # Crew Sheet only exists / is relevant for 1st shift
     if shift == "1st":
         ws_crew = wb["Crew Sheet"]
         crew_name_to_row = {}
@@ -1411,44 +1438,44 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     else:
         ws_dash = wb.create_sheet("Staffing Dashboard")
 
-    dark_blue = "0F5B78"
-    orange = "C55A11"
+    dark_blue  = "0F5B78"
+    orange     = "C55A11"
     light_blue = "D9EAF7"
-    green = "C6EFCE"
-    red = "FFC7CE"
-    yellow = "FFEB9C"
-    white = "FFFFFF"
-    thin = Side(style="thin", color="B7B7B7")
+    green      = "C6EFCE"
+    red        = "FFC7CE"
+    yellow     = "FFEB9C"
+    white      = "FFFFFF"
+    thin   = Side(style="thin", color="B7B7B7")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     ws_dash["A1"] = "1st Shift Staffing Dashboard"
-    ws_dash["A1"].font = Font(size=18, bold=True, color=white)
-    ws_dash["A1"].fill = PatternFill("solid", fgColor=dark_blue)
+    ws_dash["A1"].font      = Font(size=18, bold=True, color=white)
+    ws_dash["A1"].fill      = PatternFill("solid", fgColor=dark_blue)
     ws_dash["A1"].alignment = Alignment(horizontal="center")
     ws_dash.merge_cells("A1:K1")
 
-    total_present = len(present_recommendations)
-    total_needed = int(summary_table["Needed"].sum())
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
     total_assigned = int(summary_table["Assigned"].sum())
-    lead_extra = int((present_recommendations["Recommended Task"] == "Lead/Extra").sum())
-    overall_gap = total_assigned - total_needed
+    lead_extra     = int((present_recommendations["Recommended Task"] == "Lead/Extra").sum())
+    overall_gap    = total_assigned - total_needed
 
-    kpis = [
-        ("Total Present", total_present),
-        ("Total Needed", total_needed),
+    kpis     = [
+        ("Total Present",  total_present),
+        ("Total Needed",   total_needed),
         ("Total Assigned", total_assigned),
-        ("Lead/Extra", lead_extra),
-        ("Overall Gap", overall_gap),
+        ("Lead/Extra",     lead_extra),
+        ("Overall Gap",    overall_gap),
     ]
     kpi_cols = [1, 3, 5, 7, 9]
     for (label, value), col in zip(kpis, kpi_cols):
-        ws_dash.cell(3, col).value = label
-        ws_dash.cell(4, col).value = value
-        ws_dash.cell(3, col).font = Font(bold=True, color=white)
-        ws_dash.cell(3, col).fill = PatternFill("solid", fgColor=dark_blue)
+        ws_dash.cell(3, col).value     = label
+        ws_dash.cell(4, col).value     = value
+        ws_dash.cell(3, col).font      = Font(bold=True, color=white)
+        ws_dash.cell(3, col).fill      = PatternFill("solid", fgColor=dark_blue)
         ws_dash.cell(3, col).alignment = Alignment(horizontal="center")
-        ws_dash.cell(4, col).font = Font(bold=True, size=14)
-        ws_dash.cell(4, col).fill = PatternFill("solid", fgColor=light_blue)
+        ws_dash.cell(4, col).font      = Font(bold=True, size=14)
+        ws_dash.cell(4, col).fill      = PatternFill("solid", fgColor=light_blue)
         ws_dash.cell(4, col).alignment = Alignment(horizontal="center")
         ws_dash.merge_cells(start_row=3, start_column=col, end_row=3, end_column=col + 1)
         ws_dash.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col + 1)
@@ -1459,8 +1486,8 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
         ws_dash.cell(oc_banner_row, 1).value = (
             f"OC ALERT: Opportunity Customers on today's board — {customer_names} — See 'Board Analysis' tab for full requirements."
         )
-        ws_dash.cell(oc_banner_row, 1).font = Font(bold=True, color=white, size=11)
-        ws_dash.cell(oc_banner_row, 1).fill = PatternFill("solid", fgColor=orange)
+        ws_dash.cell(oc_banner_row, 1).font      = Font(bold=True, color=white, size=11)
+        ws_dash.cell(oc_banner_row, 1).fill      = PatternFill("solid", fgColor=orange)
         ws_dash.cell(oc_banner_row, 1).alignment = Alignment(horizontal="center", wrap_text=True)
         ws_dash.merge_cells(start_row=oc_banner_row, start_column=1, end_row=oc_banner_row, end_column=11)
         ws_dash.row_dimensions[oc_banner_row].height = 22
@@ -1469,24 +1496,24 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
         summary_label_row = oc_banner_row
 
     ws_dash.cell(summary_label_row, 1).value = "Needed vs Assigned"
-    ws_dash.cell(summary_label_row, 1).font = Font(size=14, bold=True)
+    ws_dash.cell(summary_label_row, 1).font  = Font(size=14, bold=True)
 
     header_row = summary_label_row + 1
     headers = ["Task", "Needed", "Assigned", "Difference", "Status"]
     for c, header in enumerate(headers, 1):
-        cell = ws_dash.cell(header_row, c)
-        cell.value = header
-        cell.font = Font(bold=True, color=white)
-        cell.fill = PatternFill("solid", fgColor=dark_blue)
-        cell.border = border
+        cell           = ws_dash.cell(header_row, c)
+        cell.value     = header
+        cell.font      = Font(bold=True, color=white)
+        cell.fill      = PatternFill("solid", fgColor=dark_blue)
+        cell.border    = border
         cell.alignment = Alignment(horizontal="center")
 
     for r, (task, row) in enumerate(summary_table.iterrows(), header_row + 1):
         values = [task, int(row["Needed"]), int(row["Assigned"]), int(row["Difference"]), row["Status"]]
         for c, value in enumerate(values, 1):
-            cell = ws_dash.cell(r, c)
-            cell.value = value
-            cell.border = border
+            cell           = ws_dash.cell(r, c)
+            cell.value     = value
+            cell.border    = border
             cell.alignment = Alignment(horizontal="center")
             if c == 5:
                 if value == "Good":
@@ -1497,34 +1524,34 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
                     cell.fill = PatternFill("solid", fgColor=yellow)
 
     ws_dash.cell(summary_label_row, 7).value = "Written Recommendations / What-Ifs"
-    ws_dash.cell(summary_label_row, 7).font = Font(size=14, bold=True)
+    ws_dash.cell(summary_label_row, 7).font  = Font(size=14, bold=True)
 
     rec_row = header_row
     for rec in recommendations:
-        ws_dash.cell(rec_row, 7).value = f"• {rec}"
+        ws_dash.cell(rec_row, 7).value     = f"• {rec}"
         ws_dash.cell(rec_row, 7).alignment = Alignment(wrap_text=True, vertical="top")
         ws_dash.merge_cells(start_row=rec_row, start_column=7, end_row=rec_row, end_column=11)
         rec_row += 1
 
     board_start = max(header_row + len(summary_table) + 4, rec_row + 2)
     ws_dash.cell(board_start, 1).value = "Recommended Staffing Board"
-    ws_dash.cell(board_start, 1).font = Font(size=14, bold=True)
+    ws_dash.cell(board_start, 1).font  = Font(size=14, bold=True)
 
     board_headers = ["Name", "Skills", "Best Fit", "Recommended Task"]
     for c, header in enumerate(board_headers, 1):
-        cell = ws_dash.cell(board_start + 1, c)
-        cell.value = header
-        cell.font = Font(bold=True, color=white)
-        cell.fill = PatternFill("solid", fgColor=dark_blue)
-        cell.border = border
+        cell           = ws_dash.cell(board_start + 1, c)
+        cell.value     = header
+        cell.font      = Font(bold=True, color=white)
+        cell.fill      = PatternFill("solid", fgColor=dark_blue)
+        cell.border    = border
         cell.alignment = Alignment(horizontal="center")
 
     for r, (_, row) in enumerate(present_recommendations.iterrows(), board_start + 2):
         values = [row["Name"], row["Skills"], row["Best Fit"], row["Recommended Task"]]
         for c, value in enumerate(values, 1):
-            cell = ws_dash.cell(r, c)
-            cell.value = value
-            cell.border = border
+            cell           = ws_dash.cell(r, c)
+            cell.value     = value
+            cell.border    = border
             cell.alignment = Alignment(horizontal="center")
             if r % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=light_blue)
@@ -1532,7 +1559,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     chart_anchor_row = board_start + len(present_recommendations) + 5
 
     bar = BarChart()
-    bar.title = "Needed vs Assigned"
+    bar.title        = "Needed vs Assigned"
     bar.y_axis.title = "Workers"
     bar.x_axis.title = "Task"
     data = Reference(ws_dash, min_col=2, max_col=3, min_row=header_row, max_row=header_row + len(summary_table))
@@ -1540,7 +1567,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     bar.add_data(data, titles_from_data=True)
     bar.set_categories(cats)
     bar.height = 9
-    bar.width = 15
+    bar.width  = 15
     bar.legend.position = "r"
     ws_dash.add_chart(bar, f"E{chart_anchor_row}")
 
@@ -1551,7 +1578,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     pie.add_data(pie_data, titles_from_data=True)
     pie.set_categories(pie_cats)
     pie.height = 9
-    pie.width = 13
+    pie.width  = 13
     pie.legend.position = "r"
     ws_dash.add_chart(pie, f"I{chart_anchor_row}")
 
@@ -1563,16 +1590,19 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     ws_dash.freeze_panes = f"A{header_row}"
 
 
+# ============================================================
+#  EMAIL DRAFT — OC section is brief (name + priority only)
+# ============================================================
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
     board_analysis_text=None, oc_matches=None,
 ):
-    total_present = len(present_recommendations)
-    total_needed = int(summary_table["Needed"].sum())
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
     total_assigned = int(summary_table["Assigned"].sum())
-    overall_gap = total_assigned - total_needed
-    subject = f"{day} {shift} Shift Staffing Report"
+    overall_gap    = total_assigned - total_needed
+    subject        = f"{day} {shift} Shift Staffing Report"
 
     staffing_lines = []
     for task, row in summary_table.iterrows():
@@ -1643,7 +1673,7 @@ day = st.sidebar.selectbox(
 
 shift = st.sidebar.selectbox("Shift", ["1st", "2nd"])
 
-# Load names dynamically based on selected shift — no cache so switching shifts always refreshes
+# Load names fresh every render — no cache — filtered by selected shift
 names = load_names_for_shift(shift)
 
 total_cases = st.sidebar.number_input("Total Cases for Today", min_value=0, step=1, value=0)
@@ -1654,7 +1684,7 @@ total_outbound_loads_day = st.sidebar.number_input("Total Outbound Loads for the
 
 crossroads_open = st.sidebar.selectbox("Crossroads plant open?", ["YES", "NO"])
 deer_creek_open = st.sidebar.selectbox("Deer Creek plant open?", ["YES", "NO"])
-msb_open = st.sidebar.selectbox("MSB plant open?", ["YES", "NO"])
+msb_open        = st.sidebar.selectbox("MSB plant open?", ["YES", "NO"])
 
 present_workers = st.sidebar.multiselect("Who is present?", names)
 
@@ -1692,18 +1722,18 @@ if board_file:
                 total = preview_summary["loads_read_from_board"]
 
                 col1, col2, col3, col4, col5 = st.columns(5)
-                col1.metric("Total Loads", total)
-                col2.metric("RTL", preview_summary["rtl_loads"])
+                col1.metric("Total Loads",   total)
+                col2.metric("RTL",           preview_summary["rtl_loads"])
                 col3.metric("Picking/Short", preview_summary["picking_short_loads"])
-                col4.metric("R/S", preview_summary["rs_loads"])
-                col5.metric("Loaded Short", preview_summary["loaded_short_loads"])
+                col4.metric("R/S",           preview_summary["rs_loads"])
+                col5.metric("Loaded Short",  preview_summary["loaded_short_loads"])
 
                 col6, col7, col8, col9, col10 = st.columns(5)
-                col6.metric("Picking", preview_summary["picking_loads"])
+                col6.metric("Picking",           preview_summary["picking_loads"])
                 col7.metric("Blank/Not Started", preview_summary["blank_or_not_started_loads"])
-                col8.metric("Live Loads", preview_summary["live_loads"])
-                col9.metric("CPU Loads", preview_summary["cpu_loads"])
-                col10.metric("Late", preview_summary["late_loads"])
+                col8.metric("Live Loads",        preview_summary["live_loads"])
+                col9.metric("CPU Loads",         preview_summary["cpu_loads"])
+                col10.metric("Late",             preview_summary["late_loads"])
 
                 st.caption(f"Outbound loads by day: {preview_summary['loads_by_day']}")
 
@@ -1714,23 +1744,23 @@ if board_file:
                     st.markdown("---")
                     st.markdown("**Inbound**")
                     ib1, ib2, ib3, ib4 = st.columns(4)
-                    ib1.metric("Total Inbound", inbound_preview_summary["loads_read_from_inbound"])
-                    ib2.metric("Live", inbound_preview_summary["live_loads"])
-                    ib3.metric("Drop", inbound_preview_summary["drop_loads"])
+                    ib1.metric("Total Inbound",    inbound_preview_summary["loads_read_from_inbound"])
+                    ib2.metric("Live",             inbound_preview_summary["live_loads"])
+                    ib3.metric("Drop",             inbound_preview_summary["drop_loads"])
                     ib4.metric("On Lot / At Door", inbound_preview_summary["on_lot"] + inbound_preview_summary["at_door"])
                     st.caption(f"Inbound loads by day: {inbound_preview_summary['loads_by_day']}")
                     inbound_df = pd.DataFrame([
                         {
-                            "Day": r.get("day", ""),
-                            "Load #": r.get("load_number", ""),
-                            "Carrier": r.get("carrier", ""),
-                            "Time": r.get("appt_time", ""),
-                            "Type": r.get("type", ""),
-                            "Trailer": r.get("trailer", ""),
-                            "Status": r.get("status", ""),
+                            "Day":      r.get("day", ""),
+                            "Load #":   r.get("load_number", ""),
+                            "Carrier":  r.get("carrier", ""),
+                            "Time":     r.get("appt_time", ""),
+                            "Type":     r.get("type", ""),
+                            "Trailer":  r.get("trailer", ""),
+                            "Status":   r.get("status", ""),
                             "Receiver": r.get("receiver", ""),
-                            "Origin": r.get("origin", ""),
-                            "Notes": r.get("notes", ""),
+                            "Origin":   r.get("origin", ""),
+                            "Notes":    r.get("notes", ""),
                         }
                         for r in inbound_preview_rows
                     ])
@@ -1740,21 +1770,21 @@ if board_file:
                 st.markdown("**Every outbound load row Python extracted from the file:**")
                 preview_df = pd.DataFrame([
                     {
-                        "Day": r.get("day", ""),
-                        "Date": r.get("date", ""),
-                        "Load #": r.get("load_number", ""),
+                        "Day":      r.get("day", ""),
+                        "Date":     r.get("date", ""),
+                        "Load #":   r.get("load_number", ""),
                         "Customer": r.get("customer", ""),
-                        "Carrier": r.get("carrier", ""),
-                        "Time": r.get("appt_time", ""),
-                        "Door": r.get("door", ""),
-                        "Trailer": r.get("trailer", ""),
-                        "Status": r.get("status", "") or "—",
-                        "Type": r.get("type", ""),
-                        "TT4": r.get("tt4", ""),
-                        "Loader": r.get("loader", ""),
-                        "Picks": r.get("picks", 0),
-                        "Pulls": r.get("pulls", 0),
-                        "Flags": ", ".join(r.get("flags", [])),
+                        "Carrier":  r.get("carrier", ""),
+                        "Time":     r.get("appt_time", ""),
+                        "Door":     r.get("door", ""),
+                        "Trailer":  r.get("trailer", ""),
+                        "Status":   r.get("status", "") or "—",
+                        "Type":     r.get("type", ""),
+                        "TT4":      r.get("tt4", ""),
+                        "Loader":   r.get("loader", ""),
+                        "Picks":    r.get("picks", 0),
+                        "Pulls":    r.get("pulls", 0),
+                        "Flags":    ", ".join(r.get("flags", [])),
                         "Comments": r.get("comments", ""),
                     }
                     for r in preview_rows
@@ -1788,13 +1818,13 @@ with st.expander("View Opportunity Customer List (from Excel file)"):
         oc_preview_rows = []
         for c in oc_list_preview:
             oc_preview_rows.append({
-                "Customer": c["name"].title(),
-                "Customer #": c["customer_number"] or "—",
-                "Priority": c["priority"],
-                "Issue": c["issue"],
+                "Customer":        c["name"].title(),
+                "Customer #":      c["customer_number"] or "—",
+                "Priority":        c["priority"],
+                "Issue":           c["issue"],
                 "DC Requirements": c["requirements"],
                 "Sign-Off Required": "Yes" if c["sign_off"] else "No",
-                "Photos Required": "Yes" if c["pictures"] else "No",
+                "Photos Required":   "Yes" if c["pictures"] else "No",
             })
         st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
         st.caption(f"Loaded {len(oc_list_preview)} customers from '{OC_FILE}'")
@@ -1825,40 +1855,32 @@ if st.button("Generate Staffing Report"):
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
 
-    # ── Write attendance into the correct shift column ──────────────────────
+    # ── Write attendance x into Inputs sheet (1st shift only) ──────────────
+    # 1st shift: Inputs col E = name, col G = present (x)
+    #   Crew Sheet col C pulls from Inputs col G via =Inputs!G3 etc.
+    #   Staffing sheet col T then VLOOKUPs Crew Sheet col C.
+    # 2nd shift: Inputs has no attendance columns wired up — presence is
+    #   handled entirely by the Python override below.
     selected = {name.strip().lower() for name in present_workers}
 
     if shift == "1st":
-        # 1st shift: names in col E (5), present in col F (6), starting row 3
-        name_col = 5
-        present_col = 6
-        start_row = 3
-    else:
-        # 2nd shift: names in col N (14), present in col O (15), starting row 3
-        name_col = 14
-        present_col = 15
-        start_row = 3
-
-    # Find last row with a name in this shift's name column
-    last_name_row = start_row
-    for r in range(start_row, ws.max_row + 1):
-        if ws.cell(r, name_col).value and str(ws.cell(r, name_col).value).strip():
-            last_name_row = r
-        elif r > last_name_row + 10:
-            break
-
-    # Clear presence column then mark present workers
-    for row in range(start_row, last_name_row + 1):
-        ws.cell(row, present_col).value = ""
-    for row in range(start_row, last_name_row + 1):
-        worker_name = ws.cell(row, name_col).value
-        if worker_name and str(worker_name).strip().lower() in selected:
-            ws.cell(row, present_col).value = "x"
+        _last_name_row = 3
+        for _r in range(3, ws.max_row + 1):
+            if ws.cell(_r, 5).value and str(ws.cell(_r, 5).value).strip():
+                _last_name_row = _r
+            elif _r > _last_name_row + 10:
+                break
+        for row in range(3, _last_name_row + 1):
+            ws.cell(row, 7).value = ""
+        for row in range(3, _last_name_row + 1):
+            worker_name = ws.cell(row, 5).value
+            if worker_name and str(worker_name).strip().lower() in selected:
+                ws.cell(row, 7).value = "x"
 
     ws["B12"] = notes
 
     wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
+    wb.calculation.forceFullCalc  = True
     wb.save(working_file)
 
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
@@ -1867,27 +1889,27 @@ if st.button("Generate Staffing Report"):
     )
 
     # ── Load staff from the correct shift's staffing sheet ──────────────────
+    # Both sheets share the same column layout:
+    #   A=Name  D=Skills  F=Best Fit  H=Present  I=Recommended Task
     if shift == "1st":
         staffing_sheet = "Staffing sheet 1ST Shift"
-        # 1st shift: Name=A, Skills=D, Best Fit=F, Recommended Task=I, Present=T
-        staff = pd.read_excel(working_file, sheet_name=staffing_sheet, usecols="A,D,F,I,T")
-        staff.columns = ["Name", "Skills", "Best Fit", "Recommended Task", "Present"]
     else:
         staffing_sheet = "Staffing Sheet 2nd Shift"
-        # 2nd shift: Name=A, Skills=D, Best Fit=F, Present=H, Recommended Task=I
-        staff = pd.read_excel(working_file, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
-        staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
 
+    staff = pd.read_excel(working_file, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
+    staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
     staff = staff[staff["Name"].notna()].copy()
 
-    # Override Present column from the multiselect (same logic for both shifts)
+    # Override Present from the sidebar multiselect — source of truth for both shifts
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
 
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
-    recommendations = build_recommendations(summary_table, present_recommendations, raw_needed, hours_remaining, notes)
+    recommendations = build_recommendations(
+        summary_table, present_recommendations, raw_needed, hours_remaining, notes
+    )
 
     wb = load_workbook(working_file)
     write_recommendations_to_excel(wb, staff, shift)
@@ -1897,9 +1919,8 @@ if st.button("Generate Staffing Report"):
 
     if board_file is not None:
         with st.spinner("Reading board file → scanning for Opportunity Customers → running AI analysis (single call)..."):
-            board_text = read_board_file_to_text(board_file)
-
-            oc_matches = find_oc_customers_in_board(board_text)
+            board_text    = read_board_file_to_text(board_file)
+            oc_matches    = find_oc_customers_in_board(board_text)
             oc_alert_text = build_oc_alert_text(oc_matches)
 
             if oc_matches:
