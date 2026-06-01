@@ -1045,10 +1045,64 @@ def compact_board_rows_for_ai(board_rows):
     return compact_rows
 
 
+def slim_summary_for_ai(board_summary):
+    """Drop all *_details arrays — they duplicate row data and waste tokens."""
+    detail_keys = {k for k in board_summary if k.endswith("_details")}
+    return {k: v for k, v in board_summary.items() if k not in detail_keys}
+
+
+def actionable_rows_for_ai(board_rows):
+    """
+    Two buckets sent to the AI:
+    1. actionable — loads needing attention (notable status, flagged, or blank).
+       Full detail so the AI can recommend specific actions.
+    2. completed — slim records (load, customer, appt time, day) so the AI can
+       judge pacing (how many done vs remaining, are we ahead or behind schedule).
+    Plain "Loaded" rows with no flag are omitted entirely — done and no action needed.
+    """
+    COMPLETED_STATUSES = {"Completed", "Complete"}
+    SKIP_STATUSES = {"Loaded"}
+    actionable = []
+    completed = []
+    for row in board_rows:
+        status = (row.get("status") or "").strip()
+        flags  = row.get("flags", [])
+        is_blank = not status
+        is_completed = status in COMPLETED_STATUSES
+        is_skip = status in SKIP_STATUSES and not flags
+        notable_status = status and not is_completed and not is_skip
+
+        if is_completed:
+            # Slim record — just enough for pacing analysis
+            completed.append({
+                "day":      row.get("day", ""),
+                "load":     row.get("load_number", ""),
+                "customer": row.get("customer", ""),
+                "time":     row.get("appt_time", ""),
+                "status":   status,
+            })
+        elif notable_status or bool(flags) or is_blank:
+            actionable.append({
+                "day":      row.get("day", ""),
+                "load":     row.get("load_number", ""),
+                "customer": row.get("customer", ""),
+                "time":     row.get("appt_time", ""),
+                "door":     row.get("door", ""),
+                "trailer":  row.get("trailer", ""),
+                "status":   status or "Blank/Not Started",
+                "type":     row.get("type", ""),
+                "loader":   row.get("loader", ""),
+                "flags":    flags,
+                "comments": row.get("comments", ""),
+            })
+    return actionable, completed
+
+
 def read_board_file_to_text(board_file):
     """
     Main entry point: reads outbound and inbound sheets, builds Python-verified
-    summaries, and returns a JSON string for the AI prompt.
+    summaries, and returns a compact JSON string for the AI prompt.
+    Only scalar counts go in the summary. Only actionable rows are sent.
     """
     board_file.seek(0)
     file_name = board_file.name.lower()
@@ -1062,18 +1116,20 @@ def read_board_file_to_text(board_file):
             board_file.seek(0)
             inbound_rows = board_records_from_inbound_sheet(board_file)
 
-        board_summary = build_python_board_summary(board_rows)
+        board_summary   = build_python_board_summary(board_rows)
         inbound_summary = build_python_inbound_summary(inbound_rows)
-        compact_rows = compact_board_rows_for_ai(board_rows)
+        actionable_rows, completed_rows = actionable_rows_for_ai(board_rows)
 
         payload = {
-            "python_verified_outbound_summary": board_summary,
-            "python_verified_inbound_summary": inbound_summary,
-            "structured_outbound_rows": compact_rows,
-            "structured_inbound_rows": inbound_rows,
+            "python_verified_outbound_summary": slim_summary_for_ai(board_summary),
+            "python_verified_inbound_summary":  inbound_summary,
+            "actionable_outbound_rows": actionable_rows,
+            "completed_outbound_rows": completed_rows,
             "instructions_for_ai": [
                 "Use python_verified_outbound_summary for ALL outbound counts — do not recount from rows.",
                 "Use python_verified_inbound_summary for ALL inbound counts.",
+                "actionable_outbound_rows = loads needing attention (notable status, flags, or blank).",
+                "completed_outbound_rows = slim records of finished loads. Use appt times to judge pacing: are completed loads early/on-time/late in the day relative to hours remaining?",
                 "Outbound and inbound are separate — never mix their counts.",
                 "All times use 24-hour clock.",
                 "Blank status means load not yet started.",
@@ -1090,9 +1146,8 @@ def read_board_file_to_text(board_file):
         return json.dumps({
             "error": f"Could not read board file: {error_message}",
             "python_verified_outbound_summary": {},
-            "python_verified_inbound_summary": {},
-            "structured_outbound_rows": [],
-            "structured_inbound_rows": [],
+            "python_verified_inbound_summary":  {},
+            "actionable_outbound_rows": [],
         }, indent=2, ensure_ascii=False)
 
 
