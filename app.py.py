@@ -171,9 +171,9 @@ def build_oc_alert_text(oc_matches):
         lines.append(f"  Issue History: {c['issue']}")
         lines.append(f"  DC Requirements: {c['requirements']}")
         if c["sign_off"]:
-            lines.append(" DC Supervisor Sign-Off REQUIRED before this load ships.")
+            lines.append("  ⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
         if c["pictures"]:
-            lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+            lines.append("  📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
         lines.append("")
     lines += [
         "IMPORTANT: For every OC load identified above:",
@@ -200,10 +200,17 @@ def load_names():
     wb = load_workbook(TEMPLATE_FILE, data_only=False)
     ws = wb["Inputs"]
     names = []
-    for row in range(3, 52):
+    # Dynamic scan — no hardcoded row limit. Stops after 10 consecutive empty rows.
+    consecutive_empty = 0
+    for row in range(3, ws.max_row + 1):
         name = ws[f"E{row}"].value
-        if name:
+        if name and str(name).strip():
             names.append(str(name).strip())
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+            if consecutive_empty >= 10:
+                break
     return names
 
 
@@ -610,6 +617,23 @@ def detect_board_status(value):
     return ""
 
 
+def detect_trailer_field_late(trailer_value):
+    """
+    The board sometimes writes LATE or ETA <time> in the trailer/door column (col 6)
+    instead of the status column. Detect this specifically for col 6 only —
+    NOT for the time column (col 4) where ETA just means the driver hasn't arrived yet.
+    """
+    text = normalize_board_text(trailer_value).upper()
+    if not text:
+        return False
+    if re.search(r"\bLATE\b", text):
+        return True
+    # ETA in the trailer field = driver running late, load overdue
+    if re.match(r"^ETA\b", text):
+        return True
+    return False
+
+
 def board_cell_flags(cell):
     """Read fill color and font color to detect special flags."""
     flags = []
@@ -683,7 +707,12 @@ def board_records_from_excel(board_file):
                 load_number = looks_like_board_load(values[0])
                 if not load_number:
                     continue
-                status = detect_board_status(values[6]) or detect_board_status(" ".join(values))
+                if detect_trailer_field_late(values[5]):
+                    status = "Late"
+                else:
+                    status = detect_board_status(values[6])
+                if not status:
+                    status = detect_board_status(" ".join(values))
                 trailer_text = values[5].upper()
                 type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
                 all_rows.append({
@@ -714,6 +743,7 @@ def board_records_from_excel(board_file):
         ws = wb[sheet_name]
         current_day = ""
         current_date = ""
+        consecutive_empty = 0  # stop early when Excel phantom rows start
         for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
@@ -727,7 +757,11 @@ def board_records_from_excel(board_file):
                     flags.append(flag)
 
             if not has_content:
+                consecutive_empty += 1
+                if consecutive_empty >= 15:
+                    break  # Excel reports ws.max_row incorrectly due to phantom formatting
                 continue
+            consecutive_empty = 0
 
             first_cell = values[0]
             if first_cell in BOARD_DAY_NAMES:
@@ -739,7 +773,14 @@ def board_records_from_excel(board_file):
             if not load_number:
                 continue
 
-            status = detect_board_status(values[6])
+            # Check col 6 (trailer/door field) for LATE or ETA FIRST —
+            # the board writes these there for overdue loads from prior days.
+            # Late takes priority over RTL/R/S since those still apply but
+            # the load is also overdue.
+            if detect_trailer_field_late(values[5]):
+                status = "Late"
+            else:
+                status = detect_board_status(values[6])
             if not status:
                 status = detect_board_status(" ".join(values))
 
@@ -795,7 +836,12 @@ def board_records_from_csv(board_file):
         load_number = looks_like_board_load(values[0])
         if not load_number:
             continue
-        status = detect_board_status(values[6]) or detect_board_status(" ".join(values))
+        if detect_trailer_field_late(values[5]):
+            status = "Late"
+        else:
+            status = detect_board_status(values[6])
+        if not status:
+            status = detect_board_status(" ".join(values))
         trailer_text = values[5].upper()
         type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
         all_rows.append({
@@ -1284,7 +1330,7 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     current_row = 4
 
     if oc_matches:
-        ws.cell(current_row, 1).value = "OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
+        ws.cell(current_row, 1).value = "⚠ OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
         ws.cell(current_row, 1).font = Font(size=13, bold=True, color=white)
         ws.cell(current_row, 1).fill = PatternFill("solid", fgColor=orange)
         ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
@@ -1300,9 +1346,9 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
-                oc_lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
+                oc_lines.append("⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
             if c["pictures"]:
-                oc_lines.append("Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+                oc_lines.append("📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
                 cell.font = Font(size=10, bold=("CUSTOMER:" in line or "⚠" in line or "📷" in line))
@@ -1603,10 +1649,10 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("Outbound Board Excel")
+st.subheader("📋 Outbound Board Excel / CSV")
 
 board_file = st.file_uploader(
-    "Upload the outbound load board Excel",
+    "Upload the outbound load board Excel or CSV file",
     type=["xlsx", "xls", "csv"],
     help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
@@ -1614,7 +1660,7 @@ board_file = st.file_uploader(
 if board_file:
     st.success("Board file loaded — ready for analysis.")
 
-    with st.expander(" Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
+    with st.expander("🔍 Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
         try:
             board_file.seek(0)
             file_name_lower = board_file.name.lower()
@@ -1676,24 +1722,24 @@ if board_file:
                 issues = []
                 blank_time = [r["load_number"] for r in preview_rows if not r.get("appt_time")]
                 if blank_time:
-                    issues.append(f" {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
+                    issues.append(f"⚠️ {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
                 blank_customer = [r["load_number"] for r in preview_rows if not r.get("customer")]
                 if blank_customer:
-                    issues.append(f" {len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
+                    issues.append(f"⚠️ {len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
                 no_day = [r["load_number"] for r in preview_rows if not r.get("day")]
                 if no_day:
-                    issues.append(f" {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
+                    issues.append(f"⚠️ {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
                 if issues:
                     for issue in issues:
                         st.warning(issue)
                 else:
-                    st.success(" All loads have time, customer, and day context — parse looks clean.")
+                    st.success("✅ All loads have time, customer, and day context — parse looks clean.")
 
         except Exception as e:
             st.error(f"Preview failed: {e}")
             st.exception(e)
 
-with st.expander(" View Opportunity Customer List (from Excel file)"):
+with st.expander("📋 View Opportunity Customer List (from Excel file)"):
     oc_list_preview = load_oc_customer_list()
     if oc_list_preview:
         oc_preview_rows = []
@@ -1736,11 +1782,18 @@ if st.button("Generate Staffing Report"):
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
 
-    for row in range(3, 52):
+    # Dynamic range — scan all rows that have a name in col E
+    _last_name_row = 3
+    for _r in range(3, ws.max_row + 1):
+        if ws[f"E{_r}"].value and str(ws[f"E{_r}"].value).strip():
+            _last_name_row = _r
+        elif _r > _last_name_row + 10:
+            break
+    for row in range(3, _last_name_row + 1):
         ws[f"F{row}"] = ""
 
     selected = {name.strip().lower() for name in present_workers}
-    for row in range(3, 52):
+    for row in range(3, _last_name_row + 1):
         worker_name = ws[f"E{row}"].value
         if worker_name and str(worker_name).strip().lower() in selected:
             ws[f"F{row}"] = "x"
@@ -1785,7 +1838,7 @@ if st.button("Generate Staffing Report"):
             if oc_matches:
                 customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
                 st.warning(
-                    f" **Opportunity Customer Alert:** "
+                    f"⚠️ **Opportunity Customer Alert:** "
                     f"The following customers were detected on today's board and require special handling: "
                     f"**{', '.join(customer_names_found)}**. "
                     f"See the OC Alerts section below for full requirements."
@@ -1826,22 +1879,22 @@ if st.button("Generate Staffing Report"):
 
     if oc_matches:
         st.markdown("---")
-        st.subheader("Opportunity Customer Alerts")
+        st.subheader("⚠️ Opportunity Customer Alerts")
         st.error(
             "The following customers on today's board are on the **Opportunity Customer List** "
             "and require special DC actions before their loads ship."
         )
         for match in oc_matches:
             c = match["customer"]
-            with st.expander(f" {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+            with st.expander(f"🔴 {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
                 st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
-                    st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                    st.markdown("🔒 **DC Supervisor Sign-Off REQUIRED before this load ships.**")
                 if c["pictures"]:
-                    st.markdown(" **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+                    st.markdown("📷 **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
     elif board_file is not None:
-        st.info(" No Opportunity Customers detected on today's board.")
+        st.info("✅ No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
