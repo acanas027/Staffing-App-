@@ -738,8 +738,16 @@ def board_records_from_excel(board_file):
         return all_rows
 
     # .xlsx — full read with color flag detection
+    # Only read the Outbound sheet. Other sheets (Inbound, formats, etc.)
+    # contain non-outbound data that would create phantom "Unknown Day" loads.
     wb = load_workbook(board_file, data_only=True)
-    for sheet_name in wb.sheetnames:
+    outbound_sheet = None
+    for candidate in ["Outbound", "outbound", "OUTBOUND"]:
+        if candidate in wb.sheetnames:
+            outbound_sheet = candidate
+            break
+    sheets_to_read = [outbound_sheet] if outbound_sheet else wb.sheetnames
+    for sheet_name in sheets_to_read:
         ws = wb[sheet_name]
         current_day = ""
         current_date = ""
@@ -865,6 +873,110 @@ def board_records_from_csv(board_file):
             "raw_row": " | ".join(v for v in values if v),
         })
     return all_rows
+
+
+def board_records_from_inbound_sheet(board_file):
+    """
+    Read the Inbound sheet from the board Excel file.
+    Layout (1-indexed columns):
+      1: Load Number   2: Carrier   3: Dispatch Time   4: Type (Live/Drop)
+      5: Trailer #     6: Status    7: Receiver         8: From (origin plant)
+      9: OR#           10: Notes    11: Start
+    Day header rows: col1 = day name, col2 = date, col3 = expected count
+    """
+    board_file.seek(0)
+    try:
+        wb = load_workbook(board_file, data_only=True)
+    except Exception:
+        return []
+
+    inbound_sheet = None
+    for candidate in ["Inbound", "inbound", "INBOUND"]:
+        if candidate in wb.sheetnames:
+            inbound_sheet = candidate
+            break
+    if not inbound_sheet:
+        return []
+
+    ws = wb[inbound_sheet]
+    all_rows = []
+    current_day = ""
+    current_date = ""
+
+    for row_idx in range(1, ws.max_row + 1):
+        has_content = any(ws.cell(row_idx, c).value is not None for c in range(1, 12))
+        if not has_content:
+            continue
+
+        col1 = normalize_board_text(ws.cell(row_idx, 1).value)
+
+        # Day header row — check case-insensitively (board may use SUNDAY vs Sunday)
+        col1_title = col1.strip().title()
+        if col1_title in BOARD_DAY_NAMES:
+            current_day = col1_title
+            current_date = normalize_board_date(ws.cell(row_idx, 2).value)
+            continue
+
+        # Skip column header row
+        if col1.lower() in ("load number", "load #", "load"):
+            continue
+
+        # Must be a load number
+        load_number = looks_like_board_load(col1)
+        if not load_number:
+            continue
+
+        all_rows.append({
+            "source": inbound_sheet,
+            "day": current_day,
+            "date": current_date,
+            "load_number": load_number,
+            "carrier": normalize_board_text(ws.cell(row_idx, 2).value),
+            "appt_time": normalize_board_time(ws.cell(row_idx, 3).value),
+            "type": normalize_board_text(ws.cell(row_idx, 4).value),
+            "trailer": normalize_board_text(ws.cell(row_idx, 5).value),
+            "status": normalize_board_text(ws.cell(row_idx, 6).value),
+            "receiver": normalize_board_text(ws.cell(row_idx, 7).value),
+            "origin": normalize_board_text(ws.cell(row_idx, 8).value),
+            "or_number": normalize_board_text(ws.cell(row_idx, 9).value),
+            "notes": normalize_board_text(ws.cell(row_idx, 10).value),
+        })
+
+    return all_rows
+
+
+def build_python_inbound_summary(inbound_rows):
+    summary = {
+        "loads_read_from_inbound": len(inbound_rows),
+        "loads_by_day": {},
+        "live_loads": 0,
+        "drop_loads": 0,
+        "on_lot": 0,
+        "at_door": 0,
+        "loads_with_receiver": 0,
+        "loads_missing_receiver": 0,
+    }
+    for row in inbound_rows:
+        day_key = row.get("day") or "Unknown Day"
+        summary["loads_by_day"][day_key] = summary["loads_by_day"].get(day_key, 0) + 1
+
+        type_upper = row.get("type", "").upper()
+        status_upper = row.get("status", "").upper()
+
+        if "LIVE" in type_upper:
+            summary["live_loads"] += 1
+        if "DROP" in type_upper:
+            summary["drop_loads"] += 1
+        if "ON LOT" in status_upper:
+            summary["on_lot"] += 1
+        if "DOOR" in status_upper:
+            summary["at_door"] += 1
+        if row.get("receiver"):
+            summary["loads_with_receiver"] += 1
+        else:
+            summary["loads_missing_receiver"] += 1
+
+    return summary
 
 
 def build_python_board_summary(board_rows):
@@ -993,8 +1105,8 @@ def compact_board_rows_for_ai(board_rows):
 
 def read_board_file_to_text(board_file):
     """
-    Main entry point: reads the board file, builds the Python-verified summary,
-    and returns a JSON string for the AI prompt.
+    Main entry point: reads outbound and inbound sheets, builds Python-verified
+    summaries, and returns a JSON string for the AI prompt.
     """
     board_file.seek(0)
     file_name = board_file.name.lower()
@@ -1002,18 +1114,25 @@ def read_board_file_to_text(board_file):
     try:
         if file_name.endswith(".csv"):
             board_rows = board_records_from_csv(board_file)
+            inbound_rows = []
         else:
             board_rows = board_records_from_excel(board_file)
+            board_file.seek(0)
+            inbound_rows = board_records_from_inbound_sheet(board_file)
 
         board_summary = build_python_board_summary(board_rows)
+        inbound_summary = build_python_inbound_summary(inbound_rows)
         compact_rows = compact_board_rows_for_ai(board_rows)
 
         payload = {
-            "python_verified_summary": board_summary,
-            "structured_load_rows": compact_rows,
+            "python_verified_outbound_summary": board_summary,
+            "python_verified_inbound_summary": inbound_summary,
+            "structured_outbound_rows": compact_rows,
+            "structured_inbound_rows": inbound_rows,
             "instructions_for_ai": [
-                "Use python_verified_summary as the source of truth for counts.",
-                "Use structured_load_rows for load-level details.",
+                "Use python_verified_outbound_summary for outbound counts.",
+                "Use python_verified_inbound_summary for inbound counts.",
+                "Outbound and inbound are separate — never mix their counts.",
                 "All times use 24-hour clock.",
                 "Blank status means load not yet started.",
                 "Flags: LOAD-CHECK=yellow fill, TT4-NEEDED=blue fill, CANADIAN=red font.",
@@ -1028,8 +1147,10 @@ def read_board_file_to_text(board_file):
         st.exception(e)
         return json.dumps({
             "error": f"Could not read board file: {error_message}",
-            "python_verified_summary": {},
-            "structured_load_rows": [],
+            "python_verified_outbound_summary": {},
+            "python_verified_inbound_summary": {},
+            "structured_outbound_rows": [],
+            "structured_inbound_rows": [],
         }, indent=2, ensure_ascii=False)
 
 
@@ -1697,10 +1818,41 @@ if board_file:
                 col9.metric("CPU Loads", preview_summary["cpu_loads"])
                 col10.metric("Late", preview_summary["late_loads"])
 
-                st.caption(f"Loads by day: {preview_summary['loads_by_day']}")
+                st.caption(f"Outbound loads by day: {preview_summary['loads_by_day']}")
 
-                #  Full parsed table 
-                st.markdown("**Every load row Python extracted from the file:**")
+                # ── Inbound summary ───────────────────────────────────────────
+                board_file.seek(0)
+                inbound_preview_rows = board_records_from_inbound_sheet(board_file)
+                if inbound_preview_rows:
+                    inbound_preview_summary = build_python_inbound_summary(inbound_preview_rows)
+                    st.markdown("---")
+                    st.markdown("**Inbound**")
+                    ib1, ib2, ib3, ib4 = st.columns(4)
+                    ib1.metric("Total Inbound", inbound_preview_summary["loads_read_from_inbound"])
+                    ib2.metric("Live", inbound_preview_summary["live_loads"])
+                    ib3.metric("Drop", inbound_preview_summary["drop_loads"])
+                    ib4.metric("On Lot / At Door", inbound_preview_summary["on_lot"] + inbound_preview_summary["at_door"])
+                    st.caption(f"Inbound loads by day: {inbound_preview_summary['loads_by_day']}")
+                    inbound_df = pd.DataFrame([
+                        {
+                            "Day": r.get("day", ""),
+                            "Load #": r.get("load_number", ""),
+                            "Carrier": r.get("carrier", ""),
+                            "Time": r.get("appt_time", ""),
+                            "Type": r.get("type", ""),
+                            "Trailer": r.get("trailer", ""),
+                            "Status": r.get("status", ""),
+                            "Receiver": r.get("receiver", ""),
+                            "Origin": r.get("origin", ""),
+                            "Notes": r.get("notes", ""),
+                        }
+                        for r in inbound_preview_rows
+                    ])
+                    st.dataframe(inbound_df, use_container_width=True, height=250)
+
+                st.markdown("---")
+                #  Full outbound parsed table
+                st.markdown("**Every outbound load row Python extracted from the file:**")
                 preview_df = pd.DataFrame([
                     {
                         "Day": r.get("day", ""),
