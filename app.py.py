@@ -26,7 +26,7 @@ if not os.path.exists(TEMPLATE_FILE):
     st.stop()
 
 
-# ── OPPORTUNITY CUSTOMER LIST (loaded from Excel) ────────────────────────────
+#  OPPORTUNITY CUSTOMER LIST (loaded from Excel) 
 # File must be in the same folder as report.py.
 # Sheet: "OC Customer List"
 # Row 6  = headers (skipped by name check)
@@ -165,15 +165,15 @@ def build_oc_alert_text(oc_matches):
     ]
     for match in oc_matches:
         c = match["customer"]
-        lines.append(f"▶ CUSTOMER: {c['name'].upper()}")
-        lines.append(f"  Matched on: {', '.join(match['matched_on'])}")
-        lines.append(f"  Priority: {c['priority']}")
-        lines.append(f"  Issue History: {c['issue']}")
-        lines.append(f"  DC Requirements: {c['requirements']}")
+        lines.append(f"CUSTOMER: {c['name'].upper()}")
+        lines.append(f"Matched on: {', '.join(match['matched_on'])}")
+        lines.append(f"Priority: {c['priority']}")
+        lines.append(f"Issue History: {c['issue']}")
+        lines.append(f"DC Requirements: {c['requirements']}")
         if c["sign_off"]:
             lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
         if c["pictures"]:
-            lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+            lines.append("Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
         lines.append("")
     lines += [
         "IMPORTANT: For every OC load identified above:",
@@ -506,7 +506,7 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
     return recommendations
 
 
-# ── BOARD EXCEL READING ───────────────────────────────────────────────────────
+#  BOARD EXCEL READING 
 # Python reads ALL cell values and color flags directly from the xlsx.
 # Board layout (columns A–M):
 #   A: Load#  B: Destination  C: Carrier  D: Time  E: Door  F: Trailer
@@ -910,7 +910,7 @@ def build_python_board_summary(board_rows):
         summary["loads_by_date"][date_key] = summary["loads_by_date"].get(date_key, 0) + 1
         summary["status_counts"][status] = summary["status_counts"].get(status, 0) + 1
 
-        if "LATE" in status_upper or " LATE " in f" {raw_upper} ":
+        if "LATE" in status_upper or "LATE " in f" {raw_upper} ":
             summary["late_loads"] += 1
             summary["late_load_details"].append(row)
         if status_upper == "RTL" or "READY TO LOAD" in status_upper:
@@ -1048,7 +1048,7 @@ def analyze_board_with_groq(
     staffing_lines = []
     for task, row in summary_table.iterrows():
         staffing_lines.append(
-            f"  {task}: Need {int(row['Needed'])}, Have {int(row['Assigned'])}, "
+            f" {task}: Need {int(row['Needed'])}, Have {int(row['Assigned'])}, "
             f"Gap {int(row['Difference'])} ({row['Status']})"
         )
     staffing_summary = "\n".join(staffing_lines)
@@ -1179,7 +1179,7 @@ Give me a clear, practical warehouse manager analysis in plain English covering:
 - Specify how many loads are completed today out of the total for the day.
 - Specify any late loads, from when, if they are occupying a door, and which door.
 
-2. ⚠ Opportunity Customer (OC) Alerts:
+2.  Opportunity Customer (OC) Alerts:
 - List every load on the board that belongs to a customer on the Opportunity Customer List.
 - For each OC load: state the load number, customer name, current status, appointment time, and EXACTLY what special actions are required before this load ships.
 - If pictures are required, state when they should be taken and who should own it.
@@ -1330,7 +1330,7 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     current_row = 4
 
     if oc_matches:
-        ws.cell(current_row, 1).value = " OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
+        ws.cell(current_row, 1).value = "OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
         ws.cell(current_row, 1).font = Font(size=13, bold=True, color=white)
         ws.cell(current_row, 1).fill = PatternFill("solid", fgColor=orange)
         ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
@@ -1346,12 +1346,12 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
-                oc_lines.append(" DC Supervisor Sign-Off REQUIRED before this load ships.")
+                oc_lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
             if c["pictures"]:
-                oc_lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+                oc_lines.append("Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
-                cell.font = Font(size=10, bold=("CUSTOMER:" in line or "⚠" in line or "📷" in line))
+                cell.font = Font(size=10, bold=("CUSTOMER:" in line or "" in line or "" in line))
                 cell.fill = PatternFill("solid", fgColor=light_orange)
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
                 cell.border = border
@@ -1449,7 +1449,7 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     if oc_matches:
         customer_names = ", ".join(m["customer"]["name"].upper() for m in oc_matches)
         ws_dash.cell(oc_banner_row, 1).value = (
-            f"⚠ OC ALERT: Opportunity Customers on today's board — {customer_names} — See 'Board Analysis' tab for full requirements."
+            f"OC ALERT: Opportunity Customers on today's board — {customer_names} — See 'Board Analysis' tab for full requirements."
         )
         ws_dash.cell(oc_banner_row, 1).font = Font(bold=True, color=white, size=11)
         ws_dash.cell(oc_banner_row, 1).fill = PatternFill("solid", fgColor=orange)
@@ -1576,14 +1576,14 @@ def build_email_draft(
 
     oc_email_block = ""
     if oc_matches:
-        oc_lines = ["\n⚠ OPPORTUNITY CUSTOMER ALERT:"]
+        oc_lines = ["\n OPPORTUNITY CUSTOMER ALERT:"]
         for match in oc_matches:
             c = match["customer"]
-            oc_lines.append(f"  - {c['name'].upper()} [{c['priority']}]: {c['requirements']}")
+            oc_lines.append(f" - {c['name'].upper()} [{c['priority']}]: {c['requirements']}")
             if c["sign_off"]:
-                oc_lines.append("    → Supervisor sign-off REQUIRED before shipping.")
+                oc_lines.append(" → Supervisor sign-off REQUIRED before shipping.")
             if c["pictures"]:
-                oc_lines.append("    → 6 photos required (3 on dock, 3 loading). Email to manager.")
+                oc_lines.append(" → 6 photos required (3 on dock, 3 loading). Email to manager.")
         oc_email_block = "\n".join(oc_lines)
 
     body = f"""
@@ -1623,7 +1623,7 @@ Thanks,
     return subject, body.strip()
 
 
-# ── STREAMLIT INTERFACE ───────────────────────────────────────────────────────
+#  STREAMLIT INTERFACE 
 
 st.sidebar.header("Daily Inputs")
 
@@ -1649,7 +1649,7 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader(" Outbound Board Excel / CSV")
+st.subheader("Outbound Board Excel / CSV")
 
 board_file = st.file_uploader(
     "Upload the outbound load board Excel or CSV file",
@@ -1670,9 +1670,19 @@ if board_file:
                 preview_rows = board_records_from_excel(board_file)
 
             if not preview_rows:
-                st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5–9 digit load numbers in column A.")
+                st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5-9 digit load numbers in column A.")
             else:
-                # ── Summary counts ────────────────────────────────────────────
+                #  Staff counts (live from sidebar selection) 
+                total_staff_available = len(names)
+                total_staff_present = len(present_workers)
+
+                sc1, sc2 = st.columns(2)
+                sc1.metric("Staff Available", total_staff_available)
+                sc2.metric("Staff Present Today", total_staff_present)
+
+                st.markdown("---")
+
+                #  Board summary counts 
                 preview_summary = build_python_board_summary(preview_rows)
                 total = preview_summary["loads_read_from_board"]
 
@@ -1692,7 +1702,7 @@ if board_file:
 
                 st.caption(f"Loads by day: {preview_summary['loads_by_day']}")
 
-                # ── Full parsed table ─────────────────────────────────────────
+                #  Full parsed table 
                 st.markdown("**Every load row Python extracted from the file:**")
                 preview_df = pd.DataFrame([
                     {
@@ -1717,7 +1727,7 @@ if board_file:
                 ])
                 st.dataframe(preview_df, use_container_width=True, height=400)
 
-                # ── Quick sanity checks ───────────────────────────────────────
+                #  Quick sanity checks 
                 st.markdown("**Quick sanity checks:**")
                 issues = []
                 blank_time = [r["load_number"] for r in preview_rows if not r.get("appt_time")]
@@ -1725,7 +1735,7 @@ if board_file:
                     issues.append(f" {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
                 blank_customer = [r["load_number"] for r in preview_rows if not r.get("customer")]
                 if blank_customer:
-                    issues.append(f"{len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
+                    issues.append(f" {len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
                 no_day = [r["load_number"] for r in preview_rows if not r.get("day")]
                 if no_day:
                     issues.append(f" {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
@@ -1733,13 +1743,13 @@ if board_file:
                     for issue in issues:
                         st.warning(issue)
                 else:
-                    st.success(" All loads have time, customer, and day context — parse looks clean.")
+                    st.success("All loads have time, customer, and day context — parse looks clean.")
 
         except Exception as e:
             st.error(f"Preview failed: {e}")
             st.exception(e)
 
-with st.expander(" View Opportunity Customer List (from Excel file)"):
+with st.expander("View Opportunity Customer List (from Excel file)"):
     oc_list_preview = load_oc_customer_list()
     if oc_list_preview:
         oc_preview_rows = []
@@ -1879,7 +1889,7 @@ if st.button("Generate Staffing Report"):
 
     if oc_matches:
         st.markdown("---")
-        st.subheader(" Opportunity Customer Alerts")
+        st.subheader("Opportunity Customer Alerts")
         st.error(
             "The following customers on today's board are on the **Opportunity Customer List** "
             "and require special DC actions before their loads ship."
@@ -1890,11 +1900,11 @@ if st.button("Generate Staffing Report"):
                 st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
-                    st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                    st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
                 if c["pictures"]:
                     st.markdown(" **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
     elif board_file is not None:
-        st.info(" No Opportunity Customers detected on today's board.")
+        st.info("No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
