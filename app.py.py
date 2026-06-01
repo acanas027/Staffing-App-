@@ -1185,10 +1185,12 @@ def analyze_board_with_groq(
     try:
         board_payload    = json.loads(board_text)
         py_summary       = board_payload.get("python_verified_outbound_summary", {})
+        py_inbound       = board_payload.get("python_verified_inbound_summary", {})
         actionable_rows  = board_payload.get("actionable_outbound_rows", [])
         completed_rows   = board_payload.get("completed_outbound_rows", [])
     except Exception:
         py_summary = {}
+        py_inbound = {}
         actionable_rows = []
         completed_rows  = []
 
@@ -1232,6 +1234,19 @@ def analyze_board_with_groq(
         f"By day: {day_str}"
     )
 
+    # ── Inbound verified block (from Python-parsed inbound sheet) ─────────
+    ib_day_str = ", ".join(f"{d}:{n}" for d, n in py_inbound.get("loads_by_day", {}).items())
+    verified_inbound = (
+        f"VERIFIED INBOUND COUNTS (Python — do not recount):\n"
+        f"Total:{py_inbound.get('loads_read_from_inbound',0)}  "
+        f"Live:{py_inbound.get('live_loads',0)}  "
+        f"Drop:{py_inbound.get('drop_loads',0)}  "
+        f"OnLot:{py_inbound.get('on_lot',0)}  "
+        f"AtDoor:{py_inbound.get('at_door',0)}  "
+        f"OnLotOrAtDoor:{py_inbound.get('on_lot',0)+py_inbound.get('at_door',0)}\n"
+        f"By day: {ib_day_str}"
+    )
+
     # ── Format row lists as compact tables (not JSON) ──────────────────────
     actionable_table = _rows_to_table(
         actionable_rows,
@@ -1246,20 +1261,19 @@ def analyze_board_with_groq(
 
 CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hr clock. First shift loads ~52% of day's loads.
 Priorities: 1)Prevent shorts 2)Protect departures 3)Picking flow 4)Inbound flow 5)Proactive labor use.
-Statuses: RTL=staged ready|R/S=short on full pallets|Picking/Short=inventory shortage|Loaded Short=trailer loaded but missing product, severe service risk|Late=missed/at risk|Live=trailer at dock, highest priority over drop trailers.
+Statuses: RTL=staged ready|R/S=short on full pallets|Picking/Short=inventory shortage|LoadedShort=trailer loaded but missing product, severe service risk|Late=missed/at risk|Live=trailer at dock, highest priority over drop trailers.
 Flags: LOAD-CHECK=yellow|TT4-NEEDED=blue|CANADIAN=red font.
-Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Tasking=25 pallets/hr|Ticket avg=75 cases.
+Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Tasking=25 pallets/hr|Ticket avg=60 cases.
 Labor rules: Keep pickers picking. Tasking protects pickers. Protect loading labor. Lead/Extra used proactively.
-Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Send staff to manufacturing only if it genuinely helps this shift. 
-For prioritization, think in if its an OC customer, appointment time, type of load (CPU and live has high priority)
-Late loads should always be a priority but since we need a driver to be here just mention them, there is not much we can do about them. 
+Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Manufacturing only if it genuinely helps this shift.
 
-TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | {hours_remaining}hrs left | {total_outbound_loads} loads today | Inbound: {inbound_pallets:,} pallets ({", ".join(plants_open) if plants_open else "no plants"}) | Notes: {notes.strip() or "none"}
+TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | {hours_remaining}hrs left | {total_outbound_loads} loads today | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
 
 STAFFING (Python-computed):
 {staffing_summary}
 
 {verified_counts}
+{verified_inbound}
 {oc_section}
 ACTIONABLE LOADS (notable status, flagged, or not started):
 {actionable_table}
@@ -1270,10 +1284,10 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 ===== OUTPUT — 6 sections =====
 
 1. BOARD SUMMARY
-- Loads by status and day using verified counts above. Do not recount. How many loads of today haven't been started. 
+- Loads by status and day using verified counts above. Do not recount.
 - Completed today vs total. Pacing: ahead/on track/behind based on appt times and hours left.
 - Late loads: day, load#, door, what's happening.
-- Inboud summary. total inbound, from what days, and if they are on lot/at door. 
+- Inbound summary: use VERIFIED INBOUND COUNTS only — state total, by day, live vs drop, on lot vs at door. Do not reference plant pallet numbers.
 
 2. OC ALERTS
 - Every OC load: load#, customer, status, appt time, exact required actions.
@@ -1281,6 +1295,7 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 - If none: "No OC customers on today's board."
 
 3. PICKING & SHORT RISK
+- Blank/not-started count and risk level.
 - Short risk: yes/no, why, how big.
 - Can we get ahead? Specific appt times we should be picked to by end of shift.
 - Labor moves: from where to where. Manufacturing worth it?
@@ -1294,7 +1309,7 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 - Achievable shift goal with specific numbers and times.
 
 6. TOP ACTION ITEMS
-- Next 60 min: 3 items.
+- Next 30 min: 3 items.
 - Next 2 hrs: 3 items.
 
 RULES: Shift expectations must be stated clearly up front. Every labor move = from X to Y. Use specific times not ranges. What-if scenarios. Only use board data — never invent. OC alerts early and complete.
@@ -1356,6 +1371,7 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
             c = match["customer"]
             oc_lines = [
                 f"CUSTOMER: {c['name'].upper()}  |  Priority: {c['priority']}",
+                f"Issue History: {c['issue']}",
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
@@ -1933,6 +1949,7 @@ if st.button("Generate Staffing Report"):
         for match in oc_matches:
             c = match["customer"]
             with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
                     st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
