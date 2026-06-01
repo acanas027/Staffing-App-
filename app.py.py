@@ -159,17 +159,20 @@ def get_groq_client():
     return OpenAI(api_key=st.secrets["GROQ_API_KEY"], base_url="https://api.groq.com/openai/v1")
 
 
-@st.cache_data
 def load_names_for_shift(shift):
-    """Load worker names for the given shift from the Inputs sheet."""
+    """
+    Load worker names for the given shift.
+    Reads directly from the shift-specific staffing sheet (col A) — guaranteed
+    to have the right names regardless of Inputs sheet layout.
+    No @st.cache_data — must be reactive every time shift changes.
+    """
     wb = load_workbook(TEMPLATE_FILE, data_only=False)
-    ws = wb["Inputs"]
-    cfg = SHIFT_CONFIG[shift]
-    col = cfg["inputs_col_name"]
+    sheet_name = SHIFT_CONFIG[shift]["sheet"]
+    ws = wb[sheet_name]
     names = []
     consecutive_empty = 0
-    for row in range(3, ws.max_row + 1):
-        name = ws[f"{col}{row}"].value
+    for row in range(2, ws.max_row + 1):  # row 1 is header
+        name = ws[f"A{row}"].value
         if name and str(name).strip():
             names.append(str(name).strip())
             consecutive_empty = 0
