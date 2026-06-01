@@ -175,9 +175,10 @@ def get_groq_client():
 # ============================================================
 #  SHIFT-AWARE NAME LOADING
 #  1st shift: Inputs col E (rows 3+)
-#  2nd shift: Inputs col N (rows 2+)
+#  2nd shift: Inputs col N (rows 3+)
+#  NOTE: @st.cache_data intentionally removed — caching caused
+#  stale empty lists when switching shifts.
 # ============================================================
-@st.cache_data
 def load_names_for_shift(shift):
     wb = load_workbook(TEMPLATE_FILE, data_only=False)
     ws = wb["Inputs"]
@@ -189,7 +190,7 @@ def load_names_for_shift(shift):
         start_row = 3
     else:
         col = 14  # column N
-        start_row = 3
+        start_row = 3  # row 2 is the "Name" header, names start at row 3
 
     for row in range(start_row, ws.max_row + 1):
         name = ws.cell(row, col).value
@@ -1642,7 +1643,7 @@ day = st.sidebar.selectbox(
 
 shift = st.sidebar.selectbox("Shift", ["1st", "2nd"])
 
-# Load names dynamically based on the selected shift
+# Load names dynamically based on selected shift — no cache so switching shifts always refreshes
 names = load_names_for_shift(shift)
 
 total_cases = st.sidebar.number_input("Total Cases for Today", min_value=0, step=1, value=0)
@@ -1833,10 +1834,10 @@ if st.button("Generate Staffing Report"):
         present_col = 6
         start_row = 3
     else:
-        # 2nd shift: names in col N (14), present in col O (15), starting row 2
+        # 2nd shift: names in col N (14), present in col O (15), starting row 3
         name_col = 14
         present_col = 15
-        start_row = 2
+        start_row = 3
 
     # Find last row with a name in this shift's name column
     last_name_row = start_row
