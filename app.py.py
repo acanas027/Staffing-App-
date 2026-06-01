@@ -1673,12 +1673,9 @@ if board_file:
                 st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5-9 digit load numbers in column A.")
             else:
                 #  Staff counts (live from sidebar selection) 
-                total_staff_available = len(names)
                 total_staff_present = len(present_workers)
 
-                sc1, sc2 = st.columns(2)
-                sc1.metric("Staff Available", total_staff_available)
-                sc2.metric("Staff Present Today", total_staff_present)
+                st.metric("Staff Present Today", total_staff_present)
 
                 st.markdown("---")
 
