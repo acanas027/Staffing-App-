@@ -1414,22 +1414,24 @@ def write_recommendations_to_excel(wb, staff, shift):
     for excel_row, task in zip(range(2, len(staff) + 2), staff["Recommended Task"]):
         ws_staff[f"I{excel_row}"] = task
 
-    # Crew Sheet only exists / is relevant for 1st shift
-    if shift == "1st":
-        ws_crew = wb["Crew Sheet"]
-        crew_name_to_row = {}
-        for row in range(2, ws_crew.max_row + 1):
-            name = ws_crew[f"A{row}"].value
-            if name:
-                crew_name_to_row[str(name).strip().lower()] = row
+    # Update Crew Sheet for both shifts, filtered by col B (1=1st, 2=2nd)
+    shift_number = 1 if shift == "1st" else 2
+    ws_crew = wb["Crew Sheet"]
 
-        for _, row in staff.iterrows():
-            name = str(row["Name"]).strip().lower()
-            task = row["Recommended Task"]
-            if name in crew_name_to_row:
-                crew_row = crew_name_to_row[name]
-                ws_crew[f"C{crew_row}"] = task
-                ws_crew[f"D{crew_row}"] = task
+    crew_name_to_row = {}
+    for row in range(2, ws_crew.max_row + 1):
+        name       = ws_crew.cell(row, 1).value
+        crew_shift = ws_crew.cell(row, 2).value
+        if name and str(crew_shift).strip() == str(shift_number):
+            crew_name_to_row[str(name).strip().lower()] = row
+
+    for _, row in staff.iterrows():
+        name = str(row["Name"]).strip().lower()
+        task = row["Recommended Task"]
+        if name in crew_name_to_row:
+            crew_row = crew_name_to_row[name]
+            ws_crew[f"C{crew_row}"] = task
+            ws_crew[f"D{crew_row}"] = task
 
 
 def build_dashboard(wb, summary_table, present_recommendations, recommendations, oc_matches=None):
@@ -1856,27 +1858,31 @@ if st.button("Generate Staffing Report"):
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
 
-    # ── Write attendance x into Inputs sheet (1st shift only) ──────────────
-    # 1st shift: Inputs col E = name, col G = present (x)
-    #   Crew Sheet col C pulls from Inputs col G via =Inputs!G3 etc.
-    #   Staffing sheet col T then VLOOKUPs Crew Sheet col C.
-    # 2nd shift: Inputs has no attendance columns wired up — presence is
-    #   handled entirely by the Python override below.
+    # ── Write attendance x into Inputs col G for both shifts ───────────────
+    # The Crew Sheet maps every worker to an Inputs col G row via:
+    #   Crew Sheet row N -> Inputs col G row N+1  (Crew row 2 = =Inputs!G3)
+    # Both 1st shift (Crew rows 2-48) and 2nd shift (Crew rows 49-95) all
+    # reference Inputs col G for their present mark.
+    # We clear all x marks first, then write x only for selected workers.
     selected = {name.strip().lower() for name in present_workers}
 
-    if shift == "1st":
-        _last_name_row = 3
-        for _r in range(3, ws.max_row + 1):
-            if ws.cell(_r, 5).value and str(ws.cell(_r, 5).value).strip():
-                _last_name_row = _r
-            elif _r > _last_name_row + 10:
-                break
-        for row in range(3, _last_name_row + 1):
-            ws.cell(row, 7).value = ""
-        for row in range(3, _last_name_row + 1):
-            worker_name = ws.cell(row, 5).value
-            if worker_name and str(worker_name).strip().lower() in selected:
-                ws.cell(row, 7).value = "x"
+    ws_crew_ref = wb["Crew Sheet"]
+
+    # Build name -> Inputs col G row mapping from the Crew Sheet
+    crew_name_to_inputs_row = {}
+    for _r in range(2, ws_crew_ref.max_row + 1):
+        crew_name = ws_crew_ref.cell(_r, 1).value
+        if crew_name and str(crew_name).strip():
+            crew_name_to_inputs_row[str(crew_name).strip().lower()] = _r + 1
+
+    # Clear all existing x marks in Inputs col G
+    for _r in range(3, max(crew_name_to_inputs_row.values(), default=3) + 1):
+        ws.cell(_r, 7).value = ""
+
+    # Write x for each present worker
+    for worker in selected:
+        if worker in crew_name_to_inputs_row:
+            ws.cell(crew_name_to_inputs_row[worker], 7).value = "x"
 
     ws["B12"] = notes
 
