@@ -171,9 +171,9 @@ def build_oc_alert_text(oc_matches):
         lines.append(f"  Issue History: {c['issue']}")
         lines.append(f"  DC Requirements: {c['requirements']}")
         if c["sign_off"]:
-            lines.append("  ⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
+            lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
         if c["pictures"]:
-            lines.append("  📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+            lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
         lines.append("")
     lines += [
         "IMPORTANT: For every OC load identified above:",
@@ -1330,7 +1330,7 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     current_row = 4
 
     if oc_matches:
-        ws.cell(current_row, 1).value = "⚠ OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
+        ws.cell(current_row, 1).value = " OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
         ws.cell(current_row, 1).font = Font(size=13, bold=True, color=white)
         ws.cell(current_row, 1).fill = PatternFill("solid", fgColor=orange)
         ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
@@ -1346,9 +1346,9 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
-                oc_lines.append("⚠ DC Supervisor Sign-Off REQUIRED before this load ships.")
+                oc_lines.append(" DC Supervisor Sign-Off REQUIRED before this load ships.")
             if c["pictures"]:
-                oc_lines.append("📷 Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+                oc_lines.append(" Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
             for line in oc_lines:
                 cell = ws.cell(current_row, 1, line)
                 cell.font = Font(size=10, bold=("CUSTOMER:" in line or "⚠" in line or "📷" in line))
@@ -1649,7 +1649,7 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("📋 Outbound Board Excel / CSV")
+st.subheader(" Outbound Board Excel / CSV")
 
 board_file = st.file_uploader(
     "Upload the outbound load board Excel or CSV file",
@@ -1660,7 +1660,7 @@ board_file = st.file_uploader(
 if board_file:
     st.success("Board file loaded — ready for analysis.")
 
-    with st.expander("🔍 Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
+    with st.expander("Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
         try:
             board_file.seek(0)
             file_name_lower = board_file.name.lower()
@@ -1722,24 +1722,24 @@ if board_file:
                 issues = []
                 blank_time = [r["load_number"] for r in preview_rows if not r.get("appt_time")]
                 if blank_time:
-                    issues.append(f"⚠️ {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
+                    issues.append(f" {len(blank_time)} load(s) have no time parsed: {', '.join(blank_time[:5])}{'...' if len(blank_time) > 5 else ''}")
                 blank_customer = [r["load_number"] for r in preview_rows if not r.get("customer")]
                 if blank_customer:
-                    issues.append(f"⚠️ {len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
+                    issues.append(f"{len(blank_customer)} load(s) have no customer name: {', '.join(blank_customer[:5])}")
                 no_day = [r["load_number"] for r in preview_rows if not r.get("day")]
                 if no_day:
-                    issues.append(f"⚠️ {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
+                    issues.append(f" {len(no_day)} load(s) have no day context (missing day header row?): {', '.join(no_day[:5])}")
                 if issues:
                     for issue in issues:
                         st.warning(issue)
                 else:
-                    st.success("✅ All loads have time, customer, and day context — parse looks clean.")
+                    st.success(" All loads have time, customer, and day context — parse looks clean.")
 
         except Exception as e:
             st.error(f"Preview failed: {e}")
             st.exception(e)
 
-with st.expander("📋 View Opportunity Customer List (from Excel file)"):
+with st.expander(" View Opportunity Customer List (from Excel file)"):
     oc_list_preview = load_oc_customer_list()
     if oc_list_preview:
         oc_preview_rows = []
@@ -1838,7 +1838,7 @@ if st.button("Generate Staffing Report"):
             if oc_matches:
                 customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
                 st.warning(
-                    f"⚠️ **Opportunity Customer Alert:** "
+                    f" **Opportunity Customer Alert:** "
                     f"The following customers were detected on today's board and require special handling: "
                     f"**{', '.join(customer_names_found)}**. "
                     f"See the OC Alerts section below for full requirements."
@@ -1879,22 +1879,22 @@ if st.button("Generate Staffing Report"):
 
     if oc_matches:
         st.markdown("---")
-        st.subheader("⚠️ Opportunity Customer Alerts")
+        st.subheader(" Opportunity Customer Alerts")
         st.error(
             "The following customers on today's board are on the **Opportunity Customer List** "
             "and require special DC actions before their loads ship."
         )
         for match in oc_matches:
             c = match["customer"]
-            with st.expander(f"🔴 {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+            with st.expander(f" {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
                 st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
-                    st.markdown("🔒 **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                    st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
                 if c["pictures"]:
-                    st.markdown("📷 **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+                    st.markdown(" **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
     elif board_file is not None:
-        st.info("✅ No Opportunity Customers detected on today's board.")
+        st.info(" No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
