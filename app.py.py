@@ -93,18 +93,14 @@ def load_oc_customer_list():
             priority = "HIGH" if (sign_off or pictures) else "MEDIUM"
 
             # Build search aliases from the customer name
-            # e.g. "Sobey's - All Loads" → also match "sobey", "sobeys", "sobey's"
             base = name_clean.rstrip(" -").split(" - ")[0].strip()
             aliases = []
-            # Strip common suffixes to get short-match terms
             for suffix in [" - all loads", " all loads", " fresh dc", " (olathe)"]:
                 if base.endswith(suffix):
                     aliases.append(base.replace(suffix, "").strip())
-            # Add apostrophe variants
             if "'" in base:
                 aliases.append(base.replace("'", ""))
                 aliases.append(base.replace("'s", ""))
-            # Common known aliases
             known_aliases = {
                 "target rialto":        ["target"],
                 "sobey's - all loads":  ["sobeys", "sobey", "sobey's"],
@@ -118,7 +114,6 @@ def load_oc_customer_list():
             if name_clean in known_aliases:
                 aliases += known_aliases[name_clean]
 
-            # Deduplicate aliases, remove if same as name
             aliases = list(dict.fromkeys(
                 a for a in aliases if a and a != name_clean
             ))
@@ -200,7 +195,6 @@ def load_names():
     wb = load_workbook(TEMPLATE_FILE, data_only=False)
     ws = wb["Inputs"]
     names = []
-    # Dynamic scan — no hardcoded row limit. Stops after 10 consecutive empty rows.
     consecutive_empty = 0
     for row in range(3, ws.max_row + 1):
         name = ws[f"E{row}"].value
@@ -507,28 +501,16 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
 
 
 #  BOARD EXCEL READING 
-# Python reads ALL cell values and color flags directly from the xlsx.
-# Board layout (columns A–M):
-#   A: Load#  B: Destination  C: Carrier  D: Time  E: Door  F: Trailer
-#   G: Status  H: TT4  I: Loader  J: Comments  K: Pulls  L: Picks  M: Priority
-#
-# Day header rows have a day name in col A and a date in col B.
-# All other meaningful rows have a 5-9 digit load number in col A.
-
 BOARD_DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
 
 def normalize_board_text(value):
-    """Convert any Excel cell value to a clean string."""
     if value is None:
         return ""
-    # Handle datetime.time objects (Excel stores times this way)
     if isinstance(value, datetime.time):
         return value.strftime("%H:%M")
-    # Handle datetime.datetime objects
     if isinstance(value, datetime.datetime):
         return value.strftime("%m/%d/%Y")
-    # Handle pandas NaT / NaN
     try:
         import math
         if isinstance(value, float) and math.isnan(value):
@@ -576,7 +558,6 @@ def normalize_board_time(value):
 
 
 def looks_like_board_load(value):
-    """Return the digit string if value looks like a load number, else ''."""
     text = normalize_board_text(value)
     if not text:
         return ""
@@ -618,24 +599,17 @@ def detect_board_status(value):
 
 
 def detect_trailer_field_late(trailer_value):
-    """
-    The board sometimes writes LATE or ETA <time> in the trailer/door column (col 6)
-    instead of the status column. Detect this specifically for col 6 only —
-    NOT for the time column (col 4) where ETA just means the driver hasn't arrived yet.
-    """
     text = normalize_board_text(trailer_value).upper()
     if not text:
         return False
     if re.search(r"\bLATE\b", text):
         return True
-    # ETA in the trailer field = driver running late, load overdue
     if re.match(r"^ETA\b", text):
         return True
     return False
 
 
 def board_cell_flags(cell):
-    """Read fill color and font color to detect special flags."""
     flags = []
     fill_color = ""
     font_color = ""
@@ -654,13 +628,10 @@ def board_cell_flags(cell):
             font_color = str(font.color.rgb).upper()
     except Exception:
         pass
-    # Yellow fill → load check
     if fill_color in ("FFFFFF00", "00FFFF00", "FFFF00", "0000000D"):
         flags.append("LOAD-CHECK")
-    # Light blue fill → TT4 needed
     if fill_color in ("FFADD8E6", "FF87CEEB", "FFADD8FF", "FFB0E0E6", "FF00BFFF"):
         flags.append("TT4-NEEDED")
-    # Red font → Canadian load
     if font_color in ("FFFF0000", "00FF0000"):
         flags.append("CANADIAN")
     return flags
@@ -675,21 +646,11 @@ def parse_number(value):
 
 
 def board_records_from_excel(board_file):
-    """
-    Read every sheet of the uploaded .xlsx board file.
-    Returns a list of structured load-row dicts.
-    Handles:
-      - datetime.time values in the Time column
-      - Pure numeric load numbers (Excel stores as int/float)
-      - Day header rows that set the current day/date context
-      - Color flags: LOAD-CHECK (yellow), TT4-NEEDED (blue), CANADIAN (red font)
-    """
     board_file.seek(0)
     file_name = board_file.name.lower()
     all_rows = []
 
     if file_name.endswith(".xls"):
-        # Legacy .xls — openpyxl can't read it, use pandas (no color support)
         sheets = pd.read_excel(board_file, sheet_name=None, header=None, engine="xlrd")
         for sheet_name, df in sheets.items():
             df = df.fillna("")
@@ -737,9 +698,6 @@ def board_records_from_excel(board_file):
                 })
         return all_rows
 
-    # .xlsx — full read with color flag detection
-    # Only read the Outbound sheet. Other sheets (Inbound, formats, etc.)
-    # contain non-outbound data that would create phantom "Unknown Day" loads.
     wb = load_workbook(board_file, data_only=True)
     outbound_sheet = None
     for candidate in ["Outbound", "outbound", "OUTBOUND"]:
@@ -751,7 +709,7 @@ def board_records_from_excel(board_file):
         ws = wb[sheet_name]
         current_day = ""
         current_date = ""
-        consecutive_empty = 0  # stop early when Excel phantom rows start
+        consecutive_empty = 0
         for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
@@ -767,7 +725,7 @@ def board_records_from_excel(board_file):
             if not has_content:
                 consecutive_empty += 1
                 if consecutive_empty >= 15:
-                    break  # Excel reports ws.max_row incorrectly due to phantom formatting
+                    break
                 continue
             consecutive_empty = 0
 
@@ -781,10 +739,6 @@ def board_records_from_excel(board_file):
             if not load_number:
                 continue
 
-            # Check col 6 (trailer/door field) for LATE or ETA FIRST —
-            # the board writes these there for overdue loads from prior days.
-            # Late takes priority over RTL/R/S since those still apply but
-            # the load is also overdue.
             if detect_trailer_field_late(values[5]):
                 status = "Late"
             else:
@@ -876,14 +830,6 @@ def board_records_from_csv(board_file):
 
 
 def board_records_from_inbound_sheet(board_file):
-    """
-    Read the Inbound sheet from the board Excel file.
-    Layout (1-indexed columns):
-      1: Load Number   2: Carrier   3: Dispatch Time   4: Type (Live/Drop)
-      5: Trailer #     6: Status    7: Receiver         8: From (origin plant)
-      9: OR#           10: Notes    11: Start
-    Day header rows: col1 = day name, col2 = date, col3 = expected count
-    """
     board_file.seek(0)
     try:
         wb = load_workbook(board_file, data_only=True)
@@ -909,19 +855,15 @@ def board_records_from_inbound_sheet(board_file):
             continue
 
         col1 = normalize_board_text(ws.cell(row_idx, 1).value)
-
-        # Day header row — check case-insensitively (board may use SUNDAY vs Sunday)
         col1_title = col1.strip().title()
         if col1_title in BOARD_DAY_NAMES:
             current_day = col1_title
             current_date = normalize_board_date(ws.cell(row_idx, 2).value)
             continue
 
-        # Skip column header row
         if col1.lower() in ("load number", "load #", "load"):
             continue
 
-        # Must be a load number
         load_number = looks_like_board_load(col1)
         if not load_number:
             continue
@@ -1130,8 +1072,8 @@ def read_board_file_to_text(board_file):
             "structured_outbound_rows": compact_rows,
             "structured_inbound_rows": inbound_rows,
             "instructions_for_ai": [
-                "Use python_verified_outbound_summary for outbound counts.",
-                "Use python_verified_inbound_summary for inbound counts.",
+                "Use python_verified_outbound_summary for ALL outbound counts — do not recount from rows.",
+                "Use python_verified_inbound_summary for ALL inbound counts.",
                 "Outbound and inbound are separate — never mix their counts.",
                 "All times use 24-hour clock.",
                 "Blank status means load not yet started.",
@@ -1154,6 +1096,12 @@ def read_board_file_to_text(board_file):
         }, indent=2, ensure_ascii=False)
 
 
+# ============================================================
+#  SINGLE-CALL GROQ ANALYSIS  (was 3 calls → now 1)
+#  Python does ALL counting. AI gets only pre-computed summaries
+#  + the compact load rows for context. No re-validation call,
+#  no final-rewrite call.  Saves ~66 % of tokens.
+# ============================================================
 def analyze_board_with_groq(
     board_text, day, shift, total_cases, hours_remaining, total_outbound_loads,
     crossroads_open, deer_creek_open, msb_open, needed, summary_table,
@@ -1166,6 +1114,7 @@ def analyze_board_with_groq(
             "Add GROQ_API_KEY in Streamlit Cloud Secrets."
         )
 
+    # ── Staffing summary (Python-computed, not re-derived by AI) ──────────
     staffing_lines = []
     for task, row in summary_table.iterrows():
         staffing_lines.append(
@@ -1181,17 +1130,45 @@ def analyze_board_with_groq(
 
     oc_section = f"\n\n{oc_alert_text}\n" if oc_alert_text else ""
 
-    base_context = f"""
-You are an experienced warehouse operations shift manager analyzing an outbound load board that was read directly from an Excel file (cell values, not a screenshot or image). All data is clean and structured — treat every field as accurate cell content.
-Use short bullet points. don't over explain.
+    # ── Parse the Python-verified summary out of board_text so we can inject
+    #    the key counts directly into the prompt (AI must use these, not recount)
+    try:
+        board_payload = json.loads(board_text)
+        py_summary = board_payload.get("python_verified_outbound_summary", {})
+        verified_counts = f"""
+PYTHON-VERIFIED OUTBOUND COUNTS (use these exact numbers — do not recount):
+- Total loads on board: {py_summary.get('loads_read_from_board', 'N/A')}
+- Late: {py_summary.get('late_loads', 0)}
+- RTL (Ready to Load): {py_summary.get('rtl_loads', 0)}
+- R/S (Ready/Short): {py_summary.get('rs_loads', 0)}
+- Picking: {py_summary.get('picking_loads', 0)}
+- Picking/Short: {py_summary.get('picking_short_loads', 0)}
+- Loaded Short: {py_summary.get('loaded_short_loads', 0)}
+- Completed: {py_summary.get('completed_loads', 0)}
+- Blank/Not Started: {py_summary.get('blank_or_not_started_loads', 0)}
+- Live loads: {py_summary.get('live_loads', 0)}
+- CPU loads: {py_summary.get('cpu_loads', 0)}
+- Canadian loads (red font): {py_summary.get('canadian_loads', 0)}
+- TT4 needed (blue fill): {py_summary.get('tt4_needed_loads', 0)}
+- Load checks (yellow fill): {py_summary.get('load_check_loads', 0)}
+- Loaders assigned: {py_summary.get('loads_with_loader_assigned', 0)}
+- Missing loader: {py_summary.get('loads_missing_loader', 0)}
+- Loads by day: {json.dumps(py_summary.get('loads_by_day', {}))}
+"""
+    except Exception:
+        verified_counts = "(Python summary unavailable — use structured_outbound_rows for counts.)"
 
-When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, from what day and what is happening with them.
+    prompt = f"""
+You are an experienced warehouse operations shift manager analyzing an outbound load board read directly from an Excel file. All data is clean and structured — treat every field as accurate cell content.
+Use short bullet points. Don't over explain.
+
+When reading: separate loads and their data by day, focus on today but still mention when there are still loads on the board from days before, what day they are from, and what is happening with them.
 
 Additional warehouse operation context:
-This is a high-volume outbound grocery distribution center operation. This is the first shift and it starts from 6 am to 4:30 pm with 9.5 workable hours. Setting up the second shift for success can vary, but if my morning shift has all loads RTL and the appointments are until 4pm that is still success, not behind. 
-The outbound board represents live warehouse execution, not future planning. The board uses 24 hour clock instead of 12.
+This is a high-volume outbound grocery distribution center. First shift runs 06:00–16:30 (9.5 workable hours). If the morning shift has all loads RTL and appointments run until 16:00, that is still success — not behind.
+The outbound board represents live warehouse execution, not future planning. The board uses 24-hour clock.
 
-The manager using this system is focused on:
+The manager is focused on:
 - Preventing shorts
 - Keeping pickers productive
 - Avoiding late departures
@@ -1200,7 +1177,7 @@ The manager using this system is focused on:
 - Reducing congestion
 - Getting ahead instead of reacting late
 
-Operational priorities from highest to lowest:
+Operational priorities (highest → lowest):
 1. Prevent shorts on customer orders
 2. Protect outbound departures
 3. Maintain picking flow
@@ -1208,213 +1185,135 @@ Operational priorities from highest to lowest:
 5. Use extra labor proactively
 
 Operational definitions:
-- RTL = Ready To Load: Product is staged and ready. Loader can execute.
-- R/S = Ready/Short: Load is mostly ready but missing full pallets or replenishment inventory. This is a major operational risk and can quickly become late.
+- RTL = Ready To Load: Product staged, loader can execute.
+- R/S = Ready/Short: Mostly ready but missing full pallets or replenishment. Major operational risk.
 - Picking = Order currently being picked.
-- Picking/Short = Picking in progress but inventory shortages are occurring. This usually means replenishment or manufacturing support is needed.
-- Loaded Short = Trailer loaded but missing product. This is a severe service risk.
-- Live = Trailer physically waiting at the dock. Live loads always have higher priority than drop trailers.
-- Drop = Trailer can wait longer and has lower urgency.
-- Late = Appointment time already missed or at risk.
+- Picking/Short = Picking in progress but inventory shortages occurring. Replenishment or manufacturing support needed.
+- Loaded Short = Trailer loaded but missing product. Severe service risk.
+- Live = Trailer physically at dock. Higher priority than drop.
+- Drop = Trailer can wait. Lower urgency.
+- Late = Appointment already missed or at risk.
 
-Important labor behavior rules:
-- Pickers should stay picking whenever possible.
-- Tasking/replenishment exists mainly to protect pickers from running out of product.
-- If replenishment falls behind, pickers stop producing.
-- Loading labor should only be pulled if outbound risk is low.
-- Receiving and unloading can temporarily absorb delays better than picking.
-- Lead/Extra labor should be used proactively before the operation falls behind.
+Labor behavior rules:
+- Pickers stay picking whenever possible.
+- Tasking/replenishment exists to protect pickers from running dry.
+- If replenishment falls behind, pickers stop.
+- Loading labor only pulled if outbound risk is low.
+- Receiving/unloading can absorb delays better than picking.
+- Lead/Extra labor used proactively before the operation falls behind.
 
-Operational productivity assumptions:
-- 1 picker averages 185 cases/hour
-- 1 loader averages 1 trailer/hour
-- 1 unloader averages 44 pallets/hour
-- 1 replenishment/tasking worker averages 25 pallet moves/hour
+Productivity assumptions:
+- Picking: 185 cases/hour/worker
+- Loading: 1 trailer/hour/worker
+- Unloading: 44 pallets/hour/worker
+- Replenishment/tasking: 25 pallet moves/hour/worker
+- Picking tickets average 60 cases/ticket
 
 Risk interpretation rules:
-- Multiple Picking/Short loads means replenishment is failing.
-- Multiple R/S loads means outbound may miss appointments.
-- Late live loads are highest priority.
-- Loads with no door, no trailer, or no loader are operational risks.
-- If many loads are blank/not started, the operation is behind schedule.
-- If outbound workload is heavier than staffing, recommend labor moves immediately.
+- Multiple Picking/Short = replenishment failing.
+- Multiple R/S = outbound may miss appointments.
+- Late live loads = highest priority.
+- Loads with no door, trailer, or loader = operational risk.
+- Many blank/not-started = operation behind schedule.
 
 Management philosophy:
-The goal is not only to survive the shift. The goal is to get ahead early enough that later appointments are protected. We only send people to manufacturing if it's going to benefit us.
+Goal is not just to survive the shift — get ahead early so later appointments are protected. Only send people to manufacturing if it genuinely benefits the shift.
 
 The manager prefers:
-- proactive recommendations
-- actionable labor moves
-- operational risk analysis
-- realistic achievable goals
-- time-based recommendations
-- practical warehouse language
-- direct communication without corporate fluff
-
-When making recommendations:
-- Specify EXACTLY where labor should move from and to
-- Explain WHY
-- Explain operational consequences if no action is taken
-- Give achievable operational goals for the next 30 minutes and next 2 hours
-- Prioritize live loads, shorts, and dock flow
-- Think like an experienced outbound operations manager
+- Proactive recommendations
+- Actionable labor moves (from WHERE to WHERE)
+- Operational risk analysis
+- Realistic achievable goals
+- Time-based recommendations
+- Direct warehouse language, no corporate fluff
 
 Today's operational context:
 - Day: {day}, Shift: {shift}
-- Total cases forecast for today: {total_cases:,}
+- Total cases forecast today: {total_cases:,}
 - Cases to pick this shift: {cases_to_pick:,.0f}
-- Hours remaining in shift: {hours_remaining}
+- Hours remaining: {hours_remaining}
 - Total outbound loads scheduled today: {total_outbound_loads}
 - Inbound pallets expected: {inbound_pallets:,} (Plants open: {", ".join(plants_open) if plants_open else "None"})
 - Manager notes: {notes if notes.strip() else "None"}
 
-Current staffing vs. what we need:
+Current staffing vs. need (Python-computed — do not recalculate):
 {staffing_summary}
+
+{verified_counts}
 {oc_section}
-Board data rules and operation rules:
-- All data below was extracted directly from Excel cells — treat it as accurate.
-- Cells annotated with [LOAD-CHECK] had a yellow fill in Excel, meaning that load needs a load check.
-- Cells annotated with [CANADIAN] had red font in Excel, meaning it is a Canadian load.
-- If a color annotation is absent, the cell had no special flag — do not guess.
-- Blank status on the board means the load is not currently being worked.
-- R/S means Ready to load but still short on full pallets.
-- Our average productivity:
-  - Picking: 185 cases per hour per worker allocated
-  - Loading: 1 trailer per hour per worker allocated
-  - Unloading: 44 pallets per hour per worker allocated
-  - Full pallets / replenishment movement: 25 full pallets per hour per worker allocated
-- Picking is measured in tickets on the board, but analyze everything in cases. Our average is 60 cases per picking ticket.
-- If a column or value is unclear or missing, say "unclear" — do not invent information.
+Board data rules:
+- All data extracted directly from Excel cells — treat as accurate.
+- [LOAD-CHECK] = yellow fill → load needs a load check.
+- [CANADIAN] = red font → Canadian load.
+- [TT4-NEEDED] = blue fill → TT4 required.
+- Absent annotation = no special flag — do not guess.
+- Blank status = load not currently being worked.
+- R/S = Ready to load but still short on full pallets.
+- If a value is unclear or missing, say "unclear" — do not invent information.
 
-Here is the outbound board data extracted directly from the Excel file:
+Here is the full board data (Python-verified summary + structured rows):
 {board_text}
-"""
 
-    output_structure = """
-Read the board carefully row by row.
+===== OUTPUT STRUCTURE — follow exactly =====
 
-Give me a clear, practical warehouse manager analysis in plain English covering:
+1. Board Summary
+- Break loads by status AND day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Completed, Blank/Not Started.
+- Use the PYTHON-VERIFIED counts above — do not recount.
+- Specify completed loads today out of total for the day.
+- List any late loads: which day, door occupied, which door.
 
-1. Board Summary:
-- Break loads down by status and day: RTL, R/S, Late, Picking, Picking/Short, Loaded Short, Completed, blank/not started, etc.
-- Specify how many loads are completed today out of the total for the day.
-- Specify any late loads, from when, if they are occupying a door, and which door.
+2. Opportunity Customer (OC) Alerts
+- List every load on the board belonging to a customer on the Opportunity Customer List.
+- For each OC load: load number, customer name, current status, appointment time, and EXACT special actions required before it ships.
+- If pictures required: state when and who owns it.
+- If supervisor sign-off required: state who signs and when.
+- If no OC customers today: state clearly "No Opportunity Customers detected on today's board."
 
-2.  Opportunity Customer (OC) Alerts:
-- List every load on the board that belongs to a customer on the Opportunity Customer List.
-- For each OC load: state the load number, customer name, current status, appointment time, and EXACTLY what special actions are required before this load ships.
-- If pictures are required, state when they should be taken and who should own it.
-- If supervisor sign-off is required, state who should sign off and when.
-- If no OC customers are on the board today, state clearly: "No Opportunity Customers detected on today's board."
+3. Picking & Short Risk
+- How many loads not started?
+- Given cases-to-pick and staffing, are we at risk of falling further behind? Yes/no and why.
+- How big is the risk? What are the risk factors?
+- Can we get ahead? Yes/no and why.
+- How far ahead can we finish this shift?
+- What load appointment times should we have picked by end of shift?
+- Specify exactly where to move staff from and to. Should we consider manufacturing? Be specific.
 
-3. Picking & Short Risk:
-- How many loads have not been started?
-- Given cases-to-pick and current staffing, are we at risk of falling further behind? In easy words, yes or no and why.
-- How big is the risk? Explain what are the risk factors.
-- Can we get ahead? Yes or no and why
-- Given all this information, how far ahead can we finish this shift?
-- Give me the load appointment times we should be picking by the end of this shift.
-- Specify people from what areas we can move from and to where. Should we consider sending people to manufacturing to reduce short risks? Specify people from what areas we can move staff from and to where.
+4. Prioritization
+- Which loads to prioritize? List load numbers.
+- How and why?
 
-4. Prioritization:
-- Are there any loads we should prioritize? Be specific, add load numbers.
-- How and why should we prioritize them?
-
-5. Cross-Analysis with Staffing:
-- Given staffing gaps or surpluses, which problems can we actually fix right now?
+5. Cross-Analysis with Staffing
+- Given staffing gaps or surpluses, which problems can we fix right now?
 - Where should labor move first?
-- Based on staffing and demand, what should be an achievable goal for this shift?
-- How ahead or behind should we finish this shift?
+- What is an achievable goal for this shift based on staffing and demand?
+- How far ahead or behind should we finish?
 
-6. Top 3 Action Items:
-- What are the 3 most important things the manager should do in the next 30 minutes?
-- What are the 3 most important things the manager should do in the next 2 hours to achieve today's goal?
+6. Top 3 Action Items
+- 3 most important things to do in the next 30 minutes.
+- 3 most important things to do in the next 2 hours to achieve today's goal.
 
-Make sure every recommendation and suggested action is achievable and following the same direction.
-Have somewhere where you clearly set the expectations for the shift and explain why. I want this easy to identify.
-Keep the tone like a smart, experienced ops manager talking to another manager.
-No corporate fluff.
-Be clear, practical, and actionable.
-Add times and case/pallet numbers to every goal so progress is measurable.
-Include what-if scenarios: if X happens, here is what to do.
-Only use data, do not guess.
-Talk about how you are heading the second shift for success.
-When suggesting to think about moving staff specify from where to where.
-Remember even though we have loads for the day it is separated in 2 shifts. We load approximately 52% of loads in the first shift. Take that into consideration, we still can have the loads ready to load for second shift. Read the board and check the times.
-When making suggestions that we should be ready to load up to a specific hour do not use a range, be specific.
-OC loads (Opportunity Customers) must ALWAYS be called out explicitly and early in the analysis — never buried at the bottom.
+Rules for the output:
+- Set clear shift expectations somewhere prominent and explain why — make it easy to identify.
+- Every recommendation must have a specific from→to labor move.
+- Add times and case/pallet numbers to every goal so progress is measurable.
+- Include what-if scenarios: "if X happens, do Y."
+- Only use data from the board — do not guess or invent.
+- Talk about how you are setting up second shift for success.
+- We load ~52% of loads in first shift — account for this when reading appointment times.
+- When suggesting RTL targets, use a specific time, not a range.
+- OC loads must appear EARLY and be COMPLETE — never buried or shortened.
+- Keep the tone like a smart, experienced ops manager talking to another manager.
+- No corporate fluff. Be clear, practical, and actionable.
 """
 
     try:
-        initial_response = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": base_context + output_structure}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2500,
+            max_completion_tokens=3000,
         )
-        initial_analysis = initial_response.choices[0].message.content
-
-        validation_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a meticulous warehouse operations auditor. "
-                        "Your only job is to validate the operational analysis below against the raw board data and operational context provided. "
-                        "Check for: incorrect load counts by status, wrong load numbers referenced, "
-                        "contradictory statements (e.g. saying a load is RTL and also Picking), "
-                        "math errors in labor or case projections, recommendations that conflict with stated priorities, "
-                        "and any invented data not present in the board. "
-                        "ALSO verify: if an Opportunity Customer (OC) was flagged in the context, confirm it was addressed "
-                        "explicitly in the analysis with correct requirements. If it was missed, flag it. "
-                        "Be specific about each issue found. If something is correct, confirm it. "
-                        "Do not rewrite the full analysis — only list what needs to be corrected and what is confirmed accurate. "
-                        "Keep it concise and factual."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"=== ORIGINAL BOARD DATA AND CONTEXT ===\n{base_context}\n\n"
-                        f"=== INITIAL ANALYSIS TO VALIDATE ===\n{initial_analysis}"
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_completion_tokens=1200,
-        )
-        validation_notes = validation_response.choices[0].message.content
-
-        final_response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an experienced warehouse operations shift manager. "
-                        "You have an initial operational analysis and a validation audit that flags any errors or confirms accuracy. "
-                        "Your job is to produce the final, corrected, clean analysis. "
-                        "Apply every correction flagged in the validation. Keep everything that was confirmed accurate. "
-                        "Do not mention the validation process or the word 'corrected' — just write the final clean analysis "
-                        "as if you are delivering it directly to the shift manager. "
-                        "Follow the exact same output structure as the initial analysis. "
-                        "Opportunity Customer (OC) alerts must appear early and be complete — never omit or shorten them."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"=== INITIAL ANALYSIS ===\n{initial_analysis}\n\n"
-                        f"=== VALIDATION NOTES (apply these corrections) ===\n{validation_notes}\n\n"
-                        f"=== OUTPUT STRUCTURE TO FOLLOW ===\n{output_structure}"
-                    ),
-                },
-            ],
-            temperature=0.2,
-            max_completion_tokens=2500,
-        )
-        return final_response.choices[0].message.content
+        return response.choices[0].message.content
 
     except Exception as e:
         return f"Board analysis could not be completed: {str(e)}"
@@ -1676,6 +1575,9 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     ws_dash.freeze_panes = f"A{header_row}"
 
 
+# ============================================================
+#  EMAIL DRAFT — OC section is brief (name + priority only)
+# ============================================================
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
@@ -1695,17 +1597,18 @@ def build_email_draft(
         )
     top_recommendations = "\n".join([f"- {rec}" for rec in recommendations[:8]])
 
+    # ── OC block: brief mention only in email (full details are in the report) ──
     oc_email_block = ""
     if oc_matches:
-        oc_lines = ["\n OPPORTUNITY CUSTOMER ALERT:"]
-        for match in oc_matches:
-            c = match["customer"]
-            oc_lines.append(f" - {c['name'].upper()} [{c['priority']}]: {c['requirements']}")
-            if c["sign_off"]:
-                oc_lines.append(" → Supervisor sign-off REQUIRED before shipping.")
-            if c["pictures"]:
-                oc_lines.append(" → 6 photos required (3 on dock, 3 loading). Email to manager.")
-        oc_email_block = "\n".join(oc_lines)
+        oc_names = ", ".join(
+            f"{m['customer']['name'].upper()} [{m['customer']['priority']}]"
+            for m in oc_matches
+        )
+        oc_email_block = (
+            f"\nOPPORTUNITY CUSTOMER ALERT:\n"
+            f"The following OC customers have loads on today's board: {oc_names}.\n"
+            f"See the attached staffing report (Board Analysis tab) for full handling requirements.\n"
+        )
 
     body = f"""
 Good morning,
@@ -1724,7 +1627,6 @@ Daily Inputs:
 Staffing Summary:
 {chr(10).join(staffing_lines)}
 {oc_email_block}
-
 Key Recommendations / What-Ifs:
 {top_recommendations}
 """
@@ -1793,14 +1695,10 @@ if board_file:
             if not preview_rows:
                 st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5-9 digit load numbers in column A.")
             else:
-                #  Staff counts (live from sidebar selection) 
                 total_staff_present = len(present_workers)
-
                 st.metric("Staff Present Today", total_staff_present)
-
                 st.markdown("---")
 
-                #  Board summary counts 
                 preview_summary = build_python_board_summary(preview_rows)
                 total = preview_summary["loads_read_from_board"]
 
@@ -1820,7 +1718,6 @@ if board_file:
 
                 st.caption(f"Outbound loads by day: {preview_summary['loads_by_day']}")
 
-                # ── Inbound summary ───────────────────────────────────────────
                 board_file.seek(0)
                 inbound_preview_rows = board_records_from_inbound_sheet(board_file)
                 if inbound_preview_rows:
@@ -1851,7 +1748,6 @@ if board_file:
                     st.dataframe(inbound_df, use_container_width=True, height=250)
 
                 st.markdown("---")
-                #  Full outbound parsed table
                 st.markdown("**Every outbound load row Python extracted from the file:**")
                 preview_df = pd.DataFrame([
                     {
@@ -1876,7 +1772,6 @@ if board_file:
                 ])
                 st.dataframe(preview_df, use_container_width=True, height=400)
 
-                #  Quick sanity checks 
                 st.markdown("**Quick sanity checks:**")
                 issues = []
                 blank_time = [r["load_number"] for r in preview_rows if not r.get("appt_time")]
@@ -1941,7 +1836,6 @@ if st.button("Generate Staffing Report"):
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
 
-    # Dynamic range — scan all rows that have a name in col E
     _last_name_row = 3
     for _r in range(3, ws.max_row + 1):
         if ws[f"E{_r}"].value and str(ws[f"E{_r}"].value).strip():
@@ -1988,7 +1882,7 @@ if st.button("Generate Staffing Report"):
     oc_matches = []
 
     if board_file is not None:
-        with st.spinner("Reading board file → scanning for Opportunity Customers → running analysis → validating → finalizing..."):
+        with st.spinner("Reading board file → scanning for Opportunity Customers → running AI analysis (single call)..."):
             board_text = read_board_file_to_text(board_file)
 
             oc_matches = find_oc_customers_in_board(board_text)
@@ -1997,7 +1891,7 @@ if st.button("Generate Staffing Report"):
             if oc_matches:
                 customer_names_found = [m["customer"]["name"].upper() for m in oc_matches]
                 st.warning(
-                    f" **Opportunity Customer Alert:** "
+                    f"**Opportunity Customer Alert:** "
                     f"The following customers were detected on today's board and require special handling: "
                     f"**{', '.join(customer_names_found)}**. "
                     f"See the OC Alerts section below for full requirements."
@@ -2045,13 +1939,13 @@ if st.button("Generate Staffing Report"):
         )
         for match in oc_matches:
             c = match["customer"]
-            with st.expander(f" {c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
+            with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
                 st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
-                    st.markdown(" **DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                    st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
                 if c["pictures"]:
-                    st.markdown(" **Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+                    st.markdown("**Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
     elif board_file is not None:
         st.info("No Opportunity Customers detected on today's board.")
 
