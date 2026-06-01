@@ -189,7 +189,7 @@ def load_names_for_shift(shift):
         start_row = 3
     else:
         col = 14  # column N
-        start_row = 2
+        start_row = 3
 
     for row in range(start_row, ws.max_row + 1):
         name = ws.cell(row, col).value
