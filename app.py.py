@@ -194,6 +194,7 @@ def get_groq_client():
 #  1st shift: "Staffing sheet 1ST Shift"  col A rows 2+
 #  2nd shift: "Staffing Sheet 2nd Shift"  col A rows 2+
 # ============================================================
+@st.cache_data
 def load_names_for_shift(shift):
     wb = load_workbook(TEMPLATE_FILE, data_only=True)
     if shift == "1st":
