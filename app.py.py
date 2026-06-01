@@ -1250,8 +1250,9 @@ Statuses: RTL=staged ready|R/S=short on full pallets|Picking/Short=inventory sho
 Flags: LOAD-CHECK=yellow|TT4-NEEDED=blue|CANADIAN=red font.
 Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Tasking=25 pallets/hr|Ticket avg=75 cases.
 Labor rules: Keep pickers picking. Tasking protects pickers. Protect loading labor. Lead/Extra used proactively.
-Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Send staff to manufacturing only if it genuinely helps this shift.
-Late loads need a drive to be cleared off. Most of the times we can't do anything with them because nobody is here to pick them up. They are a priority but if there's no driver, there's nothing we can do other than wait. 
+Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Send staff to manufacturing only if it genuinely helps this shift. 
+For prioritization, think in if its an OC customer, appointment time, type of load (CPU and live has high priority)
+Late loads should always be a priority but since we need a driver to be here just mention them, there is not much we can do about them. 
 
 TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | {hours_remaining}hrs left | {total_outbound_loads} loads today | Inbound: {inbound_pallets:,} pallets ({", ".join(plants_open) if plants_open else "no plants"}) | Notes: {notes.strip() or "none"}
 
@@ -1269,9 +1270,10 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 ===== OUTPUT — 6 sections =====
 
 1. BOARD SUMMARY
-- Loads by status and day using verified counts above. Include Inbounds. Do not recount. How many loads of today haven't been started. 
+- Loads by status and day using verified counts above. Do not recount. How many loads of today haven't been started. 
 - Completed today vs total. Pacing: ahead/on track/behind based on appt times and hours left.
 - Late loads: day, load#, door, what's happening.
+- Inboud summary. total inbound, from what days, and if they are on lot/at door. 
 
 2. OC ALERTS
 - Every OC load: load#, customer, status, appt time, exact required actions.
