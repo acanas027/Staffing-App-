@@ -649,144 +649,140 @@ def parse_number(value):
 
 # ============================================================
 #  OUTBOUND BOARD COLUMN MAPPING
-#  Reads by headers when possible so small board format changes
-#  do not break the parser again.
+#  Supports both board layouts:
+#  OLD: A Load | B Customer | C Carrier | D Time | E Door | F Trailer | G Status | H TT4 | I Loader | J Comments | K Pulls | L Picks
+#  NEW: A Load | B Customer | C Carrier | D Type | E Time | F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks | O Comments
 # ============================================================
-BOARD_HEADER_ALIASES = {
-    "load_number": ["load #", "load", "load number", "ld"],
-    "customer":    ["customer", "destination", "ship to", "consignee"],
-    "carrier":     ["carrier"],
-    "type":        ["type", "load type"],
-    "appt_time":   ["time", "appt", "appointment", "appointment time"],
-    "door":        ["door"],
-    "trailer":     ["trailer", "tr", "trailer #"],
-    "status":      ["status"],
-    "tt4":         ["tt4"],
-    "loader":      ["loader"],
-    "comments":    ["comments", "comment", "notes", "note"],
-    "pulls":       ["pulls", "pull"],
-    "picks":       ["picks", "pick"],
-}
-
 
 def clean_header_text(value):
     return re.sub(r"[^a-z0-9#]+", " ", normalize_board_text(value).lower()).strip()
 
 
-def default_outbound_col_map():
-    """
-    Safe fallback for the newest layout the user described:
-    A Load # | B Customer/Destination | C Carrier | D Type | E Time
-    F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks
-    Comments are usually found by header because their position has changed before.
-    """
+def parse_board_day_name(value):
+    text = normalize_board_text(value).strip()
+    for day_name in BOARD_DAY_NAMES:
+        if text.lower() == day_name.lower():
+            return day_name
+    return ""
+
+
+def default_old_col_map():
     return {
         "load_number": 0,
-        "customer":    1,
-        "carrier":     2,
-        "type":        3,
-        "appt_time":   4,
-        "door":        5,
-        "trailer":     6,
-        "status":      7,
-        "tt4":         8,
-        "loader":      9,
-        "pulls":       10,
-        "picks":       11,
-        "comments":    14,
+        "customer": 1,
+        "carrier": 2,
+        "type": None,
+        "appt_time": 3,
+        "door": 4,
+        "trailer": 5,
+        "status": 6,
+        "tt4": 7,
+        "loader": 8,
+        "comments": 9,
+        "pulls": 10,
+        "picks": 11,
     }
 
 
-def row_looks_like_outbound_header(values):
+def default_new_col_map():
+    return {
+        "load_number": 0,
+        "customer": 1,
+        "carrier": 2,
+        "type": 3,
+        "appt_time": 4,
+        "door": 5,
+        "trailer": 6,
+        "status": 7,
+        "tt4": 8,
+        "loader": 9,
+        "comments": 14,
+        "pulls": 10,
+        "picks": 11,
+    }
+
+
+def detect_board_layout_from_header(values):
+    """Return the correct column map from the header row when possible."""
     headers = [clean_header_text(v) for v in values]
     joined = " | ".join(headers)
-    has_customer = any(h in ("customer", "destination", "ship to", "consignee") for h in headers)
-    has_status   = "status" in headers
-    has_time     = any(h in ("time", "appt", "appointment", "appointment time") for h in headers)
-    has_board_words = any(word in joined for word in ["load", "carrier", "door", "tt4", "loader", "pulls", "picks"])
-    return has_board_words and (has_customer or has_status or has_time)
 
+    has_board_header = any(h in ("load #", "load", "load number", "destination", "customer", "carrier", "status") for h in headers)
+    if not has_board_header:
+        return None
 
-def update_col_map_from_header(values, current_map=None):
-    col_map = dict(current_map or default_outbound_col_map())
-    headers = [clean_header_text(v) for v in values]
-    found_keys = set()
+    # If Type is in column D, this is the refreshed layout.
+    if len(headers) > 3 and headers[3] in ("type", "load type"):
+        return default_new_col_map()
 
-    for key, aliases in BOARD_HEADER_ALIASES.items():
+    # If Status is in column H, this is the refreshed layout even if Type header is blank.
+    if len(headers) > 7 and headers[7] == "status":
+        return default_new_col_map()
+
+    # If Status is in column G, this is the older layout.
+    if len(headers) > 6 and headers[6] == "status":
+        return default_old_col_map()
+
+    # Fallback: use header positions if labels are present.
+    col_map = default_new_col_map()
+    label_map = {
+        "load_number": ["load #", "load", "load number", "ld"],
+        "customer": ["customer", "destination", "ship to", "consignee"],
+        "carrier": ["carrier"],
+        "type": ["type", "load type"],
+        "appt_time": ["time", "appt", "appointment", "appointment time"],
+        "door": ["door"],
+        "trailer": ["trailer", "tr", "trailer #"],
+        "status": ["status"],
+        "tt4": ["tt4"],
+        "loader": ["loader"],
+        "comments": ["comments", "comment", "notes", "note"],
+        "pulls": ["pulls", "pull"],
+        "picks": ["picks", "pick"],
+    }
+    for key, aliases in label_map.items():
         for idx, header in enumerate(headers):
-            if not header:
-                continue
             if header in aliases:
                 col_map[key] = idx
-                found_keys.add(key)
                 break
-
-    # Some board exports leave A1 blank even though column A is still Load #.
-    # Keep load number anchored to column A unless a real Load header exists elsewhere.
-    if "load_number" not in found_keys:
-        col_map["load_number"] = 0
-
-    # If the header row does not actually contain Type, do not treat Time as Type.
-    # The parser can still derive Live/Drop/CPU from the row text.
-    if "type" not in found_keys:
-        col_map["type"] = None
-
-    # Some refreshed boards have a blank/merged header around Door/Trailer.
-    # Example: header shows blank, DOOR, STATUS but the data is Door, Trailer, Status.
-    status_idx = col_map.get("status")
-    door_idx = col_map.get("door")
-    if (
-        status_idx is not None
-        and door_idx is not None
-        and "trailer" not in found_keys
-        and status_idx == door_idx + 1
-        and door_idx - 1 >= 0
-        and headers[door_idx - 1] == ""
-    ):
-        col_map["door"] = door_idx - 1
-        col_map["trailer"] = door_idx
-    elif status_idx is not None:
-        if "trailer" not in found_keys and status_idx - 1 >= 0:
-            col_map["trailer"] = status_idx - 1
-        if "door" not in found_keys and status_idx - 2 >= 0:
-            col_map["door"] = status_idx - 2
-
     return col_map
 
 
-def get_board_value(values, col_map, key):
+def get_mapped_value(values, col_map, key):
     idx = col_map.get(key)
     if idx is None or idx < 0 or idx >= len(values):
         return ""
     return values[idx]
 
 
-def derive_board_type(explicit_type, values):
-    explicit = normalize_board_text(explicit_type)
+def derive_board_type(type_value, trailer_value, raw_values):
+    explicit = normalize_board_text(type_value)
     if explicit:
         return explicit
 
-    raw_upper = " ".join(normalize_board_text(v) for v in values).upper()
+    raw_upper = " ".join(normalize_board_text(v) for v in raw_values).upper()
+    trailer_upper = normalize_board_text(trailer_value).upper()
+
     if "CPU" in raw_upper and "LIVE" in raw_upper:
         return "CPU - Live"
     if "CPU" in raw_upper and "DROP" in raw_upper:
         return "CPU - Drop"
-    if "LIVE" in raw_upper:
+    if "LIVE" in trailer_upper or "LIVE" in raw_upper:
         return "Live"
-    if "DROP" in raw_upper:
+    if "DROP" in trailer_upper or "DROP" in raw_upper:
         return "Drop"
     if "CPU" in raw_upper:
         return "CPU"
     return ""
 
 
-def build_outbound_row(values, col_map, source, current_day, current_date, row_number=None, flags=None):
-    load_number = looks_like_board_load(get_board_value(values, col_map, "load_number"))
+def build_board_row_from_values(values, col_map, source, current_day, current_date, row_number=None, flags=None):
+    load_number = looks_like_board_load(get_mapped_value(values, col_map, "load_number"))
     if not load_number:
         return None
 
-    trailer_value = get_board_value(values, col_map, "trailer")
-    status_value  = get_board_value(values, col_map, "status")
+    trailer_value = get_mapped_value(values, col_map, "trailer")
+    status_value = get_mapped_value(values, col_map, "status")
 
     if detect_trailer_field_late(trailer_value):
         status = "Late"
@@ -796,24 +792,24 @@ def build_outbound_row(values, col_map, source, current_day, current_date, row_n
         status = detect_board_status(" ".join(values))
 
     row = {
-        "source":      source,
-        "day":         current_day,
-        "date":        current_date,
+        "source": source,
+        "day": current_day,
+        "date": current_date,
         "load_number": load_number,
-        "customer":    get_board_value(values, col_map, "customer"),
-        "carrier":     get_board_value(values, col_map, "carrier"),
-        "appt_time":   normalize_board_time(get_board_value(values, col_map, "appt_time")),
-        "door":        get_board_value(values, col_map, "door"),
-        "trailer":     trailer_value,
-        "status":      status,
-        "type":        derive_board_type(get_board_value(values, col_map, "type"), values),
-        "tt4":         get_board_value(values, col_map, "tt4"),
-        "loader":      get_board_value(values, col_map, "loader"),
-        "comments":    get_board_value(values, col_map, "comments"),
-        "pulls":       parse_number(get_board_value(values, col_map, "pulls")),
-        "picks":       parse_number(get_board_value(values, col_map, "picks")),
-        "flags":       sorted(set(flags or [])),
-        "raw_row":     " | ".join(v for v in values if v),
+        "customer": get_mapped_value(values, col_map, "customer"),
+        "carrier": get_mapped_value(values, col_map, "carrier"),
+        "appt_time": normalize_board_time(get_mapped_value(values, col_map, "appt_time")),
+        "door": get_mapped_value(values, col_map, "door"),
+        "trailer": trailer_value,
+        "status": status,
+        "type": derive_board_type(get_mapped_value(values, col_map, "type"), trailer_value, values),
+        "tt4": get_mapped_value(values, col_map, "tt4"),
+        "loader": get_mapped_value(values, col_map, "loader"),
+        "comments": get_mapped_value(values, col_map, "comments"),
+        "pulls": parse_number(get_mapped_value(values, col_map, "pulls")),
+        "picks": parse_number(get_mapped_value(values, col_map, "picks")),
+        "flags": sorted(set(flags or [])),
+        "raw_row": " | ".join(v for v in values if v),
     }
     if row_number is not None:
         row["row_number"] = row_number
@@ -852,25 +848,26 @@ def board_records_from_excel(board_file):
             df = df.fillna("")
             current_day = ""
             current_date = ""
-            col_map = default_outbound_col_map()
+            col_map = default_new_col_map()
             for idx, row in df.iterrows():
                 values = [normalize_board_text(v) for v in row.tolist()]
                 while len(values) < 16:
                     values.append("")
 
-                if row_looks_like_outbound_header(values):
-                    col_map = update_col_map_from_header(values, col_map)
+                detected_map = detect_board_layout_from_header(values)
+                if detected_map:
+                    col_map = detected_map
                     continue
 
-                first_cell = values[0]
-                if first_cell in BOARD_DAY_NAMES:
-                    current_day = first_cell
+                day_name = parse_board_day_name(values[0])
+                if day_name:
+                    current_day = day_name
                     current_date = normalize_board_date(values[1])
                     continue
 
-                parsed_row = build_outbound_row(values, col_map, sheet_name, current_day, current_date, flags=[])
-                if parsed_row:
-                    all_rows.append(parsed_row)
+                parsed = build_board_row_from_values(values, col_map, sheet_name, current_day, current_date, flags=[])
+                if parsed:
+                    all_rows.append(parsed)
         return all_rows
 
     wb = load_workbook(board_file, data_only=True)
@@ -886,12 +883,13 @@ def board_records_from_excel(board_file):
         current_day = ""
         current_date = ""
         consecutive_empty = 0
-        col_map = default_outbound_col_map()
+        col_map = default_new_col_map()
 
         for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
             has_content = False
+            # Read farther than the old board because Comments moved to column O.
             for col_idx in range(1, 17):
                 cell = ws.cell(row_idx, col_idx)
                 if cell.value is not None:
@@ -907,22 +905,23 @@ def board_records_from_excel(board_file):
                 continue
             consecutive_empty = 0
 
-            if row_looks_like_outbound_header(values):
-                col_map = update_col_map_from_header(values, col_map)
+            detected_map = detect_board_layout_from_header(values)
+            if detected_map:
+                col_map = detected_map
                 continue
 
-            first_cell = values[0]
-            if first_cell in BOARD_DAY_NAMES:
-                current_day = first_cell
+            day_name = parse_board_day_name(values[0])
+            if day_name:
+                current_day = day_name
                 current_date = normalize_board_date(values[1])
                 continue
 
-            parsed_row = build_outbound_row(
+            parsed = build_board_row_from_values(
                 values, col_map, sheet_name, current_day, current_date,
                 row_number=row_idx, flags=flags
             )
-            if parsed_row:
-                all_rows.append(parsed_row)
+            if parsed:
+                all_rows.append(parsed)
 
     return all_rows
 
@@ -933,29 +932,29 @@ def board_records_from_csv(board_file):
     current_day = ""
     current_date = ""
     all_rows = []
-    col_map = default_outbound_col_map()
+    col_map = default_new_col_map()
 
     for idx, row in df.iterrows():
         values = [normalize_board_text(v) for v in row.tolist()]
         while len(values) < 16:
             values.append("")
 
-        if row_looks_like_outbound_header(values):
-            col_map = update_col_map_from_header(values, col_map)
+        detected_map = detect_board_layout_from_header(values)
+        if detected_map:
+            col_map = detected_map
             continue
 
-        first_cell = values[0]
-        if first_cell in BOARD_DAY_NAMES:
-            current_day = first_cell
+        day_name = parse_board_day_name(values[0])
+        if day_name:
+            current_day = day_name
             current_date = normalize_board_date(values[1])
             continue
 
-        parsed_row = build_outbound_row(values, col_map, "CSV Board", current_day, current_date, flags=[])
-        if parsed_row:
-            all_rows.append(parsed_row)
+        parsed = build_board_row_from_values(values, col_map, "CSV Board", current_day, current_date, flags=[])
+        if parsed:
+            all_rows.append(parsed)
 
     return all_rows
-
 
 def board_records_from_inbound_sheet(board_file):
     board_file.seek(0)
@@ -1852,7 +1851,7 @@ if board_file:
                 preview_rows = board_records_from_excel(board_file)
 
             if not preview_rows:
-                st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5-9 digit load numbers in column A.")
+                st.warning("No load rows were parsed. Check that the Outbound sheet has load numbers in column A and the board values are saved/calculated in Excel.")
             else:
                 total_staff_present = len(present_workers)
                 st.metric("Staff Present Today", total_staff_present)
