@@ -260,10 +260,16 @@ def calculate_input_values(day, shift, total_cases):
 def calculate_needed(
     day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
     crossroads_open, deer_creek_open, msb_open,
+    cases_to_pick_override=None, full_pallets_override=None,
 ):
     if hours_remaining <= 0:
         hours_remaining = 1
-    cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
+
+    # Old fallback: estimate picks/pulls from total cases.
+    # New board flow: use exact board totals from Outbound!L2 and Outbound!K2.
+    calculated_cases_to_pick, calculated_full_pallets = calculate_input_values(day, shift, total_cases)
+    cases_to_pick = calculated_cases_to_pick if cases_to_pick_override is None else float(cases_to_pick_override or 0)
+    full_pallets = calculated_full_pallets if full_pallets_override is None else float(full_pallets_override or 0)
     inbound_pallets = 0
     if crossroads_open == "YES":
         inbound_pallets += 700
@@ -1855,6 +1861,14 @@ if board_file:
             else:
                 total_staff_present = len(present_workers)
                 st.metric("Staff Present Today", total_staff_present)
+
+                if not file_name_lower.endswith(".csv"):
+                    board_file.seek(0)
+                    preview_today_totals = read_board_today_totals_from_excel(board_file)
+                    pcol1, pcol2 = st.columns(2)
+                    pcol1.metric("Pulls Left Today from K2", preview_today_totals.get("pulls_left_today", 0))
+                    pcol2.metric("Picks Left Today from L2", preview_today_totals.get("picks_left_today", 0))
+
                 st.markdown("---")
 
                 preview_summary = build_python_board_summary(preview_rows)
@@ -1989,7 +2003,27 @@ if st.button("Generate Staffing Report"):
     ws["B9"] = deer_creek_open
     ws["B10"] = msb_open
 
-    cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
+    # Populate Inputs B5/B6.
+    # If a board is uploaded, use exact board totals:
+    #   Outbound!L2 = picks left today  -> Inputs!B5
+    #   Outbound!K2 = pulls left today  -> Inputs!B6
+    # If no board is uploaded, keep the old calculated fallback.
+    board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
+    if board_file is not None:
+        try:
+            board_input_totals = read_board_today_totals_from_excel(board_file)
+        except Exception:
+            board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
+
+    if board_file is not None and (
+        board_input_totals.get("picks_left_today") is not None
+        or board_input_totals.get("pulls_left_today") is not None
+    ):
+        cases_to_pick = float(board_input_totals.get("picks_left_today") or 0)
+        full_pallets = float(board_input_totals.get("pulls_left_today") or 0)
+    else:
+        cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
+
     ws["B5"] = cases_to_pick
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
@@ -2029,6 +2063,8 @@ if st.button("Generate Staffing Report"):
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
+        cases_to_pick_override=cases_to_pick,
+        full_pallets_override=full_pallets,
     )
 
     # ── Load staff from the correct shift's staffing sheet ──────────────────
