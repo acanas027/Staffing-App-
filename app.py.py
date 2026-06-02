@@ -1279,6 +1279,7 @@ def read_board_file_to_text(board_file):
         board_summary   = build_python_board_summary(board_rows)
         inbound_summary = build_python_inbound_summary(inbound_rows)
         actionable_rows, completed_rows = actionable_rows_for_ai(board_rows)
+        all_outbound_rows = compact_board_rows_for_ai(board_rows)
 
         payload = {
             "python_verified_outbound_summary": slim_summary_for_ai(board_summary),
@@ -1286,6 +1287,7 @@ def read_board_file_to_text(board_file):
             "python_verified_today_totals":     today_totals,
             "actionable_outbound_rows":         actionable_rows,
             "completed_outbound_rows":          completed_rows,
+            "all_outbound_rows":                all_outbound_rows,
             "instructions_for_ai": [
                 "Use python_verified_outbound_summary for ALL outbound counts — do not recount from rows.",
                 "Use python_verified_inbound_summary for ALL inbound counts.",
@@ -1329,6 +1331,150 @@ def _rows_to_table(rows, columns):
     return "\n".join(lines)
 
 
+def rows_for_selected_day(rows, selected_day):
+    """Return rows that belong only to the selected app day."""
+    selected_day = str(selected_day or "").strip().lower()
+    return [
+        r for r in rows
+        if str(r.get("day", "")).strip().lower() == selected_day
+    ]
+
+
+def rows_not_selected_day(rows, selected_day):
+    """Return rows from days other than the selected app day."""
+    selected_day = str(selected_day or "").strip().lower()
+    return [
+        r for r in rows
+        if str(r.get("day", "")).strip().lower() != selected_day
+    ]
+
+
+def status_bucket_for_pacing(status):
+    status = str(status or "").strip()
+    return status if status else "Blank/Not Started"
+
+
+def is_done_for_pacing(status):
+    status_upper = str(status or "").strip().upper()
+    return status_upper in {"COMPLETED", "COMPLETE", "LOADED"}
+
+
+def board_minutes_for_pacing(value):
+    text = normalize_board_time(value)
+    if not text or not re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return None
+    h, m = text.split(":")
+    return int(h) * 60 + int(m)
+
+
+def format_minutes_for_pacing(minutes):
+    if minutes is None:
+        return "unknown"
+    minutes = int(minutes) % (24 * 60)
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def estimated_current_minutes_from_shift(shift, hours_remaining):
+    """Estimate current clock time from shift end and hours remaining."""
+    try:
+        remaining_minutes = int(round(float(hours_remaining or 0) * 60))
+    except Exception:
+        return None
+
+    shift_lower = str(shift or "").lower()
+    if "1" in shift_lower:
+        end_minutes = 16 * 60 + 30    # 1st shift: 06:00-16:30
+    else:
+        end_minutes = 23 * 60 + 30    # 2nd shift estimate
+
+    return max(0, end_minutes - remaining_minutes)
+
+
+def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
+    """
+    Build a Python-computed selected-day pacing guardrail.
+    This prevents the AI from mixing days or inventing pacing math.
+    """
+    selected_rows = rows_for_selected_day(all_rows, selected_day)
+    current_minutes = estimated_current_minutes_from_shift(shift, hours_remaining)
+
+    status_counts = {}
+    completed_count = 0
+    loaded_count = 0
+    done_count = 0
+    due_by_now = 0
+    due_done = 0
+    future_done = 0
+    due_not_done_rows = []
+    future_done_rows = []
+
+    for row in selected_rows:
+        status = status_bucket_for_pacing(row.get("status"))
+        status_upper = status.upper()
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+        if status_upper in {"COMPLETED", "COMPLETE"}:
+            completed_count += 1
+        if status_upper == "LOADED":
+            loaded_count += 1
+
+        done = is_done_for_pacing(status)
+        if done:
+            done_count += 1
+
+        appt_minutes = board_minutes_for_pacing(row.get("time") or row.get("appt_time"))
+        slim_row = {
+            "load": row.get("load") or row.get("load_number", ""),
+            "customer": row.get("customer", ""),
+            "time": row.get("time") or row.get("appt_time", ""),
+            "door": row.get("door", ""),
+            "status": status,
+        }
+
+        if current_minutes is not None and appt_minutes is not None:
+            if appt_minutes <= current_minutes:
+                due_by_now += 1
+                if done:
+                    due_done += 1
+                else:
+                    due_not_done_rows.append(slim_row)
+            elif done:
+                future_done += 1
+                future_done_rows.append(slim_row)
+
+    due_not_done = max(0, due_by_now - due_done)
+    actionable_or_not_done = max(0, len(selected_rows) - done_count)
+
+    if due_not_done > 0:
+        pacing = "BEHIND"
+        reason = f"{due_not_done} selected-day load(s) due by the estimated current time are not done."
+    elif future_done > 0:
+        pacing = "AHEAD"
+        reason = f"{future_done} future selected-day load(s) are already done."
+    else:
+        pacing = "ON TRACK"
+        reason = "No selected-day loads due by the estimated current time are unfinished."
+
+    return {
+        "selected_day": selected_day,
+        "estimated_current_time": format_minutes_for_pacing(current_minutes),
+        "selected_day_total_loads": len(selected_rows),
+        "selected_day_status_counts": status_counts,
+        "completed_count": completed_count,
+        "loaded_count": loaded_count,
+        "done_count_completed_plus_loaded": done_count,
+        "actionable_or_not_done_count": actionable_or_not_done,
+        "due_by_now": due_by_now,
+        "due_done": due_done,
+        "due_not_done": due_not_done,
+        "future_done": future_done,
+        "pacing": pacing,
+        "reason": reason,
+        "due_not_done_loads_first_10": due_not_done_rows[:10],
+        "future_done_loads_first_10": future_done_rows[:10],
+    }
+
+
 def analyze_board_with_groq(
     board_text, day, shift, total_cases, hours_remaining, total_outbound_loads,
     crossroads_open, deer_creek_open, msb_open, needed, summary_table,
@@ -1348,12 +1494,17 @@ def analyze_board_with_groq(
         py_today_totals = board_payload.get("python_verified_today_totals", {})
         actionable_rows = board_payload.get("actionable_outbound_rows", [])
         completed_rows  = board_payload.get("completed_outbound_rows", [])
+        all_rows        = board_payload.get("all_outbound_rows", [])
     except Exception:
         py_summary      = {}
         py_inbound      = {}
         py_today_totals = {}
         actionable_rows = []
         completed_rows  = []
+        all_rows        = []
+
+    if not all_rows:
+        all_rows = actionable_rows + completed_rows
 
     staffing_lines = []
     for task, row in summary_table.iterrows():
@@ -1370,10 +1521,27 @@ def analyze_board_with_groq(
 
     oc_section = f"\n{oc_alert_text}\n" if oc_alert_text else ""
 
+    selected_day_pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining)
+    selected_status_text = json.dumps(selected_day_pacing.get("selected_day_status_counts", {}), ensure_ascii=False)
+
     loads_by_day = py_summary.get("loads_by_day", {})
     day_str = ", ".join(f"{d}:{n}" for d, n in loads_by_day.items())
     verified_counts = (
-        f"VERIFIED COUNTS (Python — do not recount):\n"
+        f"SELECTED DAY COUNTS ONLY (Python — use this first for today's analysis):\n"
+        f"Day:{selected_day_pacing.get('selected_day')}  "
+        f"Total:{selected_day_pacing.get('selected_day_total_loads',0)}  "
+        f"Completed:{selected_day_pacing.get('completed_count',0)}  "
+        f"Loaded:{selected_day_pacing.get('loaded_count',0)}  "
+        f"DoneCompletedPlusLoaded:{selected_day_pacing.get('done_count_completed_plus_loaded',0)}  "
+        f"ActionableOrNotDone:{selected_day_pacing.get('actionable_or_not_done_count',0)}\n"
+        f"DueByNow:{selected_day_pacing.get('due_by_now',0)}  "
+        f"DueDone:{selected_day_pacing.get('due_done',0)}  "
+        f"DueNotDone:{selected_day_pacing.get('due_not_done',0)}  "
+        f"FutureDone:{selected_day_pacing.get('future_done',0)}  "
+        f"Pacing:{selected_day_pacing.get('pacing','UNKNOWN')}  "
+        f"CurrentTimeEstimate:{selected_day_pacing.get('estimated_current_time','unknown')}\n"
+        f"Selected day status counts: {selected_status_text}\n"
+        f"ALL BOARD COUNTS BY DAY / CONTEXT ONLY (do not use this as today's selected-day total):\n"
         f"Total:{py_summary.get('loads_read_from_board',0)}  "
         f"Late:{py_summary.get('late_loads',0)}  "
         f"RTL:{py_summary.get('rtl_loads',0)}  "
@@ -1408,32 +1576,14 @@ def analyze_board_with_groq(
     pulls_left_today = py_today_totals.get("pulls_left_today", 0)
     picks_left_today = py_today_totals.get("picks_left_today", 0)
 
-    # Split board rows by the selected app day so the AI does not mix days.
-    # This creates the two variables used by the prompt:
-    #   day_pacing_text
-    #   other_day_actionable_table
-    selected_day_lower = str(day).strip().lower()
-
-    today_actionable_rows = [
-        r for r in actionable_rows
-        if str(r.get("day", "")).strip().lower() == selected_day_lower
-    ]
-    other_day_actionable_rows = [
-        r for r in actionable_rows
-        if str(r.get("day", "")).strip().lower() != selected_day_lower
-    ]
-    today_completed_rows = [
-        r for r in completed_rows
-        if str(r.get("day", "")).strip().lower() == selected_day_lower
+    today_actionable_rows = rows_for_selected_day(actionable_rows, day)
+    other_day_actionable_rows = rows_not_selected_day(actionable_rows, day)
+    today_done_rows = [
+        r for r in rows_for_selected_day(all_rows, day)
+        if is_done_for_pacing(r.get("status"))
     ]
 
-    day_pacing_text = (
-        f"Selected app day: {day}. "
-        f"Use only selected-day actionable rows ({len(today_actionable_rows)}) "
-        f"and selected-day completed rows ({len(today_completed_rows)}) for today's pacing. "
-        f"Other-day actionable rows: {len(other_day_actionable_rows)}. "
-        "Do not mix other days into today's pacing conclusion."
-    )
+    day_pacing_text = json.dumps(selected_day_pacing, ensure_ascii=False)
 
     actionable_table = _rows_to_table(
         today_actionable_rows,
@@ -1444,7 +1594,7 @@ def analyze_board_with_groq(
         ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
     )
     completed_table = _rows_to_table(
-        today_completed_rows,
+        today_done_rows,
         ["day","load","customer","time","status"]
     )
 
@@ -1504,6 +1654,7 @@ LABOR RULES:
 
 SOURCE OF TRUTH RULES:
 - Python verified counts are the source of truth. Do not recount manually from the rows.
+- SELECTED DAY COUNTS ONLY must be used first for today's analysis. ALL BOARD COUNTS are context only.
 - Pulls left today come directly from uploaded board cell K2.
 - Picks left today come directly from uploaded board cell L2.
 - Inputs!B6 equals board K2 pulls left today.
@@ -1600,6 +1751,7 @@ PACE LOGIC:
 - State whether we can get ahead and what appointment cutoff time should be protected.
 - Labor moves must be specific: source area → destination area → reason.
 - Only recommend moves from Lead/Extra or surplus areas.
+- Do not say "if surplus exists." Only recommend a move if the staffing table shows surplus now.
 - If Tasking is short or balanced, do not recommend pulling taskers away.
 - Manufacturing support: mention only if it helps reduce shorts or protect outbound today.
 
@@ -1641,6 +1793,7 @@ FINAL RULES:
 - Do not recount Python counts.
 - Do not mix days.
 - Do not recommend unsafe labor moves.
+- Do not give conditional labor moves like "if surplus exists." Use actual staffing gaps only.
 - Use appointment cutoff times instead of fake production targets.
 - OC alerts must be early and complete.
 """
