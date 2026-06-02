@@ -159,7 +159,6 @@ def build_oc_alert_text(oc_matches):
         lines.append(f"CUSTOMER: {c['name'].upper()}")
         lines.append(f"Matched on: {', '.join(match['matched_on'])}")
         lines.append(f"Priority: {c['priority']}")
-        lines.append(f"Issue History: {c['issue']}")
         lines.append(f"DC Requirements: {c['requirements']}")
         if c["sign_off"]:
             lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
@@ -1855,7 +1854,6 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
             c = match["customer"]
             oc_lines = [
                 f"CUSTOMER: {c['name'].upper()}  |  Priority: {c['priority']}",
-                f"Issue History: {c['issue']}",
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
@@ -2501,7 +2499,6 @@ if st.button("Generate Staffing Report"):
         for match in oc_matches:
             c = match["customer"]
             with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
-                st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
                     st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
