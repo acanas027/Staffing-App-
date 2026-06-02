@@ -1764,6 +1764,7 @@ PACE LOGIC:
   5) Blank loads with near appointment times
   6) TT4 / Canadian / Load-check flagged loads
 - Do not prioritize loads from other days as today's work.
+- Never include loads that include Reser's in the customer column as a priority. 
 
 5. STAFFING CROSS-ANALYSIS
 - State what staffing can fix right now.
