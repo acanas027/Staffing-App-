@@ -2312,4 +2312,4 @@ if st.button("Generate Staffing Report"):
     st.markdown("---")
     st.subheader("Email Ready to Send")
     st.text_input("Email Subject", value=email_subject)
-    st.text_area("Email
+    st.text_area("Email Body", value=email_body, height=500)
