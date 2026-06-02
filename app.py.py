@@ -1408,12 +1408,43 @@ def analyze_board_with_groq(
     pulls_left_today = py_today_totals.get("pulls_left_today", 0)
     picks_left_today = py_today_totals.get("picks_left_today", 0)
 
+    # Split board rows by the selected app day so the AI does not mix days.
+    # This creates the two variables used by the prompt:
+    #   day_pacing_text
+    #   other_day_actionable_table
+    selected_day_lower = str(day).strip().lower()
+
+    today_actionable_rows = [
+        r for r in actionable_rows
+        if str(r.get("day", "")).strip().lower() == selected_day_lower
+    ]
+    other_day_actionable_rows = [
+        r for r in actionable_rows
+        if str(r.get("day", "")).strip().lower() != selected_day_lower
+    ]
+    today_completed_rows = [
+        r for r in completed_rows
+        if str(r.get("day", "")).strip().lower() == selected_day_lower
+    ]
+
+    day_pacing_text = (
+        f"Selected app day: {day}. "
+        f"Use only selected-day actionable rows ({len(today_actionable_rows)}) "
+        f"and selected-day completed rows ({len(today_completed_rows)}) for today's pacing. "
+        f"Other-day actionable rows: {len(other_day_actionable_rows)}. "
+        "Do not mix other days into today's pacing conclusion."
+    )
+
     actionable_table = _rows_to_table(
-        actionable_rows,
+        today_actionable_rows,
+        ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
+    )
+    other_day_actionable_table = _rows_to_table(
+        other_day_actionable_rows,
         ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
     )
     completed_table = _rows_to_table(
-        completed_rows,
+        today_completed_rows,
         ["day","load","customer","time","status"]
     )
 
