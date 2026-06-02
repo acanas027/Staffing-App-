@@ -1714,21 +1714,6 @@ names = load_names_for_shift(shift)
 
 total_cases = st.sidebar.number_input("Total Cases for Today", min_value=0, step=1, value=0)
 
-hours_remaining = st.sidebar.number_input("Hours Remaining in Shift", min_value=0.0, step=0.25, value=8.0)
-
-total_outbound_loads_day = st.sidebar.number_input("Total Outbound Loads for the Day", min_value=0, step=1, value=0)
-
-crossroads_open = st.sidebar.selectbox("Crossroads plant open?", ["YES", "NO"])
-deer_creek_open = st.sidebar.selectbox("Deer Creek plant open?", ["YES", "NO"])
-msb_open        = st.sidebar.selectbox("MSB plant open?", ["YES", "NO"])
-
-present_workers = st.sidebar.multiselect("Who is present?", names)
-
-notes = st.sidebar.text_area("Operations Notes")
-
-# ── NEW: manager-entered picks and pulls remaining ───────────────────────────
-st.sidebar.markdown("---")
-st.sidebar.subheader("Picking & Pulling Progress")
 picks_left = st.sidebar.number_input(
     "Picks Left for the Day (cases)",
     min_value=0,
@@ -1744,8 +1729,20 @@ pulls_left = st.sidebar.number_input(
     help="How many full-pallet pulls still need to be completed as of right now.",
 )
 
+hours_remaining = st.sidebar.number_input("Hours Remaining in Shift", min_value=0.0, step=0.25, value=8.0)
+
+total_outbound_loads_day = st.sidebar.number_input("Total Outbound Loads for the Day", min_value=0, step=1, value=0)
+
+crossroads_open = st.sidebar.selectbox("Crossroads plant open?", ["YES", "NO"])
+deer_creek_open = st.sidebar.selectbox("Deer Creek plant open?", ["YES", "NO"])
+msb_open        = st.sidebar.selectbox("MSB plant open?", ["YES", "NO"])
+
+present_workers = st.sidebar.multiselect("Who is present?", names)
+
+notes = st.sidebar.text_area("Operations Notes")
+
 st.markdown("---")
-st.subheader("Outbound Board Excel / CSV")
+st.subheader("Outbound Board Excel")
 
 board_file = st.file_uploader(
     "Upload the outbound load board Excel or CSV file",
