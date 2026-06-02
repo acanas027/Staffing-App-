@@ -452,22 +452,17 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
     lead_gap      = int(summary_table.loc["Lead/Extra", "Difference"]) if "Lead/Extra" in summary_table.index else 0
 
     if picking_gap < 0:
-        recommendations.append("High picking short risk detected. Protect pickers and keep replenishment/full-pallet tasking covered.")
+        recommendations.append("High picking short risk detected. Consider moving tasking labor into replenishment to protect pickers.")
         recommendations.append("Avoid pulling pickers into unloading or loading unless outbound service is critical.")
+        if tasking_gap > 0:
+            recommendations.append(f"Tasking currently has {tasking_gap} extra worker(s). Consider temporarily assigning them to replenishment.")
         if lead_gap > 0:
-            recommendations.append("Lead/Extra capacity available. Flex extra labor into picking support, replenishment support, or short investigation.")
-        elif tasking_gap > 0:
-            recommendations.append(f"Tasking currently has {tasking_gap} extra worker(s). Use only the surplus tasking labor for replenishment/picking support.")
-        else:
-            recommendations.append("Do not pull from Tasking for picking support because Tasking is not overstaffed.")
+            recommendations.append("Lead/Extra capacity available. Consider flexing extra labor into replenishment or picking support.")
     if unloading_gap < 0 or receiving_gap < 0:
         recommendations.append("Inbound flow risk detected. Falling behind may create dock congestion and delayed putaway.")
-        if lead_gap > 0:
-            recommendations.append("Use Lead/Extra labor first to support unloading or receiving temporarily.")
-        elif tasking_gap > 0:
-            recommendations.append("Only use surplus Tasking labor for inbound support; do not pull Tasking if it is already short.")
-        else:
-            recommendations.append("No safe move from Tasking because Tasking is not overstaffed; protect current tasking coverage.")
+        recommendations.append("Consider moving flexible tasking labor into unloading or receiving temporarily.")
+        if tasking_gap > 1:
+            recommendations.append("Tasking has available labor that can support inbound operations.")
     if loading_gap < 0:
         recommendations.append("Outbound loading risk detected. Late departures and service failures may increase.")
         recommendations.append("Protect loading labor before reallocating to non-critical work.")
@@ -654,144 +649,140 @@ def parse_number(value):
 
 # ============================================================
 #  OUTBOUND BOARD COLUMN MAPPING
-#  Reads by headers when possible so small board format changes
-#  do not break the parser again.
+#  Supports both board layouts:
+#  OLD: A Load | B Customer | C Carrier | D Time | E Door | F Trailer | G Status | H TT4 | I Loader | J Comments | K Pulls | L Picks
+#  NEW: A Load | B Customer | C Carrier | D Type | E Time | F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks | O Comments
 # ============================================================
-BOARD_HEADER_ALIASES = {
-    "load_number": ["load #", "load", "load number", "ld"],
-    "customer":    ["customer", "destination", "ship to", "consignee"],
-    "carrier":     ["carrier"],
-    "type":        ["type", "load type"],
-    "appt_time":   ["time", "appt", "appointment", "appointment time"],
-    "door":        ["door"],
-    "trailer":     ["trailer", "tr", "trailer #"],
-    "status":      ["status"],
-    "tt4":         ["tt4"],
-    "loader":      ["loader"],
-    "comments":    ["comments", "comment", "notes", "note"],
-    "pulls":       ["pulls", "pull"],
-    "picks":       ["picks", "pick"],
-}
-
 
 def clean_header_text(value):
     return re.sub(r"[^a-z0-9#]+", " ", normalize_board_text(value).lower()).strip()
 
 
-def default_outbound_col_map():
-    """
-    Safe fallback for the newest layout the user described:
-    A Load # | B Customer/Destination | C Carrier | D Type | E Time
-    F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks
-    Comments are usually found by header because their position has changed before.
-    """
+def parse_board_day_name(value):
+    text = normalize_board_text(value).strip()
+    for day_name in BOARD_DAY_NAMES:
+        if text.lower() == day_name.lower():
+            return day_name
+    return ""
+
+
+def default_old_col_map():
     return {
         "load_number": 0,
-        "customer":    1,
-        "carrier":     2,
-        "type":        3,
-        "appt_time":   4,
-        "door":        5,
-        "trailer":     6,
-        "status":      7,
-        "tt4":         8,
-        "loader":      9,
-        "pulls":       10,
-        "picks":       11,
-        "comments":    14,
+        "customer": 1,
+        "carrier": 2,
+        "type": None,
+        "appt_time": 3,
+        "door": 4,
+        "trailer": 5,
+        "status": 6,
+        "tt4": 7,
+        "loader": 8,
+        "comments": 9,
+        "pulls": 10,
+        "picks": 11,
     }
 
 
-def row_looks_like_outbound_header(values):
+def default_new_col_map():
+    return {
+        "load_number": 0,
+        "customer": 1,
+        "carrier": 2,
+        "type": 3,
+        "appt_time": 4,
+        "door": 5,
+        "trailer": 6,
+        "status": 7,
+        "tt4": 8,
+        "loader": 9,
+        "comments": 14,
+        "pulls": 10,
+        "picks": 11,
+    }
+
+
+def detect_board_layout_from_header(values):
+    """Return the correct column map from the header row when possible."""
     headers = [clean_header_text(v) for v in values]
     joined = " | ".join(headers)
-    has_customer = any(h in ("customer", "destination", "ship to", "consignee") for h in headers)
-    has_status   = "status" in headers
-    has_time     = any(h in ("time", "appt", "appointment", "appointment time") for h in headers)
-    has_board_words = any(word in joined for word in ["load", "carrier", "door", "tt4", "loader", "pulls", "picks"])
-    return has_board_words and (has_customer or has_status or has_time)
 
+    has_board_header = any(h in ("load #", "load", "load number", "destination", "customer", "carrier", "status") for h in headers)
+    if not has_board_header:
+        return None
 
-def update_col_map_from_header(values, current_map=None):
-    col_map = dict(current_map or default_outbound_col_map())
-    headers = [clean_header_text(v) for v in values]
-    found_keys = set()
+    # If Type is in column D, this is the refreshed layout.
+    if len(headers) > 3 and headers[3] in ("type", "load type"):
+        return default_new_col_map()
 
-    for key, aliases in BOARD_HEADER_ALIASES.items():
+    # If Status is in column H, this is the refreshed layout even if Type header is blank.
+    if len(headers) > 7 and headers[7] == "status":
+        return default_new_col_map()
+
+    # If Status is in column G, this is the older layout.
+    if len(headers) > 6 and headers[6] == "status":
+        return default_old_col_map()
+
+    # Fallback: use header positions if labels are present.
+    col_map = default_new_col_map()
+    label_map = {
+        "load_number": ["load #", "load", "load number", "ld"],
+        "customer": ["customer", "destination", "ship to", "consignee"],
+        "carrier": ["carrier"],
+        "type": ["type", "load type"],
+        "appt_time": ["time", "appt", "appointment", "appointment time"],
+        "door": ["door"],
+        "trailer": ["trailer", "tr", "trailer #"],
+        "status": ["status"],
+        "tt4": ["tt4"],
+        "loader": ["loader"],
+        "comments": ["comments", "comment", "notes", "note"],
+        "pulls": ["pulls", "pull"],
+        "picks": ["picks", "pick"],
+    }
+    for key, aliases in label_map.items():
         for idx, header in enumerate(headers):
-            if not header:
-                continue
             if header in aliases:
                 col_map[key] = idx
-                found_keys.add(key)
                 break
-
-    # Some board exports leave A1 blank even though column A is still Load #.
-    # Keep load number anchored to column A unless a real Load header exists elsewhere.
-    if "load_number" not in found_keys:
-        col_map["load_number"] = 0
-
-    # If the header row does not actually contain Type, do not treat Time as Type.
-    # The parser can still derive Live/Drop/CPU from the row text.
-    if "type" not in found_keys:
-        col_map["type"] = None
-
-    # Some refreshed boards have a blank/merged header around Door/Trailer.
-    # Example: header shows blank, DOOR, STATUS but the data is Door, Trailer, Status.
-    status_idx = col_map.get("status")
-    door_idx = col_map.get("door")
-    if (
-        status_idx is not None
-        and door_idx is not None
-        and "trailer" not in found_keys
-        and status_idx == door_idx + 1
-        and door_idx - 1 >= 0
-        and headers[door_idx - 1] == ""
-    ):
-        col_map["door"] = door_idx - 1
-        col_map["trailer"] = door_idx
-    elif status_idx is not None:
-        if "trailer" not in found_keys and status_idx - 1 >= 0:
-            col_map["trailer"] = status_idx - 1
-        if "door" not in found_keys and status_idx - 2 >= 0:
-            col_map["door"] = status_idx - 2
-
     return col_map
 
 
-def get_board_value(values, col_map, key):
+def get_mapped_value(values, col_map, key):
     idx = col_map.get(key)
     if idx is None or idx < 0 or idx >= len(values):
         return ""
     return values[idx]
 
 
-def derive_board_type(explicit_type, values):
-    explicit = normalize_board_text(explicit_type)
+def derive_board_type(type_value, trailer_value, raw_values):
+    explicit = normalize_board_text(type_value)
     if explicit:
         return explicit
 
-    raw_upper = " ".join(normalize_board_text(v) for v in values).upper()
+    raw_upper = " ".join(normalize_board_text(v) for v in raw_values).upper()
+    trailer_upper = normalize_board_text(trailer_value).upper()
+
     if "CPU" in raw_upper and "LIVE" in raw_upper:
         return "CPU - Live"
     if "CPU" in raw_upper and "DROP" in raw_upper:
         return "CPU - Drop"
-    if "LIVE" in raw_upper:
+    if "LIVE" in trailer_upper or "LIVE" in raw_upper:
         return "Live"
-    if "DROP" in raw_upper:
+    if "DROP" in trailer_upper or "DROP" in raw_upper:
         return "Drop"
     if "CPU" in raw_upper:
         return "CPU"
     return ""
 
 
-def build_outbound_row(values, col_map, source, current_day, current_date, row_number=None, flags=None):
-    load_number = looks_like_board_load(get_board_value(values, col_map, "load_number"))
+def build_board_row_from_values(values, col_map, source, current_day, current_date, row_number=None, flags=None):
+    load_number = looks_like_board_load(get_mapped_value(values, col_map, "load_number"))
     if not load_number:
         return None
 
-    trailer_value = get_board_value(values, col_map, "trailer")
-    status_value  = get_board_value(values, col_map, "status")
+    trailer_value = get_mapped_value(values, col_map, "trailer")
+    status_value = get_mapped_value(values, col_map, "status")
 
     if detect_trailer_field_late(trailer_value):
         status = "Late"
@@ -801,24 +792,24 @@ def build_outbound_row(values, col_map, source, current_day, current_date, row_n
         status = detect_board_status(" ".join(values))
 
     row = {
-        "source":      source,
-        "day":         current_day,
-        "date":        current_date,
+        "source": source,
+        "day": current_day,
+        "date": current_date,
         "load_number": load_number,
-        "customer":    get_board_value(values, col_map, "customer"),
-        "carrier":     get_board_value(values, col_map, "carrier"),
-        "appt_time":   normalize_board_time(get_board_value(values, col_map, "appt_time")),
-        "door":        get_board_value(values, col_map, "door"),
-        "trailer":     trailer_value,
-        "status":      status,
-        "type":        derive_board_type(get_board_value(values, col_map, "type"), values),
-        "tt4":         get_board_value(values, col_map, "tt4"),
-        "loader":      get_board_value(values, col_map, "loader"),
-        "comments":    get_board_value(values, col_map, "comments"),
-        "pulls":       parse_number(get_board_value(values, col_map, "pulls")),
-        "picks":       parse_number(get_board_value(values, col_map, "picks")),
-        "flags":       sorted(set(flags or [])),
-        "raw_row":     " | ".join(v for v in values if v),
+        "customer": get_mapped_value(values, col_map, "customer"),
+        "carrier": get_mapped_value(values, col_map, "carrier"),
+        "appt_time": normalize_board_time(get_mapped_value(values, col_map, "appt_time")),
+        "door": get_mapped_value(values, col_map, "door"),
+        "trailer": trailer_value,
+        "status": status,
+        "type": derive_board_type(get_mapped_value(values, col_map, "type"), trailer_value, values),
+        "tt4": get_mapped_value(values, col_map, "tt4"),
+        "loader": get_mapped_value(values, col_map, "loader"),
+        "comments": get_mapped_value(values, col_map, "comments"),
+        "pulls": parse_number(get_mapped_value(values, col_map, "pulls")),
+        "picks": parse_number(get_mapped_value(values, col_map, "picks")),
+        "flags": sorted(set(flags or [])),
+        "raw_row": " | ".join(v for v in values if v),
     }
     if row_number is not None:
         row["row_number"] = row_number
@@ -857,25 +848,26 @@ def board_records_from_excel(board_file):
             df = df.fillna("")
             current_day = ""
             current_date = ""
-            col_map = default_outbound_col_map()
+            col_map = default_new_col_map()
             for idx, row in df.iterrows():
                 values = [normalize_board_text(v) for v in row.tolist()]
                 while len(values) < 16:
                     values.append("")
 
-                if row_looks_like_outbound_header(values):
-                    col_map = update_col_map_from_header(values, col_map)
+                detected_map = detect_board_layout_from_header(values)
+                if detected_map:
+                    col_map = detected_map
                     continue
 
-                first_cell = values[0]
-                if first_cell in BOARD_DAY_NAMES:
-                    current_day = first_cell
+                day_name = parse_board_day_name(values[0])
+                if day_name:
+                    current_day = day_name
                     current_date = normalize_board_date(values[1])
                     continue
 
-                parsed_row = build_outbound_row(values, col_map, sheet_name, current_day, current_date, flags=[])
-                if parsed_row:
-                    all_rows.append(parsed_row)
+                parsed = build_board_row_from_values(values, col_map, sheet_name, current_day, current_date, flags=[])
+                if parsed:
+                    all_rows.append(parsed)
         return all_rows
 
     wb = load_workbook(board_file, data_only=True)
@@ -891,12 +883,13 @@ def board_records_from_excel(board_file):
         current_day = ""
         current_date = ""
         consecutive_empty = 0
-        col_map = default_outbound_col_map()
+        col_map = default_new_col_map()
 
         for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
             has_content = False
+            # Read farther than the old board because Comments moved to column O.
             for col_idx in range(1, 17):
                 cell = ws.cell(row_idx, col_idx)
                 if cell.value is not None:
@@ -912,22 +905,23 @@ def board_records_from_excel(board_file):
                 continue
             consecutive_empty = 0
 
-            if row_looks_like_outbound_header(values):
-                col_map = update_col_map_from_header(values, col_map)
+            detected_map = detect_board_layout_from_header(values)
+            if detected_map:
+                col_map = detected_map
                 continue
 
-            first_cell = values[0]
-            if first_cell in BOARD_DAY_NAMES:
-                current_day = first_cell
+            day_name = parse_board_day_name(values[0])
+            if day_name:
+                current_day = day_name
                 current_date = normalize_board_date(values[1])
                 continue
 
-            parsed_row = build_outbound_row(
+            parsed = build_board_row_from_values(
                 values, col_map, sheet_name, current_day, current_date,
                 row_number=row_idx, flags=flags
             )
-            if parsed_row:
-                all_rows.append(parsed_row)
+            if parsed:
+                all_rows.append(parsed)
 
     return all_rows
 
@@ -938,29 +932,29 @@ def board_records_from_csv(board_file):
     current_day = ""
     current_date = ""
     all_rows = []
-    col_map = default_outbound_col_map()
+    col_map = default_new_col_map()
 
     for idx, row in df.iterrows():
         values = [normalize_board_text(v) for v in row.tolist()]
         while len(values) < 16:
             values.append("")
 
-        if row_looks_like_outbound_header(values):
-            col_map = update_col_map_from_header(values, col_map)
+        detected_map = detect_board_layout_from_header(values)
+        if detected_map:
+            col_map = detected_map
             continue
 
-        first_cell = values[0]
-        if first_cell in BOARD_DAY_NAMES:
-            current_day = first_cell
+        day_name = parse_board_day_name(values[0])
+        if day_name:
+            current_day = day_name
             current_date = normalize_board_date(values[1])
             continue
 
-        parsed_row = build_outbound_row(values, col_map, "CSV Board", current_day, current_date, flags=[])
-        if parsed_row:
-            all_rows.append(parsed_row)
+        parsed = build_board_row_from_values(values, col_map, "CSV Board", current_day, current_date, flags=[])
+        if parsed:
+            all_rows.append(parsed)
 
     return all_rows
-
 
 def board_records_from_inbound_sheet(board_file):
     board_file.seek(0)
@@ -1060,7 +1054,6 @@ def build_python_board_summary(board_rows):
         "loads_by_day":                 {},
         "loads_by_date":                {},
         "status_counts":                {},
-        "status_counts_by_day":         {},
         "late_loads":                   0,
         "rtl_loads":                    0,
         "rs_loads":                     0,
@@ -1097,8 +1090,6 @@ def build_python_board_summary(board_rows):
         summary["loads_by_day"][day_key]   = summary["loads_by_day"].get(day_key, 0)   + 1
         summary["loads_by_date"][date_key] = summary["loads_by_date"].get(date_key, 0) + 1
         summary["status_counts"][status]   = summary["status_counts"].get(status, 0)   + 1
-        summary["status_counts_by_day"].setdefault(day_key, {})
-        summary["status_counts_by_day"][day_key][status] = summary["status_counts_by_day"][day_key].get(status, 0) + 1
 
         if "LATE" in status_upper or "LATE " in f" {raw_upper} ":
             summary["late_loads"] += 1
@@ -1235,109 +1226,6 @@ def actionable_rows_for_ai(board_rows):
     return actionable, completed
 
 
-
-
-def _status_bucket_for_summary(status):
-    status = (status or "").strip()
-    if not status:
-        return "Blank/Not Started"
-    return status
-
-
-def build_status_counts_by_day(board_rows):
-    """Return day -> status -> count, so the AI can stop blending Monday/Tuesday/Wednesday."""
-    by_day = {}
-    for row in board_rows:
-        day_key = row.get("day") or "Unknown Day"
-        status = _status_bucket_for_summary(row.get("status"))
-        by_day.setdefault(day_key, {})
-        by_day[day_key][status] = by_day[day_key].get(status, 0) + 1
-    return by_day
-
-
-def parse_board_minutes(value):
-    text = normalize_board_time(value)
-    if not text or not re.fullmatch(r"\d{1,2}:\d{2}", text):
-        return None
-    h, m = text.split(":")
-    return int(h) * 60 + int(m)
-
-
-def format_board_minutes(minutes):
-    if minutes is None:
-        return "unknown"
-    minutes = int(minutes) % (24 * 60)
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def estimated_current_minutes_from_shift(shift, hours_remaining):
-    """
-    Estimate current clock time from shift end and hours_remaining.
-    This prevents the AI from inventing goals like '30 loads by noon'.
-    """
-    try:
-        remaining_minutes = int(round(float(hours_remaining or 0) * 60))
-    except Exception:
-        return None
-    # Known 1st shift in the app: 06:00-16:30. 2nd shift estimate: 15:00-23:30.
-    shift_lower = str(shift).lower()
-    if "1" in shift_lower:
-        end_minutes = 16 * 60 + 30
-    else:
-        end_minutes = 23 * 60 + 30
-    return max(0, end_minutes - remaining_minutes)
-
-
-def build_day_specific_pacing(all_rows, selected_day, shift, hours_remaining):
-    """Python pacing guardrail used by the prompt. The AI should not invent its own pacing math."""
-    selected = [r for r in all_rows if str(r.get("day", "")).strip().lower() == str(selected_day).strip().lower()]
-    current_minutes = estimated_current_minutes_from_shift(shift, hours_remaining)
-    status_counts = {}
-    due_total = 0
-    due_done = 0
-    future_done = 0
-
-    for r in selected:
-        status = _status_bucket_for_summary(r.get("status"))
-        status_counts[status] = status_counts.get(status, 0) + 1
-        appt_minutes = parse_board_minutes(r.get("time") or r.get("appt_time"))
-        is_done = status.upper() in {"COMPLETED", "COMPLETE", "LOADED"}
-        if current_minutes is not None and appt_minutes is not None:
-            if appt_minutes <= current_minutes:
-                due_total += 1
-                if is_done:
-                    due_done += 1
-            elif is_done:
-                future_done += 1
-
-    due_not_done = max(0, due_total - due_done)
-    if due_not_done > 0:
-        pacing = "BEHIND for the selected day only"
-    elif future_done > 0:
-        pacing = "AHEAD for the selected day only"
-    else:
-        pacing = "ON TRACK for the selected day only"
-
-    return {
-        "selected_day": selected_day,
-        "estimated_current_time": format_board_minutes(current_minutes),
-        "total_selected_day_loads": len(selected),
-        "status_counts_selected_day": status_counts,
-        "due_by_now": due_total,
-        "due_done": due_done,
-        "due_not_done": due_not_done,
-        "future_done": future_done,
-        "pacing": pacing,
-    }
-
-
-def rows_for_selected_day(rows, selected_day):
-    return [r for r in rows if str(r.get("day", "")).strip().lower() == str(selected_day).strip().lower()]
-
-
-def rows_not_selected_day(rows, selected_day):
-    return [r for r in rows if str(r.get("day", "")).strip().lower() != str(selected_day).strip().lower()]
-
 def read_board_file_to_text(board_file):
     """
     Main entry point: reads outbound and inbound sheets, builds Python-verified
@@ -1361,7 +1249,6 @@ def read_board_file_to_text(board_file):
         board_summary   = build_python_board_summary(board_rows)
         inbound_summary = build_python_inbound_summary(inbound_rows)
         actionable_rows, completed_rows = actionable_rows_for_ai(board_rows)
-        all_outbound_rows = compact_board_rows_for_ai(board_rows)
 
         payload = {
             "python_verified_outbound_summary": slim_summary_for_ai(board_summary),
@@ -1369,14 +1256,11 @@ def read_board_file_to_text(board_file):
             "python_verified_today_totals":     today_totals,
             "actionable_outbound_rows":         actionable_rows,
             "completed_outbound_rows":          completed_rows,
-            "all_outbound_rows":                all_outbound_rows,
             "instructions_for_ai": [
                 "Use python_verified_outbound_summary for ALL outbound counts — do not recount from rows.",
                 "Use python_verified_inbound_summary for ALL inbound counts.",
                 "actionable_outbound_rows = loads needing attention (notable status, flags, or blank).",
-                "completed_outbound_rows = slim records of finished loads.",
-                "all_outbound_rows = every outbound load row. Use this for day-specific pacing and avoid mixing days.",
-                "For pacing, use ONLY the selected app day, not every day shown on the board.",
+                "completed_outbound_rows = slim records of finished loads. Use appt times to judge pacing: are completed loads early/on-time/late in the day relative to hours remaining?",
                 "Outbound and inbound are separate — never mix their counts.",
                 "All times use 24-hour clock.",
                 "Blank status means load not yet started.",
@@ -1434,14 +1318,12 @@ def analyze_board_with_groq(
         py_today_totals = board_payload.get("python_verified_today_totals", {})
         actionable_rows = board_payload.get("actionable_outbound_rows", [])
         completed_rows  = board_payload.get("completed_outbound_rows", [])
-        all_rows        = board_payload.get("all_outbound_rows", [])
     except Exception:
         py_summary      = {}
         py_inbound      = {}
         py_today_totals = {}
         actionable_rows = []
         completed_rows  = []
-        all_rows        = []
 
     staffing_lines = []
     for task, row in summary_table.iterrows():
@@ -1478,8 +1360,7 @@ def analyze_board_with_groq(
         f"LoadCheck:{py_summary.get('load_check_loads',0)}  "
         f"LoaderAssigned:{py_summary.get('loads_with_loader_assigned',0)}  "
         f"MissingLoader:{py_summary.get('loads_missing_loader',0)}\n"
-        f"By day: {day_str}\n"
-        f"Status counts by day: {status_by_day_text}"
+        f"By day: {day_str}"
     )
 
     ib_day_str = ", ".join(f"{d}:{n}" for d, n in py_inbound.get("loads_by_day", {}).items())
@@ -1497,25 +1378,12 @@ def analyze_board_with_groq(
     pulls_left_today = py_today_totals.get("pulls_left_today", 0)
     picks_left_today = py_today_totals.get("picks_left_today", 0)
 
-    status_counts_by_day = py_summary.get("status_counts_by_day", {})
-    status_by_day_text = json.dumps(status_counts_by_day, ensure_ascii=False)
-    day_pacing = build_day_specific_pacing(all_rows, day, shift, hours_remaining)
-    day_pacing_text = json.dumps(day_pacing, ensure_ascii=False)
-
-    today_actionable_rows = rows_for_selected_day(actionable_rows, day)
-    other_day_actionable_rows = rows_not_selected_day(actionable_rows, day)
-    today_completed_rows = rows_for_selected_day(completed_rows, day)
-
     actionable_table = _rows_to_table(
-        today_actionable_rows,
-        ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
-    )
-    other_day_actionable_table = _rows_to_table(
-        other_day_actionable_rows,
+        actionable_rows,
         ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
     )
     completed_table = _rows_to_table(
-        today_completed_rows,
+        completed_rows,
         ["day","load","customer","time","status"]
     )
 
@@ -1527,12 +1395,9 @@ Statuses: RTL=staged ready|R/S=short on full pallets|Picking/Short=inventory sho
 Flags: LOAD-CHECK=yellow|TT4-NEEDED=blue|CANADIAN=red font.
 Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Tasking=25 pallets/hr|Ticket avg=60 cases.
 Labor rules: Keep pickers picking. Tasking protects pickers. Protect loading labor. Lead/Extra used proactively.
-Labor move rule: Recommend moves ONLY from a surplus area (gap > 0) or Lead/Extra. NEVER recommend pulling labor from an understaffed area. If Tasking gap is negative or zero, do NOT say to move a tasker to picking/loading/unloading; instead say there is no safe move from Tasking.
 Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Manufacturing only if it genuinely helps this shift.
-Goal consistency rule: Do not invent goals like "load 30 trucks by noon" unless those exact numbers are in the data. Prefer goals tied to appointment times and current gaps, for example "protect all loads through 14:00".
 
-TODAY SELECTED IN APP: {day} {shift} shift | {total_cases:,} cases | Pulls left today: {pulls_left_today} | Picks left today: {picks_left_today} | {hours_remaining}hrs left | {total_outbound_loads} loads today / {completed_loads} completed | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
-PYTHON DAY-SPECIFIC PACING GUARDRAIL: {day_pacing_text}
+TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | Pulls left today: {pulls_left_today} | Picks left today: {picks_left_today} | {hours_remaining}hrs left | {total_outbound_loads} loads today | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
 
 STAFFING (Python-computed):
 {staffing_summary}
@@ -1540,22 +1405,18 @@ STAFFING (Python-computed):
 {verified_counts}
 {verified_inbound}
 {oc_section}
-TODAY ACTIONABLE LOADS ONLY ({day}; notable status, flagged, or not started):
+ACTIONABLE LOADS (notable status, flagged, or not started):
 {actionable_table}
 
-OTHER-DAY ACTIONABLE LOADS (mention separately only; do not mix into today's pacing):
-{other_day_actionable_table}
-
-TODAY COMPLETED LOADS ONLY ({day}; for pacing):
+COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind):
 {completed_table}
 
 ===== OUTPUT — 6 sections =====
 
 1. BOARD SUMMARY
-- Separate outbound by day. Use "Status counts by day" exactly; do not blend Monday, Tuesday, and Wednesday into one risk statement.
-- For pacing, use PYTHON DAY-SPECIFIC PACING GUARDRAIL and TODAY rows only. Do not say behind just because completed loads are lower than total loads.
-- Completed today vs today's selected-day total only.
-- Late loads: separate selected-day late loads from other-day late loads. Include day, load#, door, what's happening.
+- Loads by status and day using verified counts above. Do not recount.
+- Completed today vs total. Pacing: ahead/on track/behind based on appt times and hours left.
+- Late loads: day, load#, door, what's happening.
 - Inbound summary: use VERIFIED INBOUND COUNTS only — state total, by day, live vs drop, on lot vs at door. Do not reference plant pallet numbers.
 
 2. OC ALERTS
@@ -1575,22 +1436,21 @@ TODAY COMPLETED LOADS ONLY ({day}; for pacing):
 
 5. STAFFING CROSS-ANALYSIS
 - What can we fix now given gaps/surpluses?
-- Where does labor move first? Every move must name a source area that has surplus or Lead/Extra.
-- If an area is understaffed, protect it; do not use it as the source for another move.
-- Achievable shift goal with specific appointment cutoff times, not invented truck counts.
+- Where does labor move first?
+- Achievable shift goal with specific numbers and times.
 
 6. TOP ACTION ITEMS
 - Next 30 min: 3 items.
 - Next 2 hrs: 3 items.
 
-RULES: Shift expectations must be stated clearly up front. Every labor move = from X to Y and X must be surplus/Lead-Extra. Use specific appointment cutoff times, not fake production targets. What-if scenarios. Only use board data — never invent. OC alerts early and complete.
+RULES: Shift expectations must be stated clearly up front. Every labor move = from X to Y. Use specific times not ranges. What-if scenarios. Only use board data — never invent. OC alerts early and complete.
 """
 
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.05,
+            temperature=0.2,
             max_completion_tokens=2000,
         )
         return response.choices[0].message.content
@@ -1991,7 +1851,7 @@ if board_file:
                 preview_rows = board_records_from_excel(board_file)
 
             if not preview_rows:
-                st.warning("No load rows were parsed. Check that the file has day headers (e.g. 'Monday') and 5-9 digit load numbers in column A.")
+                st.warning("No load rows were parsed. Check that the Outbound sheet has load numbers in column A and the board values are saved/calculated in Excel.")
             else:
                 total_staff_present = len(present_workers)
                 st.metric("Staff Present Today", total_staff_present)
