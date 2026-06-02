@@ -647,6 +647,200 @@ def parse_number(value):
     return int(digits) if digits else 0
 
 
+# ============================================================
+#  OUTBOUND BOARD COLUMN MAPPING
+#  Reads by headers when possible so small board format changes
+#  do not break the parser again.
+# ============================================================
+BOARD_HEADER_ALIASES = {
+    "load_number": ["load #", "load", "load number", "ld"],
+    "customer":    ["customer", "destination", "ship to", "consignee"],
+    "carrier":     ["carrier"],
+    "type":        ["type", "load type"],
+    "appt_time":   ["time", "appt", "appointment", "appointment time"],
+    "door":        ["door"],
+    "trailer":     ["trailer", "tr", "trailer #"],
+    "status":      ["status"],
+    "tt4":         ["tt4"],
+    "loader":      ["loader"],
+    "comments":    ["comments", "comment", "notes", "note"],
+    "pulls":       ["pulls", "pull"],
+    "picks":       ["picks", "pick"],
+}
+
+
+def clean_header_text(value):
+    return re.sub(r"[^a-z0-9#]+", " ", normalize_board_text(value).lower()).strip()
+
+
+def default_outbound_col_map():
+    """
+    Safe fallback for the newest layout the user described:
+    A Load # | B Customer/Destination | C Carrier | D Type | E Time
+    F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks
+    Comments are usually found by header because their position has changed before.
+    """
+    return {
+        "load_number": 0,
+        "customer":    1,
+        "carrier":     2,
+        "type":        3,
+        "appt_time":   4,
+        "door":        5,
+        "trailer":     6,
+        "status":      7,
+        "tt4":         8,
+        "loader":      9,
+        "pulls":       10,
+        "picks":       11,
+        "comments":    14,
+    }
+
+
+def row_looks_like_outbound_header(values):
+    headers = [clean_header_text(v) for v in values]
+    joined = " | ".join(headers)
+    has_customer = any(h in ("customer", "destination", "ship to", "consignee") for h in headers)
+    has_status   = "status" in headers
+    has_time     = any(h in ("time", "appt", "appointment", "appointment time") for h in headers)
+    has_board_words = any(word in joined for word in ["load", "carrier", "door", "tt4", "loader", "pulls", "picks"])
+    return has_board_words and (has_customer or has_status or has_time)
+
+
+def update_col_map_from_header(values, current_map=None):
+    col_map = dict(current_map or default_outbound_col_map())
+    headers = [clean_header_text(v) for v in values]
+    found_keys = set()
+
+    for key, aliases in BOARD_HEADER_ALIASES.items():
+        for idx, header in enumerate(headers):
+            if not header:
+                continue
+            if header in aliases:
+                col_map[key] = idx
+                found_keys.add(key)
+                break
+
+    # Some board exports leave A1 blank even though column A is still Load #.
+    # Keep load number anchored to column A unless a real Load header exists elsewhere.
+    if "load_number" not in found_keys:
+        col_map["load_number"] = 0
+
+    # If the header row does not actually contain Type, do not treat Time as Type.
+    # The parser can still derive Live/Drop/CPU from the row text.
+    if "type" not in found_keys:
+        col_map["type"] = None
+
+    # Some refreshed boards have a blank/merged header around Door/Trailer.
+    # Example: header shows blank, DOOR, STATUS but the data is Door, Trailer, Status.
+    status_idx = col_map.get("status")
+    door_idx = col_map.get("door")
+    if (
+        status_idx is not None
+        and door_idx is not None
+        and "trailer" not in found_keys
+        and status_idx == door_idx + 1
+        and door_idx - 1 >= 0
+        and headers[door_idx - 1] == ""
+    ):
+        col_map["door"] = door_idx - 1
+        col_map["trailer"] = door_idx
+    elif status_idx is not None:
+        if "trailer" not in found_keys and status_idx - 1 >= 0:
+            col_map["trailer"] = status_idx - 1
+        if "door" not in found_keys and status_idx - 2 >= 0:
+            col_map["door"] = status_idx - 2
+
+    return col_map
+
+
+def get_board_value(values, col_map, key):
+    idx = col_map.get(key)
+    if idx is None or idx < 0 or idx >= len(values):
+        return ""
+    return values[idx]
+
+
+def derive_board_type(explicit_type, values):
+    explicit = normalize_board_text(explicit_type)
+    if explicit:
+        return explicit
+
+    raw_upper = " ".join(normalize_board_text(v) for v in values).upper()
+    if "CPU" in raw_upper and "LIVE" in raw_upper:
+        return "CPU - Live"
+    if "CPU" in raw_upper and "DROP" in raw_upper:
+        return "CPU - Drop"
+    if "LIVE" in raw_upper:
+        return "Live"
+    if "DROP" in raw_upper:
+        return "Drop"
+    if "CPU" in raw_upper:
+        return "CPU"
+    return ""
+
+
+def build_outbound_row(values, col_map, source, current_day, current_date, row_number=None, flags=None):
+    load_number = looks_like_board_load(get_board_value(values, col_map, "load_number"))
+    if not load_number:
+        return None
+
+    trailer_value = get_board_value(values, col_map, "trailer")
+    status_value  = get_board_value(values, col_map, "status")
+
+    if detect_trailer_field_late(trailer_value):
+        status = "Late"
+    else:
+        status = detect_board_status(status_value)
+    if not status:
+        status = detect_board_status(" ".join(values))
+
+    row = {
+        "source":      source,
+        "day":         current_day,
+        "date":        current_date,
+        "load_number": load_number,
+        "customer":    get_board_value(values, col_map, "customer"),
+        "carrier":     get_board_value(values, col_map, "carrier"),
+        "appt_time":   normalize_board_time(get_board_value(values, col_map, "appt_time")),
+        "door":        get_board_value(values, col_map, "door"),
+        "trailer":     trailer_value,
+        "status":      status,
+        "type":        derive_board_type(get_board_value(values, col_map, "type"), values),
+        "tt4":         get_board_value(values, col_map, "tt4"),
+        "loader":      get_board_value(values, col_map, "loader"),
+        "comments":    get_board_value(values, col_map, "comments"),
+        "pulls":       parse_number(get_board_value(values, col_map, "pulls")),
+        "picks":       parse_number(get_board_value(values, col_map, "picks")),
+        "flags":       sorted(set(flags or [])),
+        "raw_row":     " | ".join(v for v in values if v),
+    }
+    if row_number is not None:
+        row["row_number"] = row_number
+    return row
+
+
+def read_board_today_totals_from_excel(board_file):
+    """
+    New board requirement:
+    K2 = pulls left for today
+    L2 = picks left for today
+    """
+    board_file.seek(0)
+    try:
+        wb = load_workbook(board_file, data_only=True)
+        sheet_name = "Outbound" if "Outbound" in wb.sheetnames else wb.sheetnames[0]
+        ws = wb[sheet_name]
+        return {
+            "pulls_left_today": parse_number(ws["K2"].value),
+            "picks_left_today": parse_number(ws["L2"].value),
+        }
+    except Exception:
+        return {"pulls_left_today": 0, "picks_left_today": 0}
+    finally:
+        board_file.seek(0)
+
+
 def board_records_from_excel(board_file):
     board_file.seek(0)
     file_name = board_file.name.lower()
@@ -658,46 +852,25 @@ def board_records_from_excel(board_file):
             df = df.fillna("")
             current_day = ""
             current_date = ""
+            col_map = default_outbound_col_map()
             for idx, row in df.iterrows():
                 values = [normalize_board_text(v) for v in row.tolist()]
-                while len(values) < 13:
+                while len(values) < 16:
                     values.append("")
+
+                if row_looks_like_outbound_header(values):
+                    col_map = update_col_map_from_header(values, col_map)
+                    continue
+
                 first_cell = values[0]
                 if first_cell in BOARD_DAY_NAMES:
                     current_day = first_cell
                     current_date = normalize_board_date(values[1])
                     continue
-                load_number = looks_like_board_load(values[0])
-                if not load_number:
-                    continue
-                if detect_trailer_field_late(values[5]):
-                    status = "Late"
-                else:
-                    status = detect_board_status(values[6])
-                if not status:
-                    status = detect_board_status(" ".join(values))
-                trailer_text = values[5].upper()
-                type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
-                all_rows.append({
-                    "source":     sheet_name,
-                    "day":        current_day,
-                    "date":       current_date,
-                    "load_number": load_number,
-                    "customer":   values[1],
-                    "carrier":    values[2],
-                    "appt_time":  normalize_board_time(values[3]),
-                    "door":       values[4],
-                    "trailer":    values[5],
-                    "status":     status,
-                    "type":       type_value,
-                    "tt4":        values[7],
-                    "loader":     values[8],
-                    "comments":   values[9],
-                    "pulls":      parse_number(values[10]),
-                    "picks":      parse_number(values[11]),
-                    "flags":      [],
-                    "raw_row":    " | ".join(v for v in values if v),
-                })
+
+                parsed_row = build_outbound_row(values, col_map, sheet_name, current_day, current_date, flags=[])
+                if parsed_row:
+                    all_rows.append(parsed_row)
         return all_rows
 
     wb = load_workbook(board_file, data_only=True)
@@ -707,16 +880,19 @@ def board_records_from_excel(board_file):
             outbound_sheet = candidate
             break
     sheets_to_read = [outbound_sheet] if outbound_sheet else wb.sheetnames
+
     for sheet_name in sheets_to_read:
         ws = wb[sheet_name]
         current_day = ""
         current_date = ""
         consecutive_empty = 0
+        col_map = default_outbound_col_map()
+
         for row_idx in range(1, ws.max_row + 1):
             values = []
             flags = []
             has_content = False
-            for col_idx in range(1, 14):
+            for col_idx in range(1, 17):
                 cell = ws.cell(row_idx, col_idx)
                 if cell.value is not None:
                     has_content = True
@@ -731,53 +907,22 @@ def board_records_from_excel(board_file):
                 continue
             consecutive_empty = 0
 
+            if row_looks_like_outbound_header(values):
+                col_map = update_col_map_from_header(values, col_map)
+                continue
+
             first_cell = values[0]
             if first_cell in BOARD_DAY_NAMES:
                 current_day = first_cell
                 current_date = normalize_board_date(values[1])
                 continue
 
-            load_number = looks_like_board_load(values[0])
-            if not load_number:
-                continue
-
-            if detect_trailer_field_late(values[5]):
-                status = "Late"
-            else:
-                status = detect_board_status(values[6])
-            if not status:
-                status = detect_board_status(" ".join(values))
-
-            trailer_text = values[5].upper()
-            type_value = ""
-            if "LIVE" in trailer_text:
-                type_value = "Live"
-            elif "CPU" in trailer_text:
-                type_value = "CPU - Live"
-            elif "DROP" in trailer_text:
-                type_value = "Drop"
-
-            all_rows.append({
-                "source":      sheet_name,
-                "row_number":  row_idx,
-                "day":         current_day,
-                "date":        current_date,
-                "load_number": load_number,
-                "customer":    values[1],
-                "carrier":     values[2],
-                "appt_time":   normalize_board_time(values[3]),
-                "door":        values[4],
-                "trailer":     values[5],
-                "status":      status,
-                "type":        type_value,
-                "tt4":         values[7],
-                "loader":      values[8],
-                "comments":    values[9],
-                "pulls":       parse_number(values[10]),
-                "picks":       parse_number(values[11]),
-                "flags":       sorted(set(flags)),
-                "raw_row":     " | ".join(v for v in values if v),
-            })
+            parsed_row = build_outbound_row(
+                values, col_map, sheet_name, current_day, current_date,
+                row_number=row_idx, flags=flags
+            )
+            if parsed_row:
+                all_rows.append(parsed_row)
 
     return all_rows
 
@@ -788,46 +933,27 @@ def board_records_from_csv(board_file):
     current_day = ""
     current_date = ""
     all_rows = []
+    col_map = default_outbound_col_map()
+
     for idx, row in df.iterrows():
         values = [normalize_board_text(v) for v in row.tolist()]
-        while len(values) < 13:
+        while len(values) < 16:
             values.append("")
+
+        if row_looks_like_outbound_header(values):
+            col_map = update_col_map_from_header(values, col_map)
+            continue
+
         first_cell = values[0]
         if first_cell in BOARD_DAY_NAMES:
             current_day = first_cell
             current_date = normalize_board_date(values[1])
             continue
-        load_number = looks_like_board_load(values[0])
-        if not load_number:
-            continue
-        if detect_trailer_field_late(values[5]):
-            status = "Late"
-        else:
-            status = detect_board_status(values[6])
-        if not status:
-            status = detect_board_status(" ".join(values))
-        trailer_text = values[5].upper()
-        type_value = "Live" if "LIVE" in trailer_text else ("CPU - Live" if "CPU" in trailer_text else ("Drop" if "DROP" in trailer_text else ""))
-        all_rows.append({
-            "source":      "CSV Board",
-            "day":         current_day,
-            "date":        current_date,
-            "load_number": load_number,
-            "customer":    values[1],
-            "carrier":     values[2],
-            "appt_time":   normalize_board_time(values[3]),
-            "door":        values[4],
-            "trailer":     values[5],
-            "status":      status,
-            "type":        type_value,
-            "tt4":         values[7],
-            "loader":      values[8],
-            "comments":    values[9],
-            "pulls":       parse_number(values[10]),
-            "picks":       parse_number(values[11]),
-            "flags":       [],
-            "raw_row":     " | ".join(v for v in values if v),
-        })
+
+        parsed_row = build_outbound_row(values, col_map, "CSV Board", current_day, current_date, flags=[])
+        if parsed_row:
+            all_rows.append(parsed_row)
+
     return all_rows
 
 
@@ -1093,6 +1219,8 @@ def actionable_rows_for_ai(board_rows):
                 "status":   status or "Blank/Not Started",
                 "type":     row.get("type", ""),
                 "loader":   row.get("loader", ""),
+                "pulls":    row.get("pulls", 0),
+                "picks":    row.get("picks", 0),
                 "flags":    flags,
                 "comments": row.get("comments", ""),
             })
@@ -1112,7 +1240,9 @@ def read_board_file_to_text(board_file):
         if file_name.endswith(".csv"):
             board_rows   = board_records_from_csv(board_file)
             inbound_rows = []
+            today_totals = {"pulls_left_today": 0, "picks_left_today": 0}
         else:
+            today_totals = read_board_today_totals_from_excel(board_file)
             board_rows = board_records_from_excel(board_file)
             board_file.seek(0)
             inbound_rows = board_records_from_inbound_sheet(board_file)
@@ -1124,6 +1254,7 @@ def read_board_file_to_text(board_file):
         payload = {
             "python_verified_outbound_summary": slim_summary_for_ai(board_summary),
             "python_verified_inbound_summary":  inbound_summary,
+            "python_verified_today_totals":     today_totals,
             "actionable_outbound_rows":         actionable_rows,
             "completed_outbound_rows":          completed_rows,
             "instructions_for_ai": [
@@ -1185,11 +1316,13 @@ def analyze_board_with_groq(
         board_payload   = json.loads(board_text)
         py_summary      = board_payload.get("python_verified_outbound_summary", {})
         py_inbound      = board_payload.get("python_verified_inbound_summary", {})
+        py_today_totals = board_payload.get("python_verified_today_totals", {})
         actionable_rows = board_payload.get("actionable_outbound_rows", [])
         completed_rows  = board_payload.get("completed_outbound_rows", [])
     except Exception:
         py_summary      = {}
         py_inbound      = {}
+        py_today_totals = {}
         actionable_rows = []
         completed_rows  = []
 
@@ -1243,9 +1376,12 @@ def analyze_board_with_groq(
         f"By day: {ib_day_str}"
     )
 
+    pulls_left_today = py_today_totals.get("pulls_left_today", 0)
+    picks_left_today = py_today_totals.get("picks_left_today", 0)
+
     actionable_table = _rows_to_table(
         actionable_rows,
-        ["day","load","customer","time","door","status","type","loader","flags","comments"]
+        ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
     )
     completed_table = _rows_to_table(
         completed_rows,
@@ -1262,7 +1398,7 @@ Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Ta
 Labor rules: Keep pickers picking. Tasking protects pickers. Protect loading labor. Lead/Extra used proactively.
 Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Manufacturing only if it genuinely helps this shift.
 
-TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | {hours_remaining}hrs left | {total_outbound_loads} loads today | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
+TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | Pulls left today: {pulls_left_today} | Picks left today: {picks_left_today} | {hours_remaining}hrs left | {total_outbound_loads} loads today | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
 
 STAFFING (Python-computed):
 {staffing_summary}
@@ -1290,6 +1426,7 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 - If none: "No OC customers on today's board."
 
 3. PICKING & SHORT RISK
+- State pulls left today and picks left today from the TODAY line.
 - Blank/not-started count and risk level.
 - Short risk: yes/no, why, how big.
 - Can we get ahead? Specific appt times we should be picked to by end of shift.
