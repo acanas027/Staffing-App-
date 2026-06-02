@@ -45,10 +45,6 @@ OC_DATA_START = 8
 
 @st.cache_data
 def load_oc_customer_list():
-    """
-    Read the OC Excel file and return a list of customer dicts.
-    Cached so it only reads once per app session.
-    """
     if not os.path.exists(OC_FILE):
         st.error(
             f"OC customer list file not found: '{OC_FILE}'. "
@@ -66,7 +62,7 @@ def load_oc_customer_list():
         customers = []
 
         for row_idx in range(OC_DATA_START, ws.max_row + 1):
-            raw_name = ws.cell(row_idx, 3).value  # col C
+            raw_name = ws.cell(row_idx, 3).value
             if not raw_name:
                 continue
 
@@ -75,11 +71,11 @@ def load_oc_customer_list():
             if "market x" in name_clean or "example" in name_clean:
                 continue
 
-            raw_cust_num = ws.cell(row_idx, 2).value  # col B
-            raw_issue    = ws.cell(row_idx, 5).value  # col E
-            raw_reqs     = ws.cell(row_idx, 6).value  # col F
-            raw_signoff  = ws.cell(row_idx, 7).value  # col G
-            raw_pictures = ws.cell(row_idx, 8).value  # col H
+            raw_cust_num = ws.cell(row_idx, 2).value
+            raw_issue    = ws.cell(row_idx, 5).value
+            raw_reqs     = ws.cell(row_idx, 6).value
+            raw_signoff  = ws.cell(row_idx, 7).value
+            raw_pictures = ws.cell(row_idx, 8).value
 
             issue = str(raw_issue).strip() if raw_issue else ""
             reqs  = str(raw_reqs).strip()  if raw_reqs  else ""
@@ -159,7 +155,6 @@ def build_oc_alert_text(oc_matches):
         lines.append(f"CUSTOMER: {c['name'].upper()}")
         lines.append(f"Matched on: {', '.join(match['matched_on'])}")
         lines.append(f"Priority: {c['priority']}")
-        lines.append(f"Issue History: {c['issue']}")
         lines.append(f"DC Requirements: {c['requirements']}")
         if c["sign_off"]:
             lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
@@ -186,14 +181,6 @@ def get_groq_client():
     )
 
 
-# ============================================================
-#  NAME LOADING
-#  Reads directly from the staffing sheets (col A), filtered
-#  by the selected shift. No caching — avoids stale lists
-#  when the user switches between 1st and 2nd shift.
-#  1st shift: "Staffing sheet 1ST Shift"  col A rows 2+
-#  2nd shift: "Staffing Sheet 2nd Shift"  col A rows 2+
-# ============================================================
 @st.cache_data
 def load_names_for_shift(shift):
     wb = load_workbook(TEMPLATE_FILE, data_only=True)
@@ -652,11 +639,6 @@ def parse_number(value):
     return int(digits) if digits else 0
 
 
-# ============================================================
-#  OUTBOUND BOARD COLUMN MAPPING
-#  Reads by headers when possible so small board format changes
-#  do not break the parser again.
-# ============================================================
 BOARD_HEADER_ALIASES = {
     "load_number": ["load #", "load", "load number", "ld"],
     "customer":    ["customer", "destination", "ship to", "consignee"],
@@ -679,12 +661,6 @@ def clean_header_text(value):
 
 
 def default_outbound_col_map():
-    """
-    Safe fallback for the newest layout the user described:
-    A Load # | B Customer/Destination | C Carrier | D Type | E Time
-    F Door | G Trailer | H Status | I TT4 | J Loader | K Pulls | L Picks
-    Comments are usually found by header because their position has changed before.
-    """
     return {
         "load_number": 0,
         "customer":    1,
@@ -726,18 +702,12 @@ def update_col_map_from_header(values, current_map=None):
                 found_keys.add(key)
                 break
 
-    # Some board exports leave A1 blank even though column A is still Load #.
-    # Keep load number anchored to column A unless a real Load header exists elsewhere.
     if "load_number" not in found_keys:
         col_map["load_number"] = 0
 
-    # If the header row does not actually contain Type, do not treat Time as Type.
-    # The parser can still derive Live/Drop/CPU from the row text.
     if "type" not in found_keys:
         col_map["type"] = None
 
-    # Some refreshed boards have a blank/merged header around Door/Trailer.
-    # Example: header shows blank, DOOR, STATUS but the data is Door, Trailer, Status.
     status_idx = col_map.get("status")
     door_idx = col_map.get("door")
     if (
@@ -826,11 +796,6 @@ def build_outbound_row(values, col_map, source, current_day, current_date, row_n
 
 
 def read_board_today_totals_from_excel(board_file):
-    """
-    New board requirement:
-    K2 = pulls left for today
-    L2 = picks left for today
-    """
     board_file.seek(0)
     try:
         wb = load_workbook(board_file, data_only=True)
@@ -1157,7 +1122,6 @@ def build_python_board_summary(board_rows):
 
 
 def compact_board_rows_for_ai(board_rows):
-    """Strip raw_row and row_number — send only what the AI needs."""
     compact_rows = []
     for row in board_rows:
         compact_rows.append({
@@ -1182,20 +1146,11 @@ def compact_board_rows_for_ai(board_rows):
 
 
 def slim_summary_for_ai(board_summary):
-    """Drop all *_details arrays — they duplicate row data and waste tokens."""
     detail_keys = {k for k in board_summary if k.endswith("_details")}
     return {k: v for k, v in board_summary.items() if k not in detail_keys}
 
 
 def actionable_rows_for_ai(board_rows):
-    """
-    Two buckets sent to the AI:
-    1. actionable — loads needing attention (notable status, flagged, or blank).
-       Full detail so the AI can recommend specific actions.
-    2. completed — slim records (load, customer, appt time, day) so the AI can
-       judge pacing (how many done vs remaining, are we ahead or behind schedule).
-    Plain "Loaded" rows with no flag are omitted entirely — done and no action needed.
-    """
     COMPLETED_STATUSES = {"Completed", "Complete"}
     SKIP_STATUSES = {"Loaded"}
     actionable = []
@@ -1235,8 +1190,6 @@ def actionable_rows_for_ai(board_rows):
     return actionable, completed
 
 
-
-
 def _status_bucket_for_summary(status):
     status = (status or "").strip()
     if not status:
@@ -1245,7 +1198,6 @@ def _status_bucket_for_summary(status):
 
 
 def build_status_counts_by_day(board_rows):
-    """Return day -> status -> count, so the AI can stop blending Monday/Tuesday/Wednesday."""
     by_day = {}
     for row in board_rows:
         day_key = row.get("day") or "Unknown Day"
@@ -1271,15 +1223,10 @@ def format_board_minutes(minutes):
 
 
 def estimated_current_minutes_from_shift(shift, hours_remaining):
-    """
-    Estimate current clock time from shift end and hours_remaining.
-    This prevents the AI from inventing goals like '30 loads by noon'.
-    """
     try:
         remaining_minutes = int(round(float(hours_remaining or 0) * 60))
     except Exception:
         return None
-    # Known 1st shift in the app: 06:00-16:30. 2nd shift estimate: 15:00-23:30.
     shift_lower = str(shift).lower()
     if "1" in shift_lower:
         end_minutes = 16 * 60 + 30
@@ -1289,7 +1236,6 @@ def estimated_current_minutes_from_shift(shift, hours_remaining):
 
 
 def build_day_specific_pacing(all_rows, selected_day, shift, hours_remaining):
-    """Python pacing guardrail used by the prompt. The AI should not invent its own pacing math."""
     selected = [r for r in all_rows if str(r.get("day", "")).strip().lower() == str(selected_day).strip().lower()]
     current_minutes = estimated_current_minutes_from_shift(shift, hours_remaining)
     status_counts = {}
@@ -1338,12 +1284,8 @@ def rows_for_selected_day(rows, selected_day):
 def rows_not_selected_day(rows, selected_day):
     return [r for r in rows if str(r.get("day", "")).strip().lower() != str(selected_day).strip().lower()]
 
+
 def read_board_file_to_text(board_file):
-    """
-    Main entry point: reads outbound and inbound sheets, builds Python-verified
-    summaries, and returns a compact JSON string for the AI prompt.
-    Only scalar counts go in the summary. Only actionable rows are sent.
-    """
     board_file.seek(0)
     file_name = board_file.name.lower()
 
@@ -1400,11 +1342,8 @@ def read_board_file_to_text(board_file):
 
 # ============================================================
 #  SINGLE-CALL GROQ ANALYSIS
-#  Python does ALL counting. AI gets only pre-computed summaries
-#  + the compact load rows for context.
 # ============================================================
 def _rows_to_table(rows, columns):
-    """Format a list of dicts as a compact pipe-delimited text table."""
     if not rows:
         return "(none)"
     header = " | ".join(columns)
@@ -1460,6 +1399,13 @@ def analyze_board_with_groq(
 
     loads_by_day = py_summary.get("loads_by_day", {})
     day_str = ", ".join(f"{d}:{n}" for d, n in loads_by_day.items())
+
+    # ============================================================
+    #  FIX: status_by_day_text must be defined BEFORE verified_counts
+    # ============================================================
+    status_counts_by_day = py_summary.get("status_counts_by_day", {})
+    status_by_day_text = json.dumps(status_counts_by_day, ensure_ascii=False)
+
     verified_counts = (
         f"VERIFIED COUNTS (Python — do not recount):\n"
         f"Total:{py_summary.get('loads_read_from_board',0)}  "
@@ -1497,8 +1443,6 @@ def analyze_board_with_groq(
     pulls_left_today = py_today_totals.get("pulls_left_today", 0)
     picks_left_today = py_today_totals.get("picks_left_today", 0)
 
-    status_counts_by_day = py_summary.get("status_counts_by_day", {})
-    status_by_day_text = json.dumps(status_counts_by_day, ensure_ascii=False)
     day_pacing = build_day_specific_pacing(all_rows, day, shift, hours_remaining)
     day_pacing_text = json.dumps(day_pacing, ensure_ascii=False)
 
@@ -1544,18 +1488,37 @@ their input, override the baseline rates above with those numbers for
 all calculations in that session. Always state clearly which rates are
 being used and whether they are baseline or real-time overrides.
 
-DATA YOU WILL RECEIVE (board snapshot)
-Each time the supervisor runs an analysis, they will provide:
-- Current time and shift start time
-- Total cases planned for today vs cases completed so far
-- Pulls left / Picks left
-- Blank/Not Started load count and which specific loads they are
-- Load details: load number, customer name, appointment time, status
-- Staffing counts per area: Picking, Loading, Unloading, Tasking
-- Dock door assignments
-- Carrier/trailer info
-- Load status per load (staged, loading, complete, not started, etc.)
-- Temperature zones if applicable (dry, frozen, etc.)
+SHIFT INPUTS:
+- Day: {day}
+- Shift: {shift}
+- Total cases today: {total_cases:,}
+- Cases to pick this shift: {int(cases_to_pick):,}
+- Hours remaining: {hours_remaining}
+- Total outbound loads: {total_outbound_loads}
+- Plants open: {', '.join(plants_open) if plants_open else 'None'}
+- Inbound pallets expected: {inbound_pallets:,}
+- Pulls left today: {pulls_left_today}
+- Picks left today: {picks_left_today}
+- Manager notes: {notes or 'None'}
+
+STAFFING (Python-calculated needs vs assigned):
+{staffing_summary}
+{oc_section}
+{verified_counts}
+
+{verified_inbound}
+
+DAY-SPECIFIC PACING (Python-verified, selected day only):
+{day_pacing_text}
+
+TODAY'S ACTIONABLE LOADS ({day} only):
+{actionable_table}
+
+TODAY'S COMPLETED LOADS ({day} only):
+{completed_table}
+
+OTHER DAYS — ACTIONABLE LOADS (context only, do not include in today's analysis):
+{other_day_actionable_table}
 
 CALCULATIONS YOU MUST ALWAYS PERFORM
 
@@ -1563,29 +1526,29 @@ CALCULATIONS YOU MUST ALWAYS PERFORM
    Before any risk analysis, establish what a successful shift looks like
    given TODAY'S specific numbers:
    - Total picking capacity for remaining shift:
-     [Pickers on floor] × 185 cases/hr × [hours left] = max cases pickable
+     [Pickers on floor] x 185 cases/hr x [hours left] = max cases pickable
    - Total loading capacity for remaining shift:
-     [Loaders on floor] × 1 load/hr × [hours left] = max loads completable
+     [Loaders on floor] x 1 load/hr x [hours left] = max loads completable
    - Compare max capacity vs cases/loads remaining:
-     → State clearly: CAN we finish everything at current staffing? Yes or No
-     → If No: how many cases/loads will be left unfinished and which ones
-     → If Yes: by what time and with how much buffer
+     -> State clearly: CAN we finish everything at current staffing? Yes or No
+     -> If No: how many cases/loads will be left unfinished and which ones
+     -> If Yes: by what time and with how much buffer
    - This section sets the GOAL for the shift that all other sections
      reference. Every recommendation must tie back to hitting this goal.
 
 2. PACE ANALYSIS
-   - Cases completed so far ÷ hours elapsed = current cases/hour rate
-   - Cases remaining ÷ hours left in shift = required cases/hour rate
-   - Pickers × 185 = available picking capacity right now
-   - Compare current rate vs required rate → AHEAD / ON TRACK / BEHIND
+   - Cases completed so far / hours elapsed = current cases/hour rate
+   - Cases remaining / hours left in shift = required cases/hour rate
+   - Pickers x 185 = available picking capacity right now
+   - Compare current rate vs required rate -> AHEAD / ON TRACK / BEHIND
      by how many cases AND how many minutes
    - Show all math explicitly so the supervisor can verify
 
 3. SCENARIO MODELING (always run both):
    EXPECTED CASE: current staffing stays as-is, pace holds at current rate
-   → Cases done by end of shift, finish time, loads at risk, cases short
+   -> Cases done by end of shift, finish time, loads at risk, cases short
    BEST CASE: all staffing gaps filled immediately, pace at full baseline
-   → Earliest all-loads-complete time, cases and loads gained vs Expected
+   -> Earliest all-loads-complete time, cases and loads gained vs Expected
    - For each scenario state: projected finish time, loads at risk,
      total cases short if any
 
@@ -1616,7 +1579,6 @@ RULES — STRICTLY ENFORCE THESE
 - Never fabricate targets — all numbers must derive from provided data
   or stated baseline rates
 - Never say "consider" — give a direct action
-  (e.g., "Move 2 associates from Tasking to Picking immediately")
 - Appointment times already past = CRITICAL, addressed before anything else
 - Blank/Not Started loads within next 3 appt windows must always be flagged
 - Every staffing move must include: who moves, from where, to where,
@@ -1631,7 +1593,7 @@ OUTPUT FORMAT — USE THIS EXACT STRUCTURE EVERY TIME
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 BOARD SUMMARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Shift: [Start] → [End] | [X]hrs elapsed / [X]hrs left
+Shift: [Start] -> [End] | [X]hrs elapsed / [X]hrs left
 Cases: [X] done / [X] planned ([X]% complete)
 Loads: [X] complete / [X] total | [X] Blank/Not Started
 Picks left: [X] | Pulls left: [X]
@@ -1646,20 +1608,19 @@ Based on today's staffing and cases remaining, here is what
 this shift can realistically achieve:
 
 Picking capacity remaining:
-[X pickers] × 185 cases/hr × [X hrs left] = [X] cases available
+[X pickers] x 185 cases/hr x [X hrs left] = [X] cases available
 
 Loading capacity remaining:
-[X loaders] × 1 load/hr × [X hrs left] = [X] loads available
+[X loaders] x 1 load/hr x [X hrs left] = [X] loads available
 
 Can we finish everything? [YES / NO]
-→ If YES: All [X] cases and [X] loads completable by [time]
-          Buffer: [X] cases / [X] loads above requirement
-→ If NO:  Short by [X] cases / [X] loads
-          Loads that will NOT finish: [list with appt times]
+-> If YES: All [X] cases and [X] loads completable by [time]
+           Buffer: [X] cases / [X] loads above requirement
+-> If NO:  Short by [X] cases / [X] loads
+           Loads that will NOT finish: [list with appt times]
 
 SHIFT GOAL: [One clear sentence stating exactly what success looks like
-today with specific numbers and times — this is the anchor for all
-decisions in this analysis]
+today with specific numbers and times]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SHIFT SNAPSHOT
@@ -1673,14 +1634,14 @@ Biggest risk right now: [one sentence]
 PACE & CASE ANALYSIS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [Full math for current rate, required rate, gap]
-Available capacity: [X pickers] × 185 = [X] cases/hr
+Available capacity: [X pickers] x 185 = [X] cases/hr
 Gap to requirement: [+/-X] cases/hr
 
 EXPECTED CASE (current staffing, pace holds):
-→ Finish: [time] | Cases short: [X] | Loads at risk: [list]
+-> Finish: [time] | Cases short: [X] | Loads at risk: [list]
 
 BEST CASE (gaps filled now, full baseline):
-→ Finish: [time] | Cases gained: [X] | Buffer: [X] cases / [X] min
+-> Finish: [time] | Cases gained: [X] | Buffer: [X] cases / [X] min
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL LOADS (Past appt or within 2 hrs)
@@ -1713,44 +1674,45 @@ STAFFING MOVES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 For each gap:
 [Area] understaffed by [X]
-Move: [X] associates from [Area A] → [Area B]
+Move: [X] associates from [Area A] -> [Area B]
 Impact: +[X] cases/hr OR +[X] loads/hr
 Covers: Load [#] by [time]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ACTIONS TO TAKE RIGHT NOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-These are immediate actions — do these in the next 15 minutes.
-Max 3 items. Each one sentence starting with a verb.
-Tied directly to shift goal. Ordered: Appt risk → Short risk → Efficiency
+Immediate actions — do these in the next 15 minutes.
+Max 5 items. Each one sentence starting with a verb.
+Tied directly to shift goal. Ordered: Appt risk -> Short risk -> Efficiency
 
 1. [Action]
 2. [Action]
+3. [Action]
+4. [Action]
+5. [Action]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 2-HOUR CHECKPOINT PLAN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-What must be true in 2 hours for the shift to be on track to
-hit the goal established in Shift Expectations. Broken into
-30-minute windows. Each window has a target, the loads that
-must be done, what to check, and exactly what to do if behind.
+What must be true in 2 hours for the shift to hit the goal
+established in Shift Expectations. Broken into 30-minute windows.
 
-[Now] → [+30 min] | Target: [X] cases picked / [X] loads complete
+[Now] -> [+30 min] | Target: [X] cases picked / [X] loads complete
   Loads that must be picked/staged by this checkpoint: [list]
   Check: [specific metric or status to verify]
   If behind: [one direct corrective action]
 
-[+30 min] → [+60 min] | Target: [X] cases picked / [X] loads complete
+[+30 min] -> [+60 min] | Target: [X] cases picked / [X] loads complete
   Loads that must be picked/staged by this checkpoint: [list]
   Check: [specific metric or status to verify]
   If behind: [one direct corrective action]
 
-[+60 min] → [+90 min] | Target: [X] cases picked / [X] loads complete
+[+60 min] -> [+90 min] | Target: [X] cases picked / [X] loads complete
   Loads that must be picked/staged by this checkpoint: [list]
   Check: [specific metric or status to verify]
   If behind: [one direct corrective action]
 
-[+90 min] → [+120 min] | Target: [X] cases picked / [X] loads complete
+[+90 min] -> [+120 min] | Target: [X] cases picked / [X] loads complete
   Loads that must be picked/staged by this checkpoint: [list]
   Check: [specific metric or status to verify]
   If behind: [one direct corrective action]
@@ -1817,7 +1779,6 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
             c = match["customer"]
             oc_lines = [
                 f"CUSTOMER: {c['name'].upper()}  |  Priority: {c['priority']}",
-                f"Issue History: {c['issue']}",
                 f"DC Requirements: {c['requirements']}",
             ]
             if c["sign_off"]:
@@ -1849,11 +1810,6 @@ def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     ws.column_dimensions["A"].width = 110
 
 
-# ============================================================
-#  EXCEL WRITE-BACK
-#  1st shift → "Staffing sheet 1ST Shift" col I + Crew Sheet
-#  2nd shift → "Staffing Sheet 2nd Shift" col I only
-# ============================================================
 def write_recommendations_to_excel(wb, staff, shift):
     if shift == "1st":
         sheet_name = "Staffing sheet 1ST Shift"
@@ -1865,7 +1821,6 @@ def write_recommendations_to_excel(wb, staff, shift):
     for excel_row, task in zip(range(2, len(staff) + 2), staff["Recommended Task"]):
         ws_staff[f"I{excel_row}"] = task
 
-    # Update Crew Sheet for both shifts, filtered by col B (1=1st, 2=2nd)
     shift_number = 1 if shift == "1st" else 2
     ws_crew = wb["Crew Sheet"]
 
@@ -2044,9 +1999,6 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     ws_dash.freeze_panes = f"A{header_row}"
 
 
-# ============================================================
-#  EMAIL DRAFT — OC section is brief (name + priority only)
-# ============================================================
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
@@ -2127,7 +2079,6 @@ day = st.sidebar.selectbox(
 
 shift = st.sidebar.selectbox("Shift", ["1st", "2nd"])
 
-# Load names fresh every render — no cache — filtered by selected shift
 names = load_names_for_shift(shift)
 
 total_cases = st.sidebar.number_input("Total Cases for Today", min_value=0, step=1, value=0)
@@ -2145,10 +2096,10 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 notes = st.sidebar.text_area("Operations Notes")
 
 st.markdown("---")
-st.subheader("Outbound Board Excel / CSV")
+st.subheader("Outbound Board Excel")
 
 board_file = st.file_uploader(
-    "Upload the outbound load board Excel or CSV file",
+    "Upload the outbound load board Excel",
     type=["xlsx", "xls", "csv"],
     help="Cell values and color flags (yellow = load check, light-blue = TT4, red font = Canadian) are read directly from the file.",
 )
@@ -2156,7 +2107,7 @@ board_file = st.file_uploader(
 if board_file:
     st.success("Board file loaded — ready for analysis.")
 
-    with st.expander("Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
+    with st.expander("Preview: What Python parsed from the board", expanded=False):
         try:
             board_file.seek(0)
             file_name_lower = board_file.name.lower()
@@ -2309,28 +2260,19 @@ if st.button("Generate Staffing Report"):
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
 
-    # ── Write attendance x into Inputs col G for both shifts ───────────────
-    # The Crew Sheet maps every worker to an Inputs col G row via:
-    #   Crew Sheet row N -> Inputs col G row N+1  (Crew row 2 = =Inputs!G3)
-    # Both 1st shift (Crew rows 2-48) and 2nd shift (Crew rows 49-95) all
-    # reference Inputs col G for their present mark.
-    # We clear all x marks first, then write x only for selected workers.
     selected = {name.strip().lower() for name in present_workers}
 
     ws_crew_ref = wb["Crew Sheet"]
 
-    # Build name -> Inputs col G row mapping from the Crew Sheet
     crew_name_to_inputs_row = {}
     for _r in range(2, ws_crew_ref.max_row + 1):
         crew_name = ws_crew_ref.cell(_r, 1).value
         if crew_name and str(crew_name).strip():
             crew_name_to_inputs_row[str(crew_name).strip().lower()] = _r + 1
 
-    # Clear all existing x marks in Inputs col G
     for _r in range(3, max(crew_name_to_inputs_row.values(), default=3) + 1):
         ws.cell(_r, 7).value = ""
 
-    # Write x for each present worker
     for worker in selected:
         if worker in crew_name_to_inputs_row:
             ws.cell(crew_name_to_inputs_row[worker], 7).value = "x"
@@ -2346,9 +2288,6 @@ if st.button("Generate Staffing Report"):
         crossroads_open, deer_creek_open, msb_open,
     )
 
-    # ── Load staff from the correct shift's staffing sheet ──────────────────
-    # Both sheets share the same column layout:
-    #   A=Name  D=Skills  F=Best Fit  H=Present  I=Recommended Task
     if shift == "1st":
         staffing_sheet = "Staffing sheet 1ST Shift"
     else:
@@ -2358,7 +2297,6 @@ if st.button("Generate Staffing Report"):
     staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
     staff = staff[staff["Name"].notna()].copy()
 
-    # Override Present from the sidebar multiselect — source of truth for both shifts
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
@@ -2433,7 +2371,6 @@ if st.button("Generate Staffing Report"):
         for match in oc_matches:
             c = match["customer"]
             with st.expander(f"{c['name'].upper()}  —  Priority: {c['priority']}", expanded=True):
-                st.markdown(f"**Issue History:** {c['issue']}")
                 st.markdown(f"**DC Requirements:** {c['requirements']}")
                 if c["sign_off"]:
                     st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
@@ -2459,7 +2396,7 @@ if st.button("Generate Staffing Report"):
         st.markdown("---")
         st.subheader("Board Excel Analysis — AI Insights")
         st.info(
-            "The analysis below was generated by Groq AI reading the board Excel/CSV file directly "
+            "The analysis below was generated by Groq AI reading the board Excel file directly "
             "from cell values, including color flags for load checks, TT4s, and Canadian loads."
         )
         st.markdown(board_analysis_text)
