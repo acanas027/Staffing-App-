@@ -1499,7 +1499,6 @@ DAY / PACING RULES:
 TODAY SELECTED IN APP:
 {day} {shift} shift |
 Total cases: {total_cases:,} |
-Cases to pick: {cases_to_pick:,.0f} |
 Pulls left today from K2: {pulls_left_today} |
 Picks left today from L2: {picks_left_today} |
 Hours left: {hours_remaining} |
