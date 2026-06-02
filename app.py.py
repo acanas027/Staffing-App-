@@ -1172,7 +1172,8 @@ def _rows_to_table(rows, columns):
 def analyze_board_with_groq(
     board_text, day, shift, total_cases, hours_remaining, total_outbound_loads,
     crossroads_open, deer_creek_open, msb_open, needed, summary_table,
-    cases_to_pick, inbound_pallets, notes, oc_alert_text=None,
+    cases_to_pick, inbound_pallets, notes, picks_left=0, pulls_left=0,
+    oc_alert_text=None,
 ):
     client = get_groq_client()
     if client is None:
@@ -1210,6 +1211,7 @@ def analyze_board_with_groq(
 
     loads_by_day = py_summary.get("loads_by_day", {})
     day_str = ", ".join(f"{d}:{n}" for d, n in loads_by_day.items())
+
     verified_counts = (
         f"VERIFIED COUNTS (Python — do not recount):\n"
         f"Total:{py_summary.get('loads_read_from_board',0)}  "
@@ -1243,6 +1245,16 @@ def analyze_board_with_groq(
         f"By day: {ib_day_str}"
     )
 
+    # ── Picks & pulls pacing math (Python-computed, handed to AI as facts) ──
+    cases_picked_so_far = total_cases - picks_left
+    pct_picked = round((cases_picked_so_far / total_cases * 100)) if total_cases > 0 else 0
+    pick_rate_needed = round(picks_left / hours_remaining) if hours_remaining > 0 else 0
+    pickers_needed   = round((picks_left / hours_remaining) / 185, 1) if hours_remaining > 0 else 0
+
+    # ── Load reconciliation (Python-computed) ───────────────────────────────
+    board_load_count      = py_summary.get("loads_read_from_board", 0)
+    implied_completed_gap = total_outbound_loads - board_load_count
+
     actionable_table = _rows_to_table(
         actionable_rows,
         ["day","load","customer","time","door","status","type","loader","flags","comments"]
@@ -1262,7 +1274,25 @@ Rates: Pick=185 cases/hr/person|Load=1 trailer/hr/person|Unload=44 pallets/hr|Ta
 Labor rules: Keep pickers picking. Tasking protects pickers. Protect loading labor. Lead/Extra used proactively.
 Goal: Get ahead early so later appointments are protected. Always talk about how decisions set up 2nd shift for success. Manufacturing only if it genuinely helps this shift.
 
-TODAY: {day} {shift} shift | {total_cases:,} cases | {cases_to_pick:,.0f} to pick | {hours_remaining}hrs left | {total_outbound_loads} loads today | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
+TODAY: {day} {shift} shift | {total_cases:,} cases total for today | {hours_remaining}hrs left | {total_outbound_loads} loads today (manager-confirmed) | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
+
+PICKS & PULLS REMAINING (manager-entered — use these as authoritative, not formula estimates):
+- Total cases today: {total_cases:,}
+- Cases already picked: {cases_picked_so_far:,}  ({pct_picked}% of today's cases complete)
+- Picks left: {picks_left:,} cases remaining
+- Pulls left: {pulls_left:,} pallets remaining
+- Hours left in shift: {hours_remaining}
+- Pick rate needed to finish on time: {pick_rate_needed:,} cases/hr
+- Pickers needed running flat-out to finish: {pickers_needed} people  (bench rate = 185 cases/hr/person)
+- Assess: are we ahead, on pace, or behind on picking? Will we finish before shift end?
+- Assess: are the pulls manageable given hours and tasking labor available?
+
+LOAD COUNT RECONCILIATION (use manager total as ground truth):
+- Manager confirmed total loads today: {total_outbound_loads}
+- Python read from board file: {board_load_count} loads
+- Implied loads already completed/departed (not on board): {implied_completed_gap}
+- Treat the {implied_completed_gap} gap as already completed and off the board.
+- For ALL pacing statements use {total_outbound_loads} as the true total, not {board_load_count}.
 
 STAFFING (Python-computed):
 {staffing_summary}
@@ -1280,7 +1310,8 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 
 1. BOARD SUMMARY
 - Loads by status and day using verified counts above. Do not recount.
-- Completed today vs total. Pacing: ahead/on track/behind based on appt times and hours left.
+- True total = {total_outbound_loads} (manager-confirmed). Board shows {board_load_count}. Implied {implied_completed_gap} already completed/departed.
+- Completed today vs true total. Pacing: ahead/on track/behind based on appt times and hours left.
 - Late loads: day, load#, door, what's happening.
 - Inbound summary: use VERIFIED INBOUND COUNTS only — state total, by day, live vs drop, on lot vs at door. Do not reference plant pallet numbers.
 
@@ -1289,11 +1320,13 @@ COMPLETED LOADS (for pacing — how many done vs remaining, are we ahead/behind)
 - Photos: when and who. Sign-off: who and when.
 - If none: "No OC customers on today's board."
 
-3. PICKING & SHORT RISK
-- Blank/not-started count and risk level.
+3. PICKS & PULLS PACING
+- State clearly: {cases_picked_so_far:,} of {total_cases:,} cases picked ({pct_picked}%). {picks_left:,} cases left. {pulls_left:,} pulls left.
+- Is picking on pace to finish? Yes/no with math: need {pick_rate_needed:,} cases/hr, need {pickers_needed} pickers flat-out.
+- Are pulls manageable? Compare pulls left vs tasking labor available and hours remaining.
 - Short risk: yes/no, why, how big.
-- Can we get ahead? Specific appt times we should be picked to by end of shift.
-- Labor moves: from where to where. Manufacturing worth it?
+- Specific picks target by end of shift.
+- Labor moves if behind: from where to where.
 
 4. PRIORITIZATION
 - Which load#s to prioritize and why.
@@ -1693,6 +1726,24 @@ present_workers = st.sidebar.multiselect("Who is present?", names)
 
 notes = st.sidebar.text_area("Operations Notes")
 
+# ── NEW: manager-entered picks and pulls remaining ───────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.subheader("Picking & Pulling Progress")
+picks_left = st.sidebar.number_input(
+    "Picks Left for the Day (cases)",
+    min_value=0,
+    step=1,
+    value=0,
+    help="How many cases still need to be picked as of right now.",
+)
+pulls_left = st.sidebar.number_input(
+    "Pulls Left for the Day (pallets)",
+    min_value=0,
+    step=1,
+    value=0,
+    help="How many full-pallet pulls still need to be completed as of right now.",
+)
+
 st.markdown("---")
 st.subheader("Outbound Board Excel / CSV")
 
@@ -1824,7 +1875,7 @@ with st.expander("View Opportunity Customer List (from Excel file)"):
                 "Customer":        c["name"].title(),
                 "Customer #":      c["customer_number"] or "—",
                 "Priority":        c["priority"],
-                "Issue":           c["issue"],
+                "Issue":           c["requirements"],
                 "DC Requirements": c["requirements"],
                 "Sign-Off Required": "Yes" if c["sign_off"] else "No",
                 "Photos Required":   "Yes" if c["pictures"] else "No",
@@ -1859,11 +1910,6 @@ if st.button("Generate Staffing Report"):
     ws["B7"] = total_outbound_loads_actual
 
     # ── Write attendance x into Inputs col G for both shifts ───────────────
-    # The Crew Sheet maps every worker to an Inputs col G row via:
-    #   Crew Sheet row N -> Inputs col G row N+1  (Crew row 2 = =Inputs!G3)
-    # Both 1st shift (Crew rows 2-48) and 2nd shift (Crew rows 49-95) all
-    # reference Inputs col G for their present mark.
-    # We clear all x marks first, then write x only for selected workers.
     selected = {name.strip().lower() for name in present_workers}
 
     ws_crew_ref = wb["Crew Sheet"]
@@ -1896,8 +1942,6 @@ if st.button("Generate Staffing Report"):
     )
 
     # ── Load staff from the correct shift's staffing sheet ──────────────────
-    # Both sheets share the same column layout:
-    #   A=Name  D=Skills  F=Best Fit  H=Present  I=Recommended Task
     if shift == "1st":
         staffing_sheet = "Staffing sheet 1ST Shift"
     else:
@@ -1954,6 +1998,8 @@ if st.button("Generate Staffing Report"):
                 cases_to_pick=cases_to_pick,
                 inbound_pallets=inbound_pallets,
                 notes=notes,
+                picks_left=picks_left,
+                pulls_left=pulls_left,
                 oc_alert_text=oc_alert_text,
             )
 
