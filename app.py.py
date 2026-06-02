@@ -646,9 +646,33 @@ def board_cell_flags(cell):
 
 
 def parse_number(value):
+    """
+    Parse board count cells safely.
+    Important: Excel formula results can be numeric decimals like 607.0666666667.
+    The old parser converted that to text and stripped the decimal point, which became 60706666667.
+    For actual numeric Excel values, round to the nearest whole count instead.
+    """
+    if value is None:
+        return 0
+
+    if isinstance(value, (int, float)):
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return 0
+
     text = normalize_board_text(value)
     if not text or text.strip() in ("", " "):
         return 0
+
+    # If text still looks like a decimal number, parse it as a number first.
+    cleaned = text.replace(",", "").strip()
+    if re.fullmatch(r"-?\d+(\.\d+)?", cleaned):
+        try:
+            return int(round(float(cleaned)))
+        except Exception:
+            pass
+
     digits = re.sub(r"[^0-9]", "", text)
     return int(digits) if digits else 0
 
