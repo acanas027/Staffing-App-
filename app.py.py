@@ -1675,16 +1675,15 @@ SOURCE OF TRUTH RULES:
 
 DAY / PACING RULES:
 - Use only the selected app day for today's pacing.
-- Do not blend Monday, Tuesday, Wednesday, or any other day into one pacing statement.
 - Other-day loads can be mentioned separately only.
 - Completed and Loaded statuses count as done for pacing.
-- Blank, Picking, Picking/Short, R/S, RTL, Loaded Short, Late, and No Driver are not done.
+- Blank, Picking, Picking/Short, are not done.
 - A load is behind only if its appointment time is earlier than the estimated current time and it is not done.
 - Future loads already completed/loaded mean the operation is ahead.
 - Do not say the shift is behind just because completed loads are lower than total loads.
 - Use appointment cutoff times, not invented truck-count goals.
 - Do not invent goals like "load 30 trucks by noon" unless Python provided that exact number.
-- Preferred goal format: "Protect all loads through 14:00" or "Have all 13:00–15:00 loads picked/staged before X."
+- Preferred goal format: "Have all 13:00–15:00 loads picked/staged before X."
 
 SHIFT GOAL RULES:
 - Create a realistic shift expectation/goal based on the selected-day board, pacing guardrail, appointment times, staffing gaps, picks left, pulls left, and short risk.
