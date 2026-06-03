@@ -1611,7 +1611,7 @@ STATUS DEFINITIONS:
 - Late = missed appointment. Completed = done. Loaded = done for pacing.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
 - CPU = customer pickup (protect timing, they may leave). 
-- There's no position lead pickers, onlu pickers, taskers, loaders, unloaders, receivers, lead and extra
+- Only positions are: pickers, taskers, loaders, unloaders, receivers, lead and extra
 
 RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
@@ -1691,7 +1691,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 - Give specific actionable actions to keep the operations on time, put os back on track or get us ahead.
-- No vague verbs (monitor/focus/review) unless tied to a specific deadline and load/area. Don't repeat a 30-min action in the 2-hr block unless it clearly escalates it.
+- No vague verbs unless tied to a specific deadline and load. Don't repeat a 30-min action in the 2-hr block.
 """
 
     try:
