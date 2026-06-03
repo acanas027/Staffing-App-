@@ -1674,17 +1674,15 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
-- Then: "Shift expectation/goal: ..." — the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times). Not "52%."
-- Summarize selected-day outbound first. State Completed / R/S / Loaded Short vs selected-day total.
+- Then: - Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
+- Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mentionother-day late loads. Include day, load#, time, door, what's happening.
 - State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
 - State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
-- State selected-day status counts first; all-board counts only as context.
-- Late loads: separate selected-day from other-day. Include day, load#, time, door, what's happening.
-- Inbound: from VERIFIED INBOUND COUNTS only — total, by day, live vs drop, on lot vs at door. No plant pallet estimates.
+- Inbound: from VERIFIED INBOUND COUNTS only — total, by day, on lot vs at door. No plant pallet estimates.
 
 3. PICKING & SHORT RISK
-- State risk Low/Medium/High and why (picks/pulls left, blank loads, Picking/Short, R/S, Loaded Short, staffing gaps) FOR TODAY.
-- State if shorts exist now or are only future risk. State whether we can get ahead and which appointment cutoff to protect.
+- State risk Low/Medium/High or future and why FOR TODAY.
+- State whether we can get ahead and which appointment cutoff to protect.
 
 4. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - Each load: load#, customer, time, door, status, reason.
@@ -1696,10 +1694,9 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 - State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none.
 - ONLY place labor moves appear. Format: "Move ___ from ___ to ___ because ___." Show rate-math payoff when clean (no guessed completion times).
 - If no safe move: "No safe labor move from current staffing without creating another gap."
-- Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift.
 
 6. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
-- Each: owner + deadline + load/area + expected result. Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
+Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
 - No vague verbs (monitor/focus/review) unless tied to a specific deadline and load/area. Don't repeat a 30-min action in the 2-hr block unless it clearly escalates it.
 """
 
@@ -1708,7 +1705,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3300,
+            max_completion_tokens=3200,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
