@@ -1639,7 +1639,7 @@ DAY / PACE LOGIC:
 - A lower completed-vs-total count alone does NOT mean behind.
 - Use appointment cutoff times, never invented truck-count goals. Preferred goal format: "Have all 15:00 loads picked/staged before X."
 
-SHIFT GOAL: Build a realistic, specific, achievable goal from the selected-day board, pacing, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
+SHIFT GOAL: Build a realistic, specific, achievable goal from the selected-day board, stated working rates, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
 
 TODAY SELECTED IN APP:
 {day} {shift} shift | Total cases: {total_cases:,} | Pulls left from K2: {pulls_left_today} | Picks left from L2: {picks_left_today} | Hours left: {hours_remaining} | Total outbound loads today: {total_outbound_loads} | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
