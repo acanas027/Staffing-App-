@@ -1611,6 +1611,7 @@ STATUS DEFINITIONS:
 - Late = missed appointment. Completed = done. Loaded = done for pacing.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
 - CPU = customer pickup (protect timing, they may leave). 
+- There's no position lead pickers, onlu pickers, taskers, loaders, unloaders, receivers, lead and extra
 
 RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
