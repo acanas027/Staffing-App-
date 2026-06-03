@@ -1734,7 +1734,8 @@ PACE LOGIC:
 - Use PYTHON DAY-SPECIFIC PACING GUARDRAIL first.
 - Use today's actionable rows and today's completed rows only.
 - Completed and Loaded = done.
-- Anything blank, Picking, Picking/Short, R/S, RTL, Loaded Short, Late, or No Driver = not done.
+- Anything blank, Picking, Picking/Short = not done.
+- Loaded/short and R/S = Waiting for product = not actionable
 - Behind = appointment time already passed and load is not done.
 - Ahead = future appointment loads are already done.
 - On track = no passed-due unfinished loads and no major short/late risk.
@@ -1743,18 +1744,19 @@ PACE LOGIC:
 ===== OUTPUT =====
 
 BOTTOM LINE (one sentence, max 30 words, before everything else):
-- State: pace status + the single most important action + the appointment cutoff to protect.
-- Example: "Behind 17 loads — move confirmed surplus labor to the bottleneck now and protect the 14:00 cutoff."
+- State: pace status + the appointment time cutoff for this shift + the single biggest threat to don't meet shift expectations.
+- Example: "Behind 5 loads: Should have completed 17 loads by now, have completed 12. Expected to have RTL all loads up to 14:00. Move surplus labor to bottleneck.
 - This is the verdict. No data dump here.
 
 1. BOARD SUMMARY
 - Start with: "SHIFT HEALTH: GREEN / YELLOW / RED."
 - Give one clear reason for the health rating.
-- Then state: "Shift expectation/goal: ..."
+- Then state: "Shift expectation/goal: ..." This is the appointment time we want to be working/ have ready by the end of shift. 
 - The shift expectation must be your own operational goal based on today's board, pacing, labor, picks, pulls, and appointment times.
-- Do not only say "complete 52% of the day's outbound loads."
+- Do not only say "complete 52% of the day's outbound loads." Say by what appointment we should be by the end of the shift.
 - Summarize selected-day outbound only first.
-- State completed/loaded vs selected-day total.
+- State completed/R/S and Loaded/Short vs selected-day total. 
+- State how many loads there are to pick and pull left for today. This is = Total loads for today - completed - R/S - loaded - RTL - Loaded/Short
 - State pacing: ahead / on track / behind, using PYTHON DAY-SPECIFIC PACING GUARDRAIL.
 - State pulls left today and picks left today.
 - State selected-day status counts first.
@@ -1774,11 +1776,9 @@ BOTTOM LINE (one sentence, max 30 words, before everything else):
 - State pulls left today from K2.
 - State picks left today from L2.
 - State whether picking risk is Low / Medium / High.
-- Explain why using picks left, pulls left, blank/not-started loads, Picking/Short, R/S, Loaded Short, and staffing gaps.
+- Explain why using picks left, pulls left, blank/not-started loads, Picking/Short, R/S, Loaded Short, and staffing gaps FOR TODAY.
 - State if shorts exist now or if risk is only future risk.
 - State whether we can get ahead and what appointment cutoff time should be protected.
-- Do NOT give the labor move here. State the gap and risk only.
-- End this section with: "Labor fix → Section 5."
 - Manufacturing support: mention only if it helps reduce shorts or protect outbound today.
 
 4. PRIORITIZATION
@@ -1810,7 +1810,6 @@ BOTTOM LINE (one sentence, max 30 words, before everything else):
 - Explain how each move protects the next appointment cutoff.
 - Include one realistic shift goal based on appointment times, current pacing, picks/pulls left, and staffing gaps.
 - Explain how this sets up 2nd shift.
-- End with one line: "Plan assumes ___." Name the single thing most likely to break this plan: inbound surge, no-driver, late picking completion, short product, late trailer, OC requirements, or paperwork delay.
 
 6. TOP ACTION ITEMS
 - Next 30 minutes: exactly 3 action items.
@@ -1832,11 +1831,8 @@ FINAL RULES:
 - Do not mix days.
 - Do not recommend unsafe labor moves.
 - Do not give conditional labor moves like "if surplus exists." Use actual staffing gaps only.
-- Labor moves appear ONLY in Section 5. Section 3 names risk and points to Section 5.
 - Always calculate rate-math payoff for moves and short risk; only print it when clean.
-- Do not calculate exact completion times unless current remaining work and assigned labor are both clearly provided.
 - Use appointment cutoff times instead of fake production targets.
-- Every action item must have owner + deadline + expected result.
 - Avoid vague words unless tied to a specific load, area, or deadline.
 - OC alerts must be early and complete.
 """
@@ -1846,7 +1842,7 @@ FINAL RULES:
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=4000,
+            max_completion_tokens=2000,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
