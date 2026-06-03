@@ -1601,20 +1601,20 @@ def analyze_board_with_groq(
 
 CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
 
-OPERATING PRIORITIES (in order): 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
+OPERATING PRIORITIES: 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
 - RTL = ALREADY STAGED ON DOOR/DOCK, ready to load. R/S = ready/short (waiting for product, not actionable).
 - Picking = being picked. Picking/Short = inventory shortage while picking.
 - Loaded Short = trailer loaded but missing product. 
-- Late = missed/at-risk appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
+- Late = missed appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
 - CPU = customer pickup (protect timing, they may leave). 
 
 RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
 LABOR RULES:
-- Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Lead/Extra proactively.
+- Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Extra proactively.
 - Every move: source area → destination area → reason.
 - Only move from Lead/Extra WHEN THERE IS AVAILABLE or from an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
 - If no safe move exists, say so clearly.
