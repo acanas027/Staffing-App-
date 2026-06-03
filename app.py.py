@@ -1682,15 +1682,9 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 - Late loads: separate selected-day from other-day. Include day, load#, time, door, what's happening.
 - Inbound: from VERIFIED INBOUND COUNTS only — total, by day, live vs drop, on lot vs at door. No plant pallet estimates.
 
-2. OC ALERTS
-- If OC loads exist, list every one: load#, customer, time, status, required action. Include photo + sign-off requirements if applicable. Assign owner (loader/lead/supervisor/manager).
-- If none: "No OC customers on today's board."
-
 3. PICKING & SHORT RISK
-- State pulls left (K2) and picks left (L2). State risk Low/Medium/High and why (picks/pulls left, blank loads, Picking/Short, R/S, Loaded Short, staffing gaps) FOR TODAY.
+- State risk Low/Medium/High and why (picks/pulls left, blank loads, Picking/Short, R/S, Loaded Short, staffing gaps) FOR TODAY.
 - State if shorts exist now or are only future risk. State whether we can get ahead and which appointment cutoff to protect.
-- Do NOT give the labor move here — name the gap/risk only, then: "Labor fix → Section 5."
-- Manufacturing support only if it reduces shorts or protects outbound today.
 
 4. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - Each load: load#, customer, time, door, status, reason.
@@ -1702,7 +1696,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 - State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none.
 - ONLY place labor moves appear. Format: "Move ___ from ___ to ___ because ___." Show rate-math payoff when clean (no guessed completion times).
 - If no safe move: "No safe labor move from current staffing without creating another gap."
-- Explain how each move protects the next appointment cutoff. Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift.
+- Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift.
 
 6. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 - Each: owner + deadline + load/area + expected result. Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
@@ -1714,7 +1708,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2900,
+            max_completion_tokens=3300,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
