@@ -1628,7 +1628,7 @@ STATUS DEFINITIONS:
 
 FLAGS:
 - LOAD-CHECK = yellow fill. Needs verification.
-- TT4-NEEDED = blue fill. TT4 required.
+- TT4-NEEDED = TT4 required.
 - CANADIAN = red font. Canadian/customs sensitivity.
 
 RATES / ASSUMPTIONS:
@@ -1636,7 +1636,6 @@ RATES / ASSUMPTIONS:
 - Load rate = 1 trailer/hr/person.
 - Unload rate = 44 pallets/hr/person.
 - Tasking rate = 25 pallets/hr/person.
-- Ticket average = 60 cases.
 - Tasking protects pickers by keeping replenishment/full pallets/putaways moving.
 - Manufacturing help is only worth mentioning if it genuinely helps this shift avoid shorts or protect outbound.
 
@@ -1842,7 +1841,7 @@ FINAL RULES:
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2000,
+            max_completion_tokens=3000,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
