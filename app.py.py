@@ -1843,7 +1843,7 @@ FINAL RULES:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_completion_tokens=2000,
