@@ -1847,7 +1847,7 @@ FINAL RULES:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_completion_tokens=4000,
-            extra_body={include_reasoning = False},
+            extra_body={"include_reasoning" = False},
         )
         return response.choices[0].message.content
 
