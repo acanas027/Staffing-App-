@@ -1714,7 +1714,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3000,
+            max_completion_tokens=2900,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
