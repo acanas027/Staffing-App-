@@ -1699,7 +1699,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3267,
+            max_completion_tokens=3260,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
