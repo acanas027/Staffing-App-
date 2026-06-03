@@ -1604,14 +1604,12 @@ CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
 OPERATING PRIORITIES (in order): 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
-- RTL = staged, ready to load. R/S = ready/short on full pallets (waiting for product, not actionable).
+- RTL = staged, ready to load. R/S = ready/short (waiting for product, not actionable).
 - Picking = being picked. Picking/Short = inventory shortage while picking.
-- Loaded Short = trailer loaded but missing product. SEVERE service risk.
+- Loaded Short = trailer loaded but missing product. 
 - Late = missed/at-risk appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
-- CPU = customer pickup (protect timing, they may leave). No Driver = ready but can't depart.
-
-FLAGS: LOAD-CHECK = yellow fill, needs verification. TT4-NEEDED = TT4 required. CANADIAN = red font, customs sensitivity.
+- CPU = customer pickup (protect timing, they may leave). 
 
 RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
@@ -1635,11 +1633,11 @@ SOURCE OF TRUTH:
 - Never invent load numbers, customers, doors, statuses, times, counts, goals, or problems.
 
 DAY / PACE LOGIC:
-- Use only the selected day for pacing. Other-day loads mentioned separately only.
+- Use only the selected day for pacing.
 - Done = Completed or Loaded. Not done = Blank, Picking, Picking/Short. Loaded Short and R/S = waiting for product, not actionable.
 - Behind = appointment time already passed and load not done. Ahead = future loads already done. On track = no past-due unfinished loads and no major short/late risk.
 - A lower completed-vs-total count alone does NOT mean behind.
-- Use appointment cutoff times, never invented truck-count goals (no "load 30 by noon" unless Python gave that exact number). Preferred goal format: "Have all 13:00–15:00 loads picked/staged before X."
+- Use appointment cutoff times, never invented truck-count goals. Preferred goal format: "Have all 15:00 loads picked/staged before X."
 
 SHIFT GOAL: Build a realistic, specific, achievable goal from the selected-day board, pacing, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
 
