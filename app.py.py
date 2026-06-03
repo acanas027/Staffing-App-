@@ -1639,7 +1639,7 @@ DAY / PACE LOGIC:
 - A lower completed-vs-total count alone does NOT mean behind.
 - Use appointment cutoff times, never invented truck-count goals. Preferred goal format: "Have all 15:00 loads picked/staged before X."
 
-SHIFT GOAL: Build a realistic, specific, achievable goal from the selected-day board, stated working rates, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
+SHIFT GOAL: Build a realistic, optimistic, specific, achievable goal from the data from selected-day board, stated working rates, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
 
 TODAY SELECTED IN APP:
 {day} {shift} shift | Total cases: {total_cases:,} | Pulls left from K2: {pulls_left_today} | Picks left from L2: {picks_left_today} | Hours left: {hours_remaining} | Total outbound loads today: {total_outbound_loads} | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
@@ -1688,7 +1688,6 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
 
 4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
-Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
 - No vague verbs (monitor/focus/review) unless tied to a specific deadline and load/area. Don't repeat a 30-min action in the 2-hr block unless it clearly escalates it.
 """
 
@@ -1697,7 +1696,7 @@ Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status befo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3260,
+            max_completion_tokens=3270,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
