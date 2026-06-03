@@ -3,6 +3,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
@@ -1959,6 +1960,10 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     bar.height = 9
     bar.width  = 15
     bar.legend.position = "r"
+    # Nudge the title up toward the top edge.
+    bar.title.layout = Layout(manualLayout=ManualLayout(y=0.0, yMode="edge"))
+    # Keep the legend on the right but raise it.
+    bar.legend.layout = Layout(manualLayout=ManualLayout(x=0.80, y=0.10, xMode="edge", yMode="edge"))
     ws_dash.add_chart(bar, f"E{chart_anchor_row}")
 
     pie = PieChart()
@@ -1970,6 +1975,10 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     pie.height = 9
     pie.width  = 13
     pie.legend.position = "r"
+    # Nudge the title up toward the top edge.
+    pie.title.layout = Layout(manualLayout=ManualLayout(y=0.0, yMode="edge"))
+    # Keep the legend on the right but raise it.
+    pie.legend.layout = Layout(manualLayout=ManualLayout(x=0.80, y=0.10, xMode="edge", yMode="edge"))
     # Drop the pie 2 rows lower than the bar chart so its title isn't clipped.
     ws_dash.add_chart(pie, f"I{chart_anchor_row + 2}")
 
