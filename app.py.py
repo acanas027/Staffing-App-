@@ -1597,114 +1597,56 @@ def analyze_board_with_groq(
         ["day","load","customer","time","status"]
     )
 
-    prompt = f"""You are an outbound warehouse shift manager. Data comes from Excel cells — treat it as accurate. Use short bullets. No corporate fluff.
+    prompt = f"""You are an outbound warehouse shift manager. Data comes from Excel cells — treat it as accurate. Short bullets. No corporate fluff. Be direct, practical, specific. This is for operational execution.
 
-CONTEXT:
-High-volume grocery DC. 1st shift runs 06:00-16:30. 24-hour clock.
-This report is for operational execution, not corporate reporting. Be direct, practical, and specific.
+CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
 
-OPERATING PRIORITIES:
-1) Prevent shorts.
-2) Protect departures.
-3) Protect picking flow.
-4) Protect inbound flow.
-5) Use proactive labor before problems get worse.
-6) Set up 2nd shift for success.
+OPERATING PRIORITIES (in order): 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
-- RTL = staged and ready to load.
-- R/S = ready/short on full pallets.
-- Picking = still being picked.
-- Picking/Short = inventory shortage while picking.
-- Loaded Short = trailer loaded but missing product. Severe service risk.
-- Late = missed appointment or at-risk load.
-- Completed / Complete = done.
-- Loaded = done enough for pacing unless flagged otherwise.
-- Blank status = not started yet.
-- Live = trailer at dock. Higher priority than drop trailers.
-- Drop = drop trailer.
-- CPU = customer pickup. Protect timing because they may leave if not ready.
-- No Driver = load may be ready but cannot depart because driver issue exists.
+- RTL = staged, ready to load. R/S = ready/short on full pallets (waiting for product, not actionable).
+- Picking = being picked. Picking/Short = inventory shortage while picking.
+- Loaded Short = trailer loaded but missing product. SEVERE service risk.
+- Late = missed/at-risk appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
+- Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
+- CPU = customer pickup (protect timing, they may leave). No Driver = ready but can't depart.
 
-FLAGS:
-- LOAD-CHECK = yellow fill. Needs verification.
-- TT4-NEEDED = TT4 required.
-- CANADIAN = red font. Canadian/customs sensitivity.
+FLAGS: LOAD-CHECK = yellow fill, needs verification. TT4-NEEDED = TT4 required. CANADIAN = red font, customs sensitivity.
 
-RATES / ASSUMPTIONS:
-- Pick rate = 185 cases/hr/person.
-- Load rate = 1 trailer/hr/person.
-- Unload rate = 44 pallets/hr/person.
-- Tasking rate = 25 pallets/hr/person.
-- Tasking protects pickers by keeping replenishment/full pallets/putaways moving.
-- Manufacturing help is only worth mentioning if it genuinely helps this shift avoid shorts or protect outbound.
+RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
 LABOR RULES:
-- Keep pickers picking.
-- Protect loading labor.
-- Protect Tasking when picks/pulls are high.
-- Lead/Extra should be used proactively.
-- Every labor move must name source area → destination area → reason.
-- Only move labor from Lead/Extra or from an area with positive surplus.
-- Never pull labor from an understaffed area.
-- Never recommend taking labor from an area with zero or negative gap.
-- Do not say "if surplus exists." Only recommend a move if the staffing table shows surplus now.
-- If no safe move exists, say that clearly.
+- Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Lead/Extra proactively.
+- Every move: source area → destination area → reason.
+- Only move from Lead/Extra or an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
+- If no safe move exists, say so clearly.
 
 RATE MATH RULES:
-- For every labor move AND every short-risk call, you MUST internally calculate the numeric payoff using the RATES block when enough inputs are available.
-- Only PRINT the math when it is clean, defensible, and adds decision value.
-- Do not calculate an exact completion time unless current remaining work and assigned labor are both provided clearly.
-- If the inputs are fuzzy or the math would be a guess, state the move/risk without fake precision.
-- When you do print it, use: action → rate math → result by clock time.
-  Example: "Move 2 to Picking → +370 cases/hr → reduces Picking gap from -4 to -2."
-- Never invent numbers to make the math look clean. If it isn't clean, don't show it.
+- For every labor move AND short-risk call, internally calculate the payoff using RATES when inputs allow.
+- Only PRINT the math when clean, defensible, and useful. Do not compute an exact completion time unless remaining work AND assigned labor are both clearly given. If fuzzy, state the move/risk with no fake precision. Never invent numbers.
+- Print format: action → rate math → result. Example: "Move 2 to Picking → +370 cases/hr → reduces Picking gap from -4 to -2."
 
-SOURCE OF TRUTH RULES:
-- Python verified counts are the source of truth. Do not recount manually from the rows.
-- SELECTED DAY COUNTS ONLY must be used first for today's analysis. ALL BOARD COUNTS are context only.
-- Pulls left today come directly from uploaded board cell K2.
-- Picks left today come directly from uploaded board cell L2.
-- Inputs!B6 equals board K2 pulls left today.
-- Inputs!B5 equals board L2 picks left today.
-- Completed loads are intentionally separated from actionable loads. Do not assume completed loads are missing.
-- Actionable loads are only loads needing attention: blank, late, RTL, R/S, Picking, Picking/Short, Loaded Short, No Driver, flagged, etc.
-- Completed rows are used for pacing.
-- All outbound and inbound counts are separate. Never mix inbound and outbound.
-- Never invent load numbers, customers, doors, statuses, appointment times, counts, goals, or problems.
+SOURCE OF TRUTH:
+- Python verified counts are the source of truth. Do NOT recount from rows.
+- Use SELECTED DAY COUNTS first; ALL BOARD COUNTS are context only.
+- Pulls left = board K2 = Inputs!B6. Picks left = board L2 = Inputs!B5.
+- Completed loads are separated from actionable on purpose — don't assume they're missing. Completed rows are for pacing.
+- Outbound and inbound counts are separate; never mix them.
+- Never invent load numbers, customers, doors, statuses, times, counts, goals, or problems.
 
-DAY / PACING RULES:
-- Use only the selected app day for today's pacing.
-- Other-day loads can be mentioned separately only.
-- Completed and Loaded statuses count as done for pacing.
-- Blank, Picking, Picking/Short, are not done.
-- A load is behind only if its appointment time is earlier than the estimated current time and it is not done.
-- Future loads already completed/loaded mean the operation is ahead.
-- Do not say the shift is behind just because completed loads are lower than total loads.
-- Use appointment cutoff times, not invented truck-count goals.
-- Do not invent goals like "load 30 trucks by noon" unless Python provided that exact number.
-- Preferred goal format: "Have all 13:00–15:00 loads picked/staged before X."
+DAY / PACE LOGIC:
+- Use only the selected day for pacing. Other-day loads mentioned separately only.
+- Done = Completed or Loaded. Not done = Blank, Picking, Picking/Short. Loaded Short and R/S = waiting for product, not actionable.
+- Behind = appointment time already passed and load not done. Ahead = future loads already done. On track = no past-due unfinished loads and no major short/late risk.
+- A lower completed-vs-total count alone does NOT mean behind.
+- Use appointment cutoff times, never invented truck-count goals (no "load 30 by noon" unless Python gave that exact number). Preferred goal format: "Have all 13:00–15:00 loads picked/staged before X."
 
-SHIFT GOAL RULES:
-- Create a realistic shift expectation/goal based on the selected-day board, pacing guardrail, appointment times, staffing gaps, picks left, pulls left, and short risk.
-- Do not only repeat that 1st shift normally handles 52% of the day.
-- The shift goal should be specific, operational, and achievable.
-- The goal should include an appointment cutoff time, not just a load percentage.
-- If the shift is behind, the goal should focus on recovery: protect the next appointment wave and eliminate the highest service-risk shorts.
-- If the shift is on track, the goal should focus on staying ahead and setting up 2nd shift.
-- If the shift is ahead, the goal should focus on pulling future work forward, clearing shorts, and reducing 2nd shift risk.
+SHIFT GOAL: Build a realistic, specific, achievable goal from the selected-day board, pacing, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
 
 TODAY SELECTED IN APP:
-{day} {shift} shift |
-Total cases: {total_cases:,} |
-Pulls left today from K2: {pulls_left_today} |
-Picks left today from L2: {picks_left_today} |
-Hours left: {hours_remaining} |
-Total outbound loads today: {total_outbound_loads} |
-Plants open: {", ".join(plants_open) if plants_open else "none"} |
-Notes: {notes.strip() or "none"}
+{day} {shift} shift | Total cases: {total_cases:,} | Pulls left from K2: {pulls_left_today} | Picks left from L2: {picks_left_today} | Hours left: {hours_remaining} | Total outbound loads today: {total_outbound_loads} | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
 
-PYTHON DAY-SPECIFIC PACING GUARDRAIL:
+PYTHON DAY-SPECIFIC PACING GUARDRAIL (use first):
 {day_pacing_text}
 
 STAFFING — PYTHON COMPUTED:
@@ -1716,123 +1658,55 @@ STAFFING — PYTHON COMPUTED:
 
 {oc_section}
 
-TODAY ACTIONABLE LOADS ONLY — SELECTED DAY {day}:
-These are notable, flagged, late, short, blank, or not-started loads only.
+TODAY ACTIONABLE LOADS — SELECTED DAY {day} (notable, flagged, late, short, blank, not-started only):
 {actionable_table}
 
-OTHER-DAY ACTIONABLE LOADS:
-Mention separately only. Do not use these for today's pacing.
+OTHER-DAY ACTIONABLE LOADS (mention separately only, not for today's pacing):
 {other_day_actionable_table}
 
-TODAY COMPLETED LOADS ONLY — SELECTED DAY {day}:
-Use these for pacing. Completed/Loaded rows may not appear in actionable rows because they are separated intentionally.
+TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 {completed_table}
-
-PACE LOGIC:
-- Use PYTHON DAY-SPECIFIC PACING GUARDRAIL first.
-- Use today's actionable rows and today's completed rows only.
-- Completed and Loaded = done.
-- Anything blank, Picking, Picking/Short = not done.
-- Loaded/short and R/S = Waiting for product = not actionable
-- Behind = appointment time already passed and load is not done.
-- Ahead = future appointment loads are already done.
-- On track = no passed-due unfinished loads and no major short/late risk.
-- Never create pacing goals from other days.
 
 ===== OUTPUT =====
 
-BOTTOM LINE (one sentence, max 30 words, before everything else):
-- State: pace status + the appointment time cutoff for this shift + the single biggest threat to don't meet shift expectations.
-- Example: "Behind 5 loads: Should have completed 17 loads by now, have completed 12. Expected to have RTL all loads up to 14:00. Move surplus labor to bottleneck.
-- This is the verdict. No data dump here.
+BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff + the single biggest threat to meeting expectations. No data dump.
+Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all loads to 14:00. Move surplus labor to bottleneck."
 
 1. BOARD SUMMARY
-- Start with: "SHIFT HEALTH: GREEN / YELLOW / RED."
-- Give one clear reason for the health rating.
-- Then state: "Shift expectation/goal: ..." This is the appointment time we want to be working/ have ready by the end of shift. 
-- The shift expectation must be your own operational goal based on today's board, pacing, labor, picks, pulls, and appointment times.
-- Do not only say "complete 52% of the day's outbound loads." Say by what appointment we should be by the end of the shift.
-- Summarize selected-day outbound only first.
-- State completed/R/S and Loaded/Short vs selected-day total. 
-- State how many loads there are to pick and pull left for today. This is = Total loads for today - completed - R/S - loaded - RTL - Loaded/Short
-- State pacing: ahead / on track / behind, using PYTHON DAY-SPECIFIC PACING GUARDRAIL.
-- State pulls left today and picks left today.
-- State selected-day status counts first.
-- State all-board counts only as context if needed.
-- Late loads: separate selected-day late loads from other-day late loads. Include day, load#, appointment time, door, and what is happening.
-- Inbound summary: use VERIFIED INBOUND COUNTS only. State total, by day, live vs drop, on lot vs at door. Do not reference plant pallet estimates.
+- Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
+- Then: "Shift expectation/goal: ..." — the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times). Not "52%."
+- Summarize selected-day outbound first. State Completed / R/S / Loaded Short vs selected-day total.
+- State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
+- State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
+- State selected-day status counts first; all-board counts only as context.
+- Late loads: separate selected-day from other-day. Include day, load#, time, door, what's happening.
+- Inbound: from VERIFIED INBOUND COUNTS only — total, by day, live vs drop, on lot vs at door. No plant pallet estimates.
 
 2. OC ALERTS
-- If OC loads exist, list every OC load with:
-  load#, customer, appointment time, status, required action.
-- Include photo requirements if applicable.
-- Include supervisor sign-off requirements if applicable.
-- Assign ownership clearly: loader, lead, supervisor, or manager.
-- If none, say exactly: "No OC customers on today's board."
+- If OC loads exist, list every one: load#, customer, time, status, required action. Include photo + sign-off requirements if applicable. Assign owner (loader/lead/supervisor/manager).
+- If none: "No OC customers on today's board."
 
 3. PICKING & SHORT RISK
-- State pulls left today from K2.
-- State picks left today from L2.
-- State whether picking risk is Low / Medium / High.
-- Explain why using picks left, pulls left, blank/not-started loads, Picking/Short, R/S, Loaded Short, and staffing gaps FOR TODAY.
-- State if shorts exist now or if risk is only future risk.
-- State whether we can get ahead and what appointment cutoff time should be protected.
-- Manufacturing support: mention only if it helps reduce shorts or protect outbound today.
+- State pulls left (K2) and picks left (L2). State risk Low/Medium/High and why (picks/pulls left, blank loads, Picking/Short, R/S, Loaded Short, staffing gaps) FOR TODAY.
+- State if shorts exist now or are only future risk. State whether we can get ahead and which appointment cutoff to protect.
+- Do NOT give the labor move here — name the gap/risk only, then: "Labor fix → Section 5."
+- Manufacturing support only if it reduces shorts or protects outbound today.
 
-4. PRIORITIZATION
-- Separate priorities into these groups:
-  A) Past due / immediate risk
-  B) Next 2 hours
-  C) Later today high risk
-- List the loads to attack first.
-- Use load#, customer, appointment time, door, status, and reason.
-- Severity order (use to rank):
-  1) Late CPU/Live loads
-  2) Picking/Short
-  3) Blank loads with near appointment times
-  4) Blank Canadian / OC customers / Load-check flagged loads
-- When time grouping and severity order conflict, decide case by case and put the load where the real risk is highest — but be consistent within a single report.
-- Do not prioritize loads from other days as today's work.
-- Never include loads that include Reser's in the customer column as a priority.
+4. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
+- Each load: load#, customer, time, door, status, reason.
+- Severity rank: 1) Late CPU/Live 2) Picking/Short 3) Blank with near appointment 4) Blank Canadian / OC / Load-check flagged.
+- When time-group and severity conflict, place by highest real risk; stay consistent within the report.
+- No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
 
 5. STAFFING CROSS-ANALYSIS
-- State what staffing can fix right now.
-- State current bottleneck: Picking / Loading / Tasking / Inbound / none.
-- This section is the ONLY place labor moves appear. For every move, use this format:
-  "Move ___ from ___ to ___ because ___."
-- Show the rate-math payoff when it is clean, defensible, and not based on guessed completion time.
-- Only move from Lead/Extra or positive-surplus areas.
-- Never use conditional labor moves like "if surplus exists."
-- If no safe labor move exists, say:
-  "No safe labor move from current staffing without creating another gap."
-- Explain how each move protects the next appointment cutoff.
-- Include one realistic shift goal based on appointment times, current pacing, picks/pulls left, and staffing gaps.
-- Explain how this sets up 2nd shift.
+- State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none.
+- ONLY place labor moves appear. Format: "Move ___ from ___ to ___ because ___." Show rate-math payoff when clean (no guessed completion times).
+- If no safe move: "No safe labor move from current staffing without creating another gap."
+- Explain how each move protects the next appointment cutoff. Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift.
 
-6. TOP ACTION ITEMS
-- Next 30 minutes: exactly 3 action items.
-- Next 2 hours: exactly 3 action items.
-- Each action item must include owner + deadline + load/area + expected result.
-- Example format:
-  "Lead by 08:15: Verify load 123456 at door 4 and confirm short status before the 09:00 appointment wave."
-- Do not use vague actions like "monitor," "focus," or "review" unless paired with a specific deadline and load/area.
-- Do not repeat the same action in both Next 30 minutes and Next 2 hours unless the second action clearly escalates or advances the first.
-- Include escalation triggers for Loaded Short, Picking/Short, R/S, OC, TT4, and Canadian risk when relevant.
-- If an issue is not resolved by the stated deadline, say who it escalates to.
-
-FINAL RULES:
-- Be concise but specific.
-- Use short bullets.
-- Do not use corporate language.
-- Do not invent anything.
-- Do not recount Python counts.
-- Do not mix days.
-- Do not recommend unsafe labor moves.
-- Do not give conditional labor moves like "if surplus exists." Use actual staffing gaps only.
-- Always calculate rate-math payoff for moves and short risk; only print it when clean.
-- Use appointment cutoff times instead of fake production targets.
-- Avoid vague words unless tied to a specific load, area, or deadline.
-- OC alerts must be early and complete.
+6. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
+- Each: owner + deadline + load/area + expected result. Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
+- No vague verbs (monitor/focus/review) unless tied to a specific deadline and load/area. Don't repeat a 30-min action in the 2-hr block unless it clearly escalates it.
 """
 
     try:
