@@ -1697,7 +1697,7 @@ Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status befo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3325,
+            max_completion_tokens=3300,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
