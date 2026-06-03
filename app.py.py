@@ -1666,6 +1666,7 @@ TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 {completed_table}
 
 ===== OUTPUT =====
+-Don't include any output i dont ask for. 
 
 BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff + the single biggest threat to meeting expectations. No data dump.
 Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all loads to 14:00. Move surplus labor to bottleneck."
@@ -1679,14 +1680,14 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 - State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
 - Inbound: from VERIFIED INBOUND COUNTS only — total, by day, on lot vs at door. No plant pallet estimates.
 
-3. PICKING & SHORT RISK
+2. PICKING & SHORT RISK
 - State risk Low/Medium/High or future and why FOR TODAY.
 - State whether we can get ahead and which appointment cutoff to protect.
 
-4. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
+3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
 
-6. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
+4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
 - No vague verbs (monitor/focus/review) unless tied to a specific deadline and load/area. Don't repeat a 30-min action in the 2-hr block unless it clearly escalates it.
 """
@@ -1696,7 +1697,7 @@ Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status befo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3300,
+            max_completion_tokens=3325,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
