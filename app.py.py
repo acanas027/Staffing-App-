@@ -1604,10 +1604,10 @@ CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
 OPERATING PRIORITIES: 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
-- RTL = ALREADY STAGED ON DOOR/DOCK, ready to load. R/S = ready/short (waiting for product, not actionable).
-- Picking = being picked. Picking/Short = inventory shortage while picking.
+- RTL = ALREADY STAGED ON DOOR, ready to load. R/S = ready/short (waiting for product, not actionable).
+- Picking = being picked. Picking/Short = inventory shortage, picking.
 - Loaded Short = trailer loaded but missing product. 
-- Late = missed appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
+- Late = missed appointment. Completed = done. Loaded = done for pacing.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
 - CPU = customer pickup (protect timing, they may leave). 
 
@@ -1621,7 +1621,7 @@ LABOR RULES:
 
 RATE MATH RULES:
 - For every labor move AND short-risk call, internally calculate the payoff using RATES when inputs allow.
-- Only PRINT the math when clean, defensible, and useful. Do not compute an exact completion time unless remaining work AND assigned labor are both clearly given. If fuzzy, state the move/risk with no fake precision. Never invent numbers.
+- Do not compute an exact completion time unless remaining work AND assigned labor are both clearly given. If fuzzy, state the move/risk with no fake precision. Never invent numbers.
 - Print format: action → rate math → result. Example: "Move 2 to Picking → +370 cases/hr → reduces Picking gap from -4 to -2."
 
 SOURCE OF TRUTH:
@@ -1697,7 +1697,7 @@ Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status befo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3300,
+            max_completion_tokens=3295,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
