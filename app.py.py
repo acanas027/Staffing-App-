@@ -1843,10 +1843,11 @@ FINAL RULES:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-oss-120b",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2000,
+            max_completion_tokens=4000,
+            include_reasoning = False
         )
         return response.choices[0].message.content
 
