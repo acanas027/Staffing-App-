@@ -1941,7 +1941,9 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
             if r % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=light_blue)
 
-    chart_anchor_row = board_start + len(present_recommendations) + 5
+    # Charts start 3 rows after the Written Recommendations block ends (rec_row
+    # is already the row just past the last recommendation).
+    chart_anchor_row = rec_row + 3
 
     bar = BarChart()
     bar.title        = "Needed vs Assigned"
@@ -1951,6 +1953,9 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     cats = Reference(ws_dash, min_col=1, min_row=header_row + 1, max_row=header_row + len(summary_table))
     bar.add_data(data, titles_from_data=True)
     bar.set_categories(cats)
+    # Force the axes (and therefore the task-name category labels) to render.
+    bar.x_axis.delete = False
+    bar.y_axis.delete = False
     bar.height = 9
     bar.width  = 15
     bar.legend.position = "r"
@@ -1965,7 +1970,8 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
     pie.height = 9
     pie.width  = 13
     pie.legend.position = "r"
-    ws_dash.add_chart(pie, f"I{chart_anchor_row}")
+    # Drop the pie 2 rows lower than the bar chart so its title isn't clipped.
+    ws_dash.add_chart(pie, f"I{chart_anchor_row + 2}")
 
     for col in range(1, 12):
         ws_dash.column_dimensions[get_column_letter(col)].width = 18
