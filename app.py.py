@@ -1675,6 +1675,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
 - Then: - Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
+- State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none. - If no safe move: "No safe labor move from current staffing without creating another gap."
 - Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mentionother-day late loads. Include day, load#, time, door, what's happening.
 - State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
 - State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
@@ -1685,15 +1686,7 @@ Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all lo
 - State whether we can get ahead and which appointment cutoff to protect.
 
 4. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
-- Each load: load#, customer, time, door, status, reason.
-- Severity rank: 1) Late CPU/Live 2) Picking/Short 3) Blank with near appointment 4) Blank Canadian / OC / Load-check flagged.
-- When time-group and severity conflict, place by highest real risk; stay consistent within the report.
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
-
-5. STAFFING CROSS-ANALYSIS
-- State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none.
-- ONLY place labor moves appear. Format: "Move ___ from ___ to ___ because ___." Show rate-math payoff when clean (no guessed completion times).
-- If no safe move: "No safe labor move from current staffing without creating another gap."
 
 6. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status before the 09:00 wave."
@@ -1705,7 +1698,7 @@ Example: "Lead by 08:15: Verify load 123456 at door 4, confirm short status befo
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3125,
+            max_completion_tokens=3300,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
