@@ -1599,7 +1599,7 @@ def analyze_board_with_groq(
 
     prompt = f"""You are an outbound warehouse shift manager. Data comes from Excel cells — treat it as accurate. Short bullets. No corporate fluff. Be direct, practical, specific. This is for operational execution.
 
-CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
+CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock. Is 9.5 working hours and 1 hour of breaks that we don't take into consideration for calculations.
 
 OPERATING PRIORITIES: 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
@@ -1673,16 +1673,16 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
-- Then: - Give one realistic shift goal (appointment times, pacing, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
+- Then: - Give one realistic shift goal (appointment times, working rates, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
 - State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none. - If no safe move: "No safe labor move from current staffing without creating another gap."
 - Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mentionother-day late loads. Include day, load#, time, door, what's happening.
 - State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
 - State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
-- Inbound: from VERIFIED INBOUND COUNTS only — total, by day, on lot vs at door. No plant pallet estimates.
+- Inbound: from VERIFIED INBOUND COUNTS only — total, by day, on lot vs at door. No plant pallet estimates. This is not pallets, are loads
 
 2. PICKING & SHORT RISK
 - State risk Low/Medium/High or future and why FOR TODAY.
-- State whether we can get ahead and which appointment cutoff to protect.
+- State if we can get ahead or how behind we will end the shift and which appointment time cutoff to have ready for this shift (be consistent with shift goal).
 
 3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
