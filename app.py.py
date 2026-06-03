@@ -1604,7 +1604,7 @@ CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock.
 OPERATING PRIORITIES (in order): 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
-- RTL = staged, ready to load. R/S = ready/short (waiting for product, not actionable).
+- RTL = ALREADY STAGED ON DOOR/DOCK, ready to load. R/S = ready/short (waiting for product, not actionable).
 - Picking = being picked. Picking/Short = inventory shortage while picking.
 - Loaded Short = trailer loaded but missing product. 
 - Late = missed/at-risk appointment. Completed/Complete = done. Loaded = done for pacing unless flagged.
@@ -1616,7 +1616,7 @@ RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/
 LABOR RULES:
 - Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Lead/Extra proactively.
 - Every move: source area → destination area → reason.
-- Only move from Lead/Extra or an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
+- Only move from Lead/Extra WHEN THERE IS AVAILABLE or from an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
 - If no safe move exists, say so clearly.
 
 RATE MATH RULES:
@@ -1669,7 +1669,7 @@ TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 -Don't include any output i dont ask for. 
 
 BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff + the single biggest threat to meeting expectations. No data dump.
-Example: "Behind 5 loads: should have 17 done by now, have 12. Target RTL all loads to 14:00. Move surplus labor to bottleneck."
+Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have RTL all loads to 14:00. Move surplus labor to bottleneck."
 
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
