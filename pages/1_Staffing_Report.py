@@ -2222,9 +2222,14 @@ def build_email_draft(
     # New path: the AI executive summary is the email body.
     if executive_summary_text and executive_summary_text.strip() \
             and not executive_summary_text.strip().lower().startswith("executive summary could not"):
+        # Strip leading markdown header hashes (### etc.) from the summary so the
+        # email body reads as plain text instead of showing "### 4. ...".
+        clean_summary = re.sub(
+            r"^#{1,6}\s*", "", executive_summary_text.strip(), flags=re.MULTILINE
+        )
         body = (
             "Good morning,\n\n"
-            f"{executive_summary_text.strip()}\n\n"
+            f"{clean_summary}\n\n"
             "The full staffing report and board analysis are attached.\n\n"
             "Thanks,"
         )
