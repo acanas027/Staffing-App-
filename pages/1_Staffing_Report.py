@@ -1901,12 +1901,11 @@ Rules:
 - If "Surplus labor available" is NO, do NOT suggest moving a worker as if one is free. State plainly that no safe internal move exists and that closing the gap requires overtime, an early 2nd-shift start, or borrowing labor.
 - Include exactly these sections, in this order:
   1. Bottom Line
-  2. One Decision Needed
-  3. Labor
+  2. Labor: How many workers x area and staffing status
   4. Workload / Capacity
-  5. Board / Outbound-Inbound
+  5. Board / Outbound : Summarize board by status
   6. Key Risks
-  7. Current Actions
+  7. Current Actions/Recomendations
 
 FACTS:
 {facts}
