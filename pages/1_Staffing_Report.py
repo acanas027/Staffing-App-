@@ -1903,7 +1903,7 @@ Rules:
 - Include exactly these sections, in this order:
   1. Bottom Line
   2. Labor: How many workers x area and staffing status
-  3. Workload / Capacity
+  3. Workload / Capacity. Always state capacity. Capacity = 185 x hours remaining x workers picking
   4. Board / Outbound : Summarize board by status. Mention how many inbounds for the day. 
   5. Key Risks
   6. Current Actions/Recomendations
