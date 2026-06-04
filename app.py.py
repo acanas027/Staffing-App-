@@ -1999,6 +1999,7 @@ def strip_markdown_for_email(text):
         return text
     text = text.replace("**", "")   # bold
     text = text.replace("__", "")   # bold (underscore form)
+    text = text.replace("##", "")
     return text
 
 def build_email_draft(
