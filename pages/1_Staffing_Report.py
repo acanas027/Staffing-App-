@@ -1908,6 +1908,10 @@ Rules:
   5. Key Risks
   6. Current Actions/Recomendations
 
+  FORMAT: Write every section as short, scannable bullet points starting with "- ".
+  Do NOT write paragraphs. One fact per bullet. Keep each bullet to a single short
+  sentence or fragment. No long prose blocks.
+
 FACTS:
 {facts}
 """
