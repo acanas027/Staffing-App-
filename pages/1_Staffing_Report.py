@@ -431,14 +431,59 @@ def build_summary(staff, needed):
     return present_recommendations, summary_table
 
 
+def compute_labor_availability(summary_table, present_recommendations):
+    """
+    Decide whether real surplus labor exists to reallocate.
+    Surplus = a task with positive Difference (overstaffed) OR workers parked
+    in Lead/Extra. If every task is at or below need and nobody is Lead/Extra,
+    there is NO safe move — pulling labor into one function only reopens a gap
+    in another. This is the source of truth for both the recommendation engine
+    and the AI summary, so neither suggests a phantom move.
+    """
+    lead_extra_count = int(
+        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
+    )
+
+    surplus_tasks = {}
+    short_tasks = {}
+    for task, row in summary_table.iterrows():
+        if task == "Lead/Extra":
+            continue  # counted via lead_extra_count
+        diff = int(row["Difference"])
+        if diff > 0:
+            surplus_tasks[task] = diff
+        elif diff < 0:
+            short_tasks[task] = diff
+
+    total_surplus = sum(surplus_tasks.values()) + lead_extra_count
+    total_short = sum(abs(v) for v in short_tasks.values())
+    net_gap = int(summary_table["Difference"].sum())
+
+    return {
+        "lead_extra_count": lead_extra_count,
+        "surplus_tasks": surplus_tasks,          # {task: +n}
+        "short_tasks": short_tasks,              # {task: -n}
+        "total_surplus_workers": total_surplus,
+        "total_short_workers": total_short,
+        "net_gap": net_gap,
+        "has_available_labor": total_surplus > 0,
+    }
+
+
 def build_recommendations(summary_table, present_recommendations, raw_needed, hours_remaining, notes):
     recommendations = []
+    availability     = compute_labor_availability(summary_table, present_recommendations)
+    surplus_tasks    = availability["surplus_tasks"]
+    lead_extra_count = availability["lead_extra_count"]
+    has_labor        = availability["has_available_labor"]
+
     total_labor_gap = int(summary_table["Difference"].sum())
     labor_hours_gap = total_labor_gap * hours_remaining
     recommendations.append(
         f"Current labor balance estimate: {labor_hours_gap:+.1f} labor-hours. "
         f"Positive means extra capacity; negative means short capacity."
     )
+
     for task, row in summary_table.iterrows():
         diff = int(row["Difference"])
         if diff < 0:
@@ -450,30 +495,47 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         else:
             recommendations.append(f"{task}: Staffing is balanced.")
 
-    picking_gap   = int(summary_table.loc["Picking",    "Difference"]) if "Picking"    in summary_table.index else 0
-    tasking_gap   = int(summary_table.loc["Tasking",    "Difference"]) if "Tasking"    in summary_table.index else 0
-    receiving_gap = int(summary_table.loc["Receiving",  "Difference"]) if "Receiving"  in summary_table.index else 0
-    unloading_gap = int(summary_table.loc["Unloading",  "Difference"]) if "Unloading"  in summary_table.index else 0
-    loading_gap   = int(summary_table.loc["Loading",    "Difference"]) if "Loading"    in summary_table.index else 0
-    lead_gap      = int(summary_table.loc["Lead/Extra", "Difference"]) if "Lead/Extra" in summary_table.index else 0
+    # --- No-bench headline -------------------------------------------------
+    if not has_labor and total_labor_gap < 0:
+        recommendations.append(
+            "No surplus labor available to reallocate. Every present worker is assigned and no area "
+            "is overstaffed, so moving labor into one function reopens a gap in another. Closing the "
+            "remaining gaps requires overtime, an early 2nd-shift start, or borrowing labor."
+        )
+
+    picking_gap   = int(summary_table.loc["Picking",   "Difference"]) if "Picking"   in summary_table.index else 0
+    tasking_gap   = int(summary_table.loc["Tasking",   "Difference"]) if "Tasking"   in summary_table.index else 0
+    receiving_gap = int(summary_table.loc["Receiving", "Difference"]) if "Receiving" in summary_table.index else 0
+    unloading_gap = int(summary_table.loc["Unloading", "Difference"]) if "Unloading" in summary_table.index else 0
+    loading_gap   = int(summary_table.loc["Loading",   "Difference"]) if "Loading"   in summary_table.index else 0
 
     if picking_gap < 0:
-        recommendations.append("High picking short risk detected. Consider moving tasking labor into replenishment to protect pickers.")
+        recommendations.append("High picking short risk detected.")
         recommendations.append("Avoid pulling pickers into unloading or loading unless outbound service is critical.")
         if tasking_gap > 0:
-            recommendations.append(f"Tasking currently has {tasking_gap} extra worker(s). Consider temporarily assigning them to replenishment.")
-        if lead_gap > 0:
-            recommendations.append("Lead/Extra capacity available. Consider flexing extra labor into replenishment or picking support.")
+            recommendations.append(f"Tasking has {tasking_gap} extra worker(s) — move into replenishment to protect pickers.")
+        elif lead_extra_count > 0:
+            recommendations.append(f"{lead_extra_count} Lead/Extra worker(s) available — flex into replenishment or picking support.")
+        else:
+            recommendations.append("No safe internal move to protect pickers — close the gap with overtime or an early 2nd-shift start.")
+
     if unloading_gap < 0 or receiving_gap < 0:
         recommendations.append("Inbound flow risk detected. Falling behind may create dock congestion and delayed putaway.")
-        recommendations.append("Consider moving flexible tasking labor into unloading or receiving temporarily.")
-        if tasking_gap > 1:
-            recommendations.append("Tasking has available labor that can support inbound operations.")
+        if tasking_gap > 0:
+            recommendations.append("Tasking has surplus labor that can temporarily support unloading or receiving.")
+        elif lead_extra_count > 0:
+            recommendations.append("Lead/Extra labor can temporarily support inbound.")
+        else:
+            recommendations.append("No surplus labor to support inbound without opening an outbound gap.")
+
     if loading_gap < 0:
         recommendations.append("Outbound loading risk detected. Late departures and service failures may increase.")
         recommendations.append("Protect loading labor before reallocating to non-critical work.")
-        if lead_gap > 0:
+        if lead_extra_count > 0:
             recommendations.append("Use Lead/Extra labor to support outbound staging or trailer cleanup.")
+        elif not has_labor:
+            recommendations.append("No surplus labor to add to loading — prioritize existing loaders on the earliest departures.")
+
     if total_labor_gap > 1:
         recommendations.append("Operation currently has excess labor capacity.")
         recommendations.append("Consider deep cleaning, trailer audits, replenishment cleanup, or cross-training.")
@@ -1708,6 +1770,160 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
         return f"Board analysis could not be completed: {str(e)}"
 
 
+def build_executive_summary_with_groq(
+    day, shift, total_cases, hours_remaining, total_outbound_loads_day,
+    board_text, summary_table, present_recommendations, availability,
+    oc_matches, notes, board_analysis_text=None,
+):
+    """
+    Second, lightweight Groq call on llama-3.3-70b-versatile.
+    Runs on a DIFFERENT model than the gpt-oss-120b board analysis, so it never
+    shares that model's per-minute token bucket. Fed Python-verified facts only,
+    so every number is exact and nothing is recomputed by the model.
+    """
+    client = get_groq_client()
+    if client is None:
+        return None  # caller falls back to the detailed body
+
+    try:
+        payload = json.loads(board_text)
+    except Exception:
+        payload = {}
+
+    py_out   = payload.get("python_verified_outbound_summary", {})
+    py_in    = payload.get("python_verified_inbound_summary", {})
+    py_today = payload.get("python_verified_today_totals", {})
+    all_rows = payload.get("all_outbound_rows", [])
+
+    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining)
+
+    picks_left = py_today.get("picks_left_today")
+    pulls_left = py_today.get("pulls_left_today")
+
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    net_gap        = total_assigned - total_needed
+    labor_hours_gap = net_gap * hours_remaining
+
+    staffing_lines = []
+    for task, row in summary_table.iterrows():
+        staffing_lines.append(
+            f"{task}: need {int(row['Needed'])}, assigned {int(row['Assigned'])}, "
+            f"gap {int(row['Difference'])} ({row['Status']})"
+        )
+    staffing_block = "\n".join(staffing_lines)
+
+    # Labor availability stated as a hard fact so the model can't invent a free body.
+    if availability["has_available_labor"]:
+        bench = []
+        if availability["surplus_tasks"]:
+            bench.append(", ".join(f"{t} +{n}" for t, n in availability["surplus_tasks"].items()))
+        if availability["lead_extra_count"] > 0:
+            bench.append(f"Lead/Extra {availability['lead_extra_count']}")
+        availability_fact = f"Surplus labor available: YES ({'; '.join(bench)}). A safe internal move exists."
+    else:
+        availability_fact = (
+            "Surplus labor available: NO. Every present worker is assigned and no area is overstaffed. "
+            "Any move into one function reopens a gap in another. Closing gaps requires overtime, an "
+            "early 2nd-shift start, or borrowing labor. Do NOT suggest moving a worker as if one is free."
+        )
+
+    if oc_matches:
+        oc_str = "; ".join(
+            f"{m['customer']['name'].upper()} [{m['customer']['priority']}]"
+            + (" — sign-off required" if m['customer'].get('sign_off') else "")
+            + (" — photos required" if m['customer'].get('pictures') else "")
+            for m in oc_matches
+        )
+    else:
+        oc_str = "none on today's board"
+
+    onlot_atdoor = (py_in.get("on_lot", 0) or 0) + (py_in.get("at_door", 0) or 0)
+    inbound_fact = (
+        f"Total inbound loads: {py_in.get('loads_read_from_inbound', 'not provided')}; "
+        f"Live: {py_in.get('live_loads', 'not provided')}; "
+        f"Drop: {py_in.get('drop_loads', 'not provided')}; "
+        f"On lot/at door: {onlot_atdoor}"
+    )
+
+    board_fact = (
+        f"Outbound loads today: {pacing.get('selected_day_total_loads', 'not provided')}; "
+        f"Completed: {pacing.get('completed_count', 0)}; Loaded: {pacing.get('loaded_count', 0)}; "
+        f"RTL: {py_out.get('rtl_loads', 0)}; R/S: {py_out.get('rs_loads', 0)}; "
+        f"Picking/Short: {py_out.get('picking_short_loads', 0)}; Picking: {py_out.get('picking_loads', 0)}; "
+        f"Blank/Not started: {py_out.get('blank_or_not_started_loads', 0)}; "
+        f"Pacing: {pacing.get('pacing', 'not provided')}; "
+        f"Due by now: {pacing.get('due_by_now', 0)}; Due not done: {pacing.get('due_not_done', 0)}; "
+        f"Estimated current time: {pacing.get('estimated_current_time', 'not provided')}"
+    )
+
+    facts = f"""DAY/SHIFT: {day} {shift} | Total cases: {total_cases:,} | Hours remaining: {hours_remaining}
+
+STATUS / PACING (Python-verified — use exactly as given):
+{board_fact}
+
+LABOR (Python-verified):
+Present: {total_present} | Needed: {total_needed} | Assigned: {total_assigned} | Net gap: {net_gap:+d} people = {labor_hours_gap:+.1f} labor-hours
+Per function:
+{staffing_block}
+{availability_fact}
+
+WORKLOAD / CAPACITY (Python-verified):
+Picks left: {picks_left if picks_left is not None else 'not provided'} | Pulls left: {pulls_left if pulls_left is not None else 'not provided'} | Hours left: {hours_remaining}
+
+INBOUND (Python-verified):
+{inbound_fact}
+
+OPPORTUNITY CUSTOMERS: {oc_str}
+
+OPERATIONS NOTES: {notes.strip() or 'none'}
+"""
+
+    if board_analysis_text:
+        facts += (
+            "\nDETAILED BOARD ANALYSIS (narrative context only — prioritization and threats; "
+            "if any number here conflicts with the verified facts above, the facts above win):\n"
+            f"{board_analysis_text}\n"
+        )
+
+    prompt = f"""You are summarizing a warehouse staffing and board analysis for an experienced DC Manager.
+Create a concise executive email summary.
+
+Rules:
+- Do not repeat the full report.
+- Do not explain basic warehouse terms.
+- Focus on status, constraint, labor gap, board risk, recommendation, and decision needed.
+- Keep it professional and direct.
+- Keep it under one page.
+- Do not invent numbers. Use only the facts provided below.
+- If a number is missing from the facts, write "not provided".
+- If "Surplus labor available" is NO, do NOT suggest moving a worker as if one is free. State plainly that no safe internal move exists and that closing the gap requires overtime, an early 2nd-shift start, or borrowing labor.
+- Include exactly these sections, in this order:
+  1. Bottom Line
+  2. One Decision Needed
+  3. Labor
+  4. Workload / Capacity
+  5. Board / Outbound-Inbound
+  6. Key Risks
+  7. Current Actions
+
+FACTS:
+{facts}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_completion_tokens=1200,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Executive summary could not be generated: {e}"
+
+
 def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     sheet_name = "Board Analysis"
     if sheet_name in wb.sheetnames:
@@ -1992,18 +2208,33 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
 
 
 # ============================================================
-#  EMAIL DRAFT — OC section is brief (name + priority only)
+#  EMAIL DRAFT
+#  When an AI executive summary exists, it IS the email body and the full
+#  workbook stays as the attachment. Otherwise fall back to the detailed body.
 # ============================================================
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
-    board_analysis_text=None, oc_matches=None,
+    board_analysis_text=None, oc_matches=None, executive_summary_text=None,
 ):
+    subject = f"{day} {shift} Shift – Staffing & Board Summary"
+
+    # New path: the AI executive summary is the email body.
+    if executive_summary_text and executive_summary_text.strip() \
+            and not executive_summary_text.strip().lower().startswith("executive summary could not"):
+        body = (
+            "Good morning,\n\n"
+            f"{executive_summary_text.strip()}\n\n"
+            "The full staffing report and board analysis are attached.\n\n"
+            "Thanks,"
+        )
+        return subject, body
+
+    # Fallback: original detailed body (e.g. if Groq is unavailable).
     total_present  = len(present_recommendations)
     total_needed   = int(summary_table["Needed"].sum())
     total_assigned = int(summary_table["Assigned"].sum())
     overall_gap    = total_assigned - total_needed
-    subject        = f"{day} {shift} Shift Staffing Report"
 
     staffing_lines = []
     for task, row in summary_table.iterrows():
@@ -2346,6 +2577,10 @@ if st.button("Generate Staffing Report"):
         summary_table, present_recommendations, raw_needed, hours_remaining, notes
     )
 
+    # Labor availability used by both the recommendations above and the AI summary.
+    availability = compute_labor_availability(summary_table, present_recommendations)
+    executive_summary_text = None
+
     wb = load_workbook(working_file)
     write_recommendations_to_excel(wb, staff, shift)
 
@@ -2386,6 +2621,21 @@ if st.button("Generate Staffing Report"):
             )
 
             write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
+
+            executive_summary_text = build_executive_summary_with_groq(
+                day=day,
+                shift=shift,
+                total_cases=total_cases,
+                hours_remaining=hours_remaining,
+                total_outbound_loads_day=total_outbound_loads_day,
+                board_text=board_text,
+                summary_table=summary_table,
+                present_recommendations=present_recommendations,
+                availability=availability,
+                oc_matches=oc_matches,
+                notes=notes,
+                board_analysis_text=board_analysis_text,
+            )
 
     build_dashboard(wb, summary_table, present_recommendations, recommendations, oc_matches=oc_matches)
 
@@ -2447,6 +2697,11 @@ if st.button("Generate Staffing Report"):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+    if executive_summary_text:
+        st.markdown("---")
+        st.subheader("Executive Summary (Email Body)")
+        st.markdown(executive_summary_text)
+
     email_subject, email_body = build_email_draft(
         day=day,
         shift=shift,
@@ -2458,6 +2713,7 @@ if st.button("Generate Staffing Report"):
         recommendations=recommendations,
         board_analysis_text=board_analysis_text,
         oc_matches=oc_matches,
+        executive_summary_text=executive_summary_text,
     )
 
     st.markdown("---")
