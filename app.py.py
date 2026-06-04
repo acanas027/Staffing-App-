@@ -1605,7 +1605,8 @@ CONTEXT: High-volume grocery DC. 1st shift 06:00-16:30. 24-hour clock. Is 9.5 wo
 OPERATING PRIORITIES: 1) Prevent shorts. 2) Protect departures. 3) Protect picking flow. 4) Protect inbound flow. 5) Use proactive labor early. 6) Set up 2nd shift.
 
 STATUS DEFINITIONS:
-- RTL = ALREADY STAGED ON DOOR, ready to load. R/S = ready/short (waiting for product, not actionable).
+- RTL = ALREADY STAGED ON DOOR, ready to load 9if its RTL and appointment time has passed means driver is not here, we can't load, no actionable).
+- R/S = ready/short (waiting for product, not actionable).
 - Picking = being picked. Picking/Short = inventory shortage, picking.
 - Loaded Short = trailer loaded but missing product. 
 - Late = missed appointment. Completed = done. Loaded = done for pacing.
@@ -1618,7 +1619,7 @@ RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/
 LABOR RULES:
 - Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Extra proactively.
 - Every move: source area → destination area → reason.
-- Only move from Lead/Extra WHEN THERE IS AVAILABLE or from an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
+- Only suggest to move Lead/Extra WHEN THERE IS AVAILABLE or from an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
 - If no safe move exists, say so clearly.
 
 RATE MATH RULES:
