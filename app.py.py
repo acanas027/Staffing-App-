@@ -1675,10 +1675,9 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
+- Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mention other-day late loads. Include day, load#, time, door, what's happening.
 - Then: - Give one realistic shift goal (appointment times, working rates, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
 - State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none. - If no safe move: "No safe labor move from current staffing without creating another gap."
-- Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mentionother-day late loads. Include day, load#, time, door, what's happening.
-- State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
 - State pacing (ahead/on track/behind) from the guardrail. State pulls left and picks left.
 - Inbound: from VERIFIED INBOUND COUNTS only — total, by day, on lot vs at door. No plant pallet estimates. This is not pallets, are loads
 
