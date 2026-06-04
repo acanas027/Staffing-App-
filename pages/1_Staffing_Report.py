@@ -38,7 +38,7 @@ if not os.path.exists(TEMPLATE_FILE):
 #    E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
 #    H: Pictures (Y/N)   I: Other (Y/N)
 # ============================================================
-OC_FILE = "Resers DCs Opportunity Cusotmer List.xlsx"
+OC_FILE = "Resers DCs Opportunity Customer List.xlsx"
 OC_SHEET = "OC Customer List"
 OC_HEADER_ROW = 6
 OC_DATA_START = 8
