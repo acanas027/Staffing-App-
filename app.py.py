@@ -1993,6 +1993,13 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
 # ============================================================
 #  EMAIL DRAFT — OC section is brief (name + priority only)
 # ============================================================
+def strip_markdown_for_email(text):
+    if not text:
+        return text
+    text = text.replace("**", "")   # bold
+    text = text.replace("__", "")   # bold (underscore form)
+    return text
+
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
@@ -2057,7 +2064,7 @@ The full staffing report is attached.
 
 Thanks,
 """
-    return subject, body.strip()
+    return subject, strip_markdown_for_email(body.strip())
 
 
 # ============================================================
