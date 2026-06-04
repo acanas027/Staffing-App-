@@ -1752,8 +1752,9 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
 
 4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
-- Give specific actionable actions to keep the operations on time, put os back on track or get us ahead.
+- Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
 - No vague verbs unless tied to a specific deadline and load. Don't repeat a 30-min action in the 2-hr block.
+- Don't invent actions and don't tell to move workers from extra to a function if there is no extra (bench).
 """
 
     try:
