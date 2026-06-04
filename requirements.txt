@@ -6,3 +6,4 @@ openpyxl
 pillow
 pytesseract
 openai
+xlrd
