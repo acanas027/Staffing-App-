@@ -2750,6 +2750,39 @@ Thanks,
 #  Generates the final organized report as PDF instead of Excel.
 # ============================================================
 
+
+def clean_pdf_text(value):
+    """Clean AI/Markdown text so the PDF prints plain readable text only."""
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    replacements = {
+        "—": "-", "–": "-", "−": "-", "‐": "-", "‑": "-",
+        "→": "->", "≤": "<=", "≥": ">=",
+        "•": "-", "▪": "-", "■": "-", "●": "-", "·": "-",
+        "“": '"', "”": '"', "‘": "'", "’": "'",
+        "\u00a0": " ",
+    }
+
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+
+    # Remove markdown artifacts that should not print in the PDF.
+    text = re.sub(r"^\s*#{1,6}\s*", "", text)
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("###", "").replace("####", "")
+    text = text.replace("---", "")
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+
+    # Normalize bullet starters and extra spaces.
+    text = re.sub(r"^\s*[-*]+\s*", "", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
 def pdf_safe(value):
     """Clean text for ReportLab paragraphs."""
     if value is None:
