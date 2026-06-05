@@ -515,11 +515,10 @@ def write_tt4_alerts_to_excel(wb, tt4_matches):
     ws["A1"].font = Font(size=16, bold=True, color=white)
     ws["A1"].fill = PatternFill("solid", fgColor=orange)
     ws["A1"].alignment = Alignment(horizontal="center")
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:D1")
 
     headers = [
-        "Load #", "Customer", "Carrier", "Appt Time", "Door",
-        "Trailer", "Status", "Type", "TT4 Value / Flag", "Required Action"
+        "Load #", "Customer", "Time / Status", "Required Action"
     ]
 
     for col, header in enumerate(headers, 1):
@@ -531,10 +530,6 @@ def write_tt4_alerts_to_excel(wb, tt4_matches):
         cell.border = border
 
     for row_idx, match in enumerate(tt4_matches, 4):
-        tt4_source = match.get("tt4", "")
-        if not tt4_source and "TT4-NEEDED" in (match.get("flags") or []):
-            tt4_source = "TT4-NEEDED flag"
-
         action = (
             f"Verify TT4 requirement is completed for load {match.get('load', '')} "
             f"before this load ships."
@@ -543,13 +538,7 @@ def write_tt4_alerts_to_excel(wb, tt4_matches):
         values = [
             match.get("load", ""),
             match.get("customer", ""),
-            match.get("carrier", ""),
-            match.get("time", ""),
-            match.get("door", ""),
-            match.get("trailer", ""),
-            match.get("status", ""),
-            match.get("type", ""),
-            tt4_source,
+            f"{match.get('time', '')} / {match.get('status', '')}",
             action,
         ]
 
@@ -561,7 +550,7 @@ def write_tt4_alerts_to_excel(wb, tt4_matches):
             if row_idx % 2 == 0:
                 cell.fill = PatternFill("solid", fgColor=light_orange)
 
-    widths = [14, 30, 18, 12, 10, 18, 16, 18, 22, 65]
+    widths = [14, 36, 22, 70]
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -3085,15 +3074,7 @@ if st.button("Generate Staffing Report"):
                 expanded=True,
             ):
                 st.markdown(f"**Customer:** {match.get('customer', '')}")
-                st.markdown(f"**Carrier:** {match.get('carrier', '')}")
-                st.markdown(f"**Time / Door / Status:** {match.get('time', '')} / {match.get('door', '')} / {match.get('status', '')}")
-                st.markdown(f"**Trailer / Type:** {match.get('trailer', '')} / {match.get('type', '')}")
-                tt4_source = match.get("tt4", "")
-                if not tt4_source and "TT4-NEEDED" in (match.get("flags") or []):
-                    tt4_source = "TT4-NEEDED flag"
-                st.markdown(f"**TT4 Indicator:** {tt4_source}")
-                if match.get("comments"):
-                    st.markdown(f"**Comments:** {match.get('comments', '')}")
+                st.markdown(f"**Time / Status:** {match.get('time', '')} / {match.get('status', '')}")
                 st.markdown(
                     f"**Required Action:** Verify TT4 requirement is completed for load "
                     f"{match.get('load', '')} before this load ships."
