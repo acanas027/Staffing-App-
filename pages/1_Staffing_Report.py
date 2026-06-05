@@ -3583,24 +3583,22 @@ def compute_recommended_allocation(
 
     total_present = len(present_recommendations)
 
-    # IMPORTANT:
-    # The Recommended Allocation pop-up must match the Staffing Summary that the app
-    # generates from the actual worker-by-worker recommendation engine.
-    # Do NOT recalculate or redistribute these counts separately, because that can make
-    # the pop-up disagree with the Staffing Summary table.
+    # Source of truth for the pop-up: use the exact same Staffing Summary
+    # that the report uses. This keeps the pre-report table and the final
+    # Staffing Summary matched 1-for-1.
     recommended_counts = {
         task: int(summary_table.loc[task, "Assigned"]) if task in summary_table.index else 0
         for task in task_order
     }
-
+    total_recommended = sum(recommended_counts.values())
     lead_extra = int(
         (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
     )
-    total_recommended = sum(recommended_counts.values())
 
     return {
         "needed": needed,
         "recommended_counts": recommended_counts,
+        "recommended_summary_table": summary_table.copy(),
         "total_present": total_present,
         "total_recommended": total_recommended,
         "short_by": max(0, int(pd.Series(needed).sum()) - total_present),
@@ -4065,7 +4063,7 @@ if reco:
     }
     rc = reco["recommended_counts"]
 
-    st.subheader("Recommended Allocation")
+    st.subheader("Staffing Summary")
     short_by = int(reco.get("short_by", 0))
     bench_text = (
         f"Short versus recommended need: {short_by}." if short_by > 0
@@ -4076,10 +4074,16 @@ if reco:
         f"{bench_text} "
         "If you change any input on the left, click Compute again to refresh."
     )
-    reco_df = pd.DataFrame(
-        [{"Position": label_map[t], "Recommended": int(rc.get(t, 0))} for t in task_order]
-    )
-    st.table(reco_df)
+
+    reco_summary_table = reco.get("recommended_summary_table")
+    if reco_summary_table is not None:
+        st.dataframe(reco_summary_table, use_container_width=True)
+    else:
+        # Fallback only, in case an old session_state object is still cached.
+        reco_df = pd.DataFrame(
+            [{"Position": label_map[t], "Recommended": int(rc.get(t, 0))} for t in task_order]
+        )
+        st.table(reco_df)
 
     choice = st.radio(
         "Are you running this recommended allocation?",
