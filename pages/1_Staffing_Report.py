@@ -3583,12 +3583,20 @@ def compute_recommended_allocation(
 
     total_present = len(present_recommendations)
 
-    # Build the pop-up allocation so it can NEVER recommend more workers than are present.
-    # It still protects the operational rule of 2 Unloaders and 2 Receivers when enough
-    # people are present, then spreads the remaining shortage across Picking / Tasking / Loading.
-    recommended_counts = allocate_recommended_counts_to_present(needed, total_present)
+    # IMPORTANT:
+    # The Recommended Allocation pop-up must match the Staffing Summary that the app
+    # generates from the actual worker-by-worker recommendation engine.
+    # Do NOT recalculate or redistribute these counts separately, because that can make
+    # the pop-up disagree with the Staffing Summary table.
+    recommended_counts = {
+        task: int(summary_table.loc[task, "Assigned"]) if task in summary_table.index else 0
+        for task in task_order
+    }
+
+    lead_extra = int(
+        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
+    )
     total_recommended = sum(recommended_counts.values())
-    lead_extra = max(0, total_present - total_recommended)
 
     return {
         "needed": needed,
