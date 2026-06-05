@@ -1732,7 +1732,7 @@ TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 ===== OUTPUT =====
 -Don't include any output i dont ask for. 
 
-BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff (use actual appointment times from today's board + the single biggest threat to meeting expectations. No data dump.
+BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff (use actual appointment times from today's board) + the single biggest threat to meeting expectations. No data dump.
 Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have RTL all loads to 14:00. Move surplus labor to bottleneck."
 
 1. BOARD SUMMARY
@@ -1746,11 +1746,11 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 2. PICKING & SHORT RISK
 - State risk Low/Medium/High or future and why FOR TODAY.
-- State if we can get ahead or how behind we will end the shift and which appointment time cutoff to have ready for this shift (be consistent with shift goal).
+- State if we can get ahead or how behind we will end the shift and which appointment time cutoff (use actual appointment times from today's board) to have ready for this shift (be consistent with shift goal).
 
 3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
-- If we are running behind and we have loads that are drops and from a reser's customer (priority 4) that have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
+- If we are running behind and we have loads that are DROPS from a reser's customer (priority 4) State that if have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
 
 4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 - Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
