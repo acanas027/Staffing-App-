@@ -3466,6 +3466,75 @@ def build_pdf_report(
     buffer.seek(0)
     return buffer.getvalue()
 
+def allocate_recommended_counts_to_present(needed, total_present):
+    """
+    Return a recommended allocation that always sums to the number of present workers.
+
+    Rules:
+    - Never recommend more workers than are present.
+    - Keep the operational minimum of 2 Unloaders and 2 Receivers whenever possible.
+    - If total need is lower than present, keep needed counts and leave the rest as bench/extra.
+    - If total need is higher than present, protect Unloading/Receiving first, then distribute
+      the remaining shortage proportionally across Picking, Tasking, and Loading.
+    """
+    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+    total_present = int(total_present or 0)
+    need = {task: max(0, int(needed.get(task, 0))) for task in task_order}
+    total_need = sum(need.values())
+
+    if total_present <= 0:
+        return {task: 0 for task in task_order}
+
+    # If we have enough people to cover the full calculated need, show the full need.
+    # Extra workers remain bench/extra and are not forced into the function table.
+    if total_present >= total_need:
+        return need
+
+    allocation = {task: 0 for task in task_order}
+
+    # Protect the fixed minimum areas first, but never exceed present headcount.
+    for task in ["Unloading", "Receiving"]:
+        give = min(2, need.get(task, 0), total_present - sum(allocation.values()))
+        allocation[task] = max(0, give)
+
+    remaining_people = total_present - sum(allocation.values())
+    flexible_tasks = ["Picking", "Tasking", "Loading"]
+    flexible_need = {task: need.get(task, 0) for task in flexible_tasks}
+    total_flexible_need = sum(flexible_need.values())
+
+    if remaining_people <= 0 or total_flexible_need <= 0:
+        return allocation
+
+    # Proportional first pass.
+    raw = {task: (remaining_people * flexible_need[task] / total_flexible_need) for task in flexible_tasks}
+    for task in flexible_tasks:
+        allocation[task] = min(flexible_need[task], int(raw[task]))
+
+    # Give leftover workers to the largest fractional / highest need gaps until the total matches present.
+    while sum(allocation.values()) < total_present:
+        candidates = [
+            task for task in flexible_tasks
+            if allocation[task] < flexible_need[task]
+        ]
+        if not candidates:
+            break
+        candidates.sort(
+            key=lambda task: (raw[task] - int(raw[task]), flexible_need[task] - allocation[task], flexible_need[task]),
+            reverse=True,
+        )
+        allocation[candidates[0]] += 1
+
+    # Safety trim in case future edits ever over-allocate. Trim from flexible areas first.
+    while sum(allocation.values()) > total_present:
+        candidates = [task for task in flexible_tasks if allocation[task] > 0]
+        if not candidates:
+            break
+        candidates.sort(key=lambda task: allocation[task], reverse=True)
+        allocation[candidates[0]] -= 1
+
+    return {task: int(allocation.get(task, 0)) for task in task_order}
+
+
 def compute_recommended_allocation(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     crossroads_open, deer_creek_open, msb_open, present_workers, board_file=None,
@@ -3512,15 +3581,12 @@ def compute_recommended_allocation(
 
     task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
 
-    # The recommendation pop-up should show the operational NEED by function,
-    # not the number the skill-based assignment was able to fill with the people present.
-    # This keeps the pop-up aligned with the Staffing Summary "Needed" column and
-    # preserves the minimum rule: 2 Unloaders and 2 Receivers.
-    recommended_counts = {
-        t: int(needed.get(t, 0))
-        for t in task_order
-    }
     total_present = len(present_recommendations)
+
+    # Build the pop-up allocation so it can NEVER recommend more workers than are present.
+    # It still protects the operational rule of 2 Unloaders and 2 Receivers when enough
+    # people are present, then spreads the remaining shortage across Picking / Tasking / Loading.
+    recommended_counts = allocate_recommended_counts_to_present(needed, total_present)
     total_recommended = sum(recommended_counts.values())
     lead_extra = max(0, total_present - total_recommended)
 
@@ -3529,7 +3595,7 @@ def compute_recommended_allocation(
         "recommended_counts": recommended_counts,
         "total_present": total_present,
         "total_recommended": total_recommended,
-        "short_by": max(0, total_recommended - total_present),
+        "short_by": max(0, int(pd.Series(needed).sum()) - total_present),
         "lead_extra": lead_extra,
     }
 
