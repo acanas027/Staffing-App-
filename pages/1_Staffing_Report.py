@@ -401,7 +401,7 @@ def write_crossdock_alerts_to_excel(wb, crossdock_matches):
     for row_idx, match in enumerate(crossdock_matches, 4):
         action = (
             f"Verify {match.get('pallets', 0)} pallet(s) located at {match.get('location', '')} "
-            f"are 100% on load {match.get('load', '')} before this load ships."
+            f"are on load {match.get('load', '')} before this load ships."
         )
         values = [
             match.get("load", ""),
