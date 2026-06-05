@@ -2750,14 +2750,48 @@ Thanks,
 #  Generates the final organized report as PDF instead of Excel.
 # ============================================================
 
-def pdf_safe(value):
-    """Clean text for ReportLab paragraphs."""
+def clean_pdf_text(value):
+    """Clean AI/Markdown text so the PDF prints plain readable text only."""
     if value is None:
         return ""
+
     text = str(value)
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = text.replace("—", "-").replace("–", "-").replace("→", "->")
+
+    replacements = {
+        "—": "-", "–": "-", "−": "-", "‐": "-", "‑": "-",
+        "→": "->", "≤": "<=", "≥": ">=",
+        "•": "-", "▪": "-", "■": "-", "●": "-", "·": "-",
+        "“": '"', "”": '"', "‘": "'", "’": "'",
+        " ": " ",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+
+    # Remove markdown artifacts that were showing in the PDF.
+    text = re.sub(r"^\s*#{1,6}\s*", "", text)
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("###", "").replace("####", "")
+    text = text.replace("---", "")
+    text = re.sub(r"`([^`]*)`", r"", text)
+
+    # Normalize bullets/dashes without creating weird glyphs.
+    text = re.sub(r"^\s*[-*]+\s*", "", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def pdf_safe(value):
+    """Clean and HTML-escape text for ReportLab paragraphs."""
+    text = clean_pdf_text(value)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return text
+
+
+def pdf_cell(value, style):
+    """Create a wrapping PDF table cell so long names/actions do not collide."""
+    if isinstance(value, Paragraph):
+        return value
+    return Paragraph(pdf_safe(value), style)
 
 
 def pdf_number(value, default=0):
@@ -2867,24 +2901,29 @@ def pdf_add_footer(canvas, doc):
 
 
 def pdf_table(data, col_widths=None, header_fill="#0F5B78"):
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    wrapped = []
+    for r, row in enumerate(data):
+        wrapped_row = []
+        for value in row:
+            style = _PDF_STYLES_FOR_TABLE["HeaderCell"] if r == 0 else _PDF_STYLES_FOR_TABLE["TableCell"]
+            wrapped_row.append(pdf_cell(value, style))
+        wrapped.append(wrapped_row)
+
+    table = Table(wrapped, colWidths=col_widths, repeatRows=1, hAlign="LEFT", splitByRow=1)
     style = TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTSIZE", (0, 1), (-1, -1), 7.5),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ])
     table.setStyle(style)
     return table
-
 
 def pdf_paragraph_list(items, styles):
     story = []
@@ -2896,27 +2935,55 @@ def pdf_paragraph_list(items, styles):
 
 
 def extract_ai_shift_goal(board_analysis_text):
-    """Pull the Shift goal line from the AI board analysis for the PDF headline."""
+    """Pull and shorten the Shift goal line from the AI board analysis."""
     text = str(board_analysis_text or "")
     if not text.strip():
         return ""
 
     lines = [line.strip() for line in text.splitlines()]
+    goal = ""
+
     for i, line in enumerate(lines):
-        clean = re.sub(r"^[#\-*\s]+", "", line).strip()
+        clean = clean_pdf_text(line)
         if re.search(r"shift\s*goal", clean, flags=re.IGNORECASE):
-            # Handles: **Shift goal:** Pick and stage...
-            clean = re.sub(r"\*", "", clean).strip()
             parts = re.split(r":", clean, maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
-                return parts[1].strip()
-            # Handles a title line followed by the actual goal.
-            for nxt in lines[i + 1:i + 4]:
-                nxt_clean = re.sub(r"^[#\-*\s]+", "", nxt).replace("**", "").strip()
-                if nxt_clean and not re.search(r"shift\s*goal", nxt_clean, flags=re.IGNORECASE):
-                    return nxt_clean
-    return ""
+                goal = parts[1].strip()
+            else:
+                for nxt in lines[i + 1:i + 4]:
+                    nxt_clean = clean_pdf_text(nxt)
+                    if nxt_clean and not re.search(r"shift\s*goal", nxt_clean, flags=re.IGNORECASE):
+                        goal = nxt_clean
+                        break
+            break
 
+    if not goal:
+        return ""
+
+    # Keep only the operational goal sentence, not the explanation after it.
+    goal = re.split(r"(?<=[.!?])\s+", goal)[0].strip()
+
+    # Make the wording concise and direct.
+    goal = re.sub(r"\b[Pp]ick and stage\b", "Pick & stage", goal)
+    goal = re.sub(r"\b[Pp]ick/stage\b", "Pick & stage", goal)
+    goal = re.sub(r"\b[Pp]icked and staged\b", "picked & staged", goal)
+    goal = re.sub(r"\bappointment\s*<=\s*", "appointment <= ", goal)
+    goal = re.sub(r"\bappointment\s*<\s*=\s*", "appointment <= ", goal)
+
+    # If AI gave the exact target form, keep only that phrase.
+    m = re.search(
+        r"(Pick\s*&\s*stage\s+every\s+load\s+with\s+appointment\s*<=\s*\d{1,2}:\d{2}\s*\([^)]*loads?\)\s+by\s+[^.]+)",
+        goal,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        goal = m.group(1).strip()
+
+    # Avoid long first-page block; keep the headline readable.
+    if len(goal) > 150:
+        goal = goal[:147].rstrip(" ,;:-") + "..."
+
+    return goal
 
 def extract_ai_prioritization_lines(board_analysis_text):
     """Return only the AI prioritization section. No Python-generated priority list."""
@@ -2952,34 +3019,37 @@ def extract_ai_prioritization_lines(board_analysis_text):
 
     cleaned = []
     for line in output:
-        clean = line.strip()
-        clean = clean.replace("###", "").replace("####", "")
-        clean = clean.replace("**", "")
-        clean = clean.replace("---", "")
-        clean = clean.strip()
+        clean = clean_pdf_text(line)
+        # Remove section numbering/markdown labels that add noise in the PDF.
+        clean = re.sub(r"^\d+\.\s*", "", clean).strip()
         if clean:
             cleaned.append(clean)
     return cleaned
 
 
 def pdf_alert_table(data, col_widths=None, header_fill="#0F5B78", header_text="#000000"):
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    wrapped = []
+    for r, row in enumerate(data):
+        wrapped_row = []
+        for value in row:
+            style = _PDF_STYLES_FOR_TABLE["HeaderCell"] if r == 0 else _PDF_STYLES_FOR_TABLE["AlertCell"]
+            wrapped_row.append(pdf_cell(value, style))
+        wrapped.append(wrapped_row)
+
+    table = Table(wrapped, colWidths=col_widths, repeatRows=1, hAlign="LEFT", splitByRow=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(header_text)),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTSIZE", (0, 1), (-1, -1), 7.2),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
     return table
-
 
 def build_pdf_report(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
@@ -3033,6 +3103,13 @@ def build_pdf_report(
             borderColor=colors.HexColor("#B7B7B7"), borderPadding=6,
             backColor=colors.HexColor("#F7F9FB"), spaceAfter=6,
         ),
+    }
+
+    global _PDF_STYLES_FOR_TABLE
+    _PDF_STYLES_FOR_TABLE = {
+        "HeaderCell": ParagraphStyle("HeaderCell", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=7.2, leading=8.5, textColor=colors.white),
+        "TableCell": ParagraphStyle("TableCell", parent=base["Normal"], fontSize=7.2, leading=8.8, textColor=colors.black),
+        "AlertCell": ParagraphStyle("AlertCell", parent=base["Normal"], fontSize=6.7, leading=8.2, textColor=colors.black),
     }
 
     story = []
@@ -3141,9 +3218,9 @@ def build_pdf_report(
                 pdf_safe(m.get("customer_on_board") or m.get("oc_name", "")),
                 pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
                 pdf_safe(m.get("priority", "")),
-                Paragraph(pdf_safe(" ".join(actions) if actions else "Special handling required per OC list."), styles["Tiny"]),
+                " ".join(actions) if actions else "Special handling required per OC list.",
             ])
-        story.append(pdf_alert_table(data, [0.75*inch, 1.55*inch, 1.1*inch, 0.7*inch, 3.2*inch], header_fill="#FFD966", header_text="#000000"))
+        story.append(pdf_alert_table(data, [0.7*inch, 1.65*inch, 1.05*inch, 0.65*inch, 3.3*inch], header_fill="#FFD966", header_text="#000000"))
     elif oc_matches:
         story.append(Paragraph("OC customers were detected in the board data. Load-level detail was not available from the current OC matching function.", styles["BodySmall"]))
         for match in oc_matches:
@@ -3172,9 +3249,9 @@ def build_pdf_report(
                 pdf_safe(m.get("customer", "")),
                 pdf_safe(m.get("pallets", 0)),
                 pdf_safe(m.get("location", "")),
-                Paragraph(pdf_safe(action), styles["Tiny"]),
+                action,
             ])
-        story.append(pdf_alert_table(data, [0.62*inch, 1.2*inch, 0.88*inch, 1.2*inch, 0.5*inch, 0.7*inch, 2.2*inch], header_fill="#A9D18E", header_text="#000000"))
+        story.append(pdf_alert_table(data, [0.55*inch, 1.25*inch, 0.9*inch, 1.15*inch, 0.42*inch, 0.65*inch, 2.43*inch], header_fill="#A9D18E", header_text="#000000"))
     else:
         story.append(Paragraph("No Cross Dock pallets matched today's board loads, or no Cross Dock sheet was uploaded.", styles["BodySmall"]))
 
@@ -3188,9 +3265,9 @@ def build_pdf_report(
                 pdf_safe(m.get("load", "")),
                 pdf_safe(m.get("customer", "")),
                 pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
-                Paragraph(pdf_safe(action), styles["Tiny"]),
+                action,
             ])
-        story.append(pdf_alert_table(data, [0.8*inch, 2.45*inch, 1.2*inch, 2.9*inch], header_fill="#C00000", header_text="#FFFFFF"))
+        story.append(pdf_alert_table(data, [0.75*inch, 2.6*inch, 1.15*inch, 2.85*inch], header_fill="#C00000", header_text="#FFFFFF"))
     else:
         story.append(Paragraph("No TT4-required loads detected on today's board.", styles["BodySmall"]))
 
