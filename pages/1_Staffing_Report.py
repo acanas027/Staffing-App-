@@ -2761,13 +2761,17 @@ def clean_pdf_text(value):
     replacements = {
         "—": "-", "–": "-", "−": "-", "‐": "-", "‑": "-",
         "→": "->", "≤": "<=", "≥": ">=",
-        "•": "-", "▪": "-", "■": "-", "●": "-", "·": "-",
+        "•": "-", "▪": "-", "■": "-", "□": "-", "●": "-", "◦": "-", "·": "-",
         "“": '"', "”": '"', "‘": "'", "’": "'",
-        "\u00a0": " ",
+        "\u00a0": " ", "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
     }
 
     for src, dst in replacements.items():
         text = text.replace(src, dst)
+
+    # Remove invisible/control characters that ReportLab can render as black boxes.
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+    text = re.sub(r"[\u2000-\u200f\u2028-\u202f\u205f-\u206f]", " ", text)
 
     # Remove markdown artifacts that should not print in the PDF.
     text = re.sub(r"^\s*#{1,6}\s*", "", text)
@@ -2782,16 +2786,13 @@ def clean_pdf_text(value):
 
     return text
 
-
 def pdf_safe(value):
     """Clean text for ReportLab paragraphs."""
     if value is None:
         return ""
-    text = str(value)
+    text = clean_pdf_text(value)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = text.replace("—", "-").replace("–", "-").replace("→", "->")
     return text
-
 
 def pdf_number(value, default=0):
     try:
@@ -2928,6 +2929,15 @@ def pdf_paragraph_list(items, styles):
     return story
 
 
+def pdf_paragraph_list_large(items, styles):
+    """Bigger bullet text for the PDF Prioritization and Top Action Items pages."""
+    story = []
+    for item in items or []:
+        if item is None or str(item).strip() == "":
+            continue
+        story.append(Paragraph(f"- {pdf_safe(item)}", styles["ActionBody"]))
+    return story
+
 def extract_ai_shift_goal(board_analysis_text):
     """Pull the Shift goal line from the AI board analysis for the PDF headline."""
     text = str(board_analysis_text or "")
@@ -2978,21 +2988,12 @@ def extract_ai_prioritization_lines(board_analysis_text):
             ):
                 break
             if raw:
-                output.append(raw)
+                clean = clean_pdf_text(raw)
+                clean = re.sub(r"^\d+\.\s*", "", clean).strip()
+                if clean:
+                    output.append(clean)
 
-    if not output:
-        return []
-
-    cleaned = []
-    for line in output:
-        clean = line.strip()
-        clean = clean.replace("###", "").replace("####", "")
-        clean = clean.replace("**", "")
-        clean = clean.replace("---", "")
-        clean = clean.strip()
-        if clean:
-            cleaned.append(clean)
-    return cleaned
+    return output
 
 
 
@@ -3037,7 +3038,6 @@ def build_pdf_board_summary_rows(selected_rows):
         "Picking no short": 0,
         "Blank/Not Started": 0,
         "Loaded Short": 0,
-        "Loaded": 0,
     }
 
     for row in selected_rows or []:
@@ -3058,7 +3058,7 @@ def build_pdf_board_summary_rows(selected_rows):
         elif "LOADED SHORT" in status_upper:
             counts["Loaded Short"] += 1
         elif status_upper == "LOADED":
-            counts["Loaded"] += 1
+            pass
         elif not status:
             counts["Blank/Not Started"] += 1
         else:
@@ -3075,7 +3075,6 @@ def build_pdf_board_summary_rows(selected_rows):
         ["Picking no short", counts["Picking no short"]],
         ["Blank/Not Started", counts["Blank/Not Started"]],
         ["Loaded Short", counts["Loaded Short"]],
-        ["Loaded", counts["Loaded"]],
     ]
 
 
@@ -3160,6 +3159,7 @@ def build_pdf_report(
         ),
         "Body": ParagraphStyle("Body", parent=base["Normal"], fontSize=9, leading=12, spaceAfter=4),
         "BodySmall": ParagraphStyle("BodySmall", parent=base["Normal"], fontSize=8.2, leading=10.5, spaceAfter=3),
+        "ActionBody": ParagraphStyle("ActionBody", parent=base["Normal"], fontSize=10.2, leading=13.5, spaceAfter=4),
         "Tiny": ParagraphStyle("Tiny", parent=base["Normal"], fontSize=7.2, leading=9, spaceAfter=2),
         "Box": ParagraphStyle(
             "Box", parent=base["Normal"], fontSize=9, leading=12, borderWidth=0.5,
@@ -3367,7 +3367,7 @@ def build_pdf_report(
     priority_lines = extract_ai_prioritization_lines(board_analysis_text)
     if priority_lines:
         story.append(Paragraph("AI prioritization and board execution insight", styles["Subsection"]))
-        story.extend(pdf_paragraph_list(priority_lines[:70], styles))
+        story.extend(pdf_paragraph_list_large(priority_lines[:70], styles))
     else:
         story.append(Paragraph("AI prioritization was not generated.", styles["Body"]))
 
@@ -3378,7 +3378,7 @@ def build_pdf_report(
     story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
     top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
     if top_action_lines:
-        story.extend(pdf_paragraph_list(top_action_lines[:80], styles))
+        story.extend(pdf_paragraph_list_large(top_action_lines[:80], styles))
     else:
         story.append(Paragraph("AI top action items were not generated.", styles["Body"]))
 
