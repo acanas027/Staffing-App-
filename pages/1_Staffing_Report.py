@@ -13,6 +13,19 @@ import json
 import datetime
 from openai import OpenAI
 
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+    )
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
 
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
@@ -2732,6 +2745,444 @@ Thanks,
 
 
 
+# ============================================================
+#  PDF REPORT GENERATION
+#  Generates the final organized report as PDF instead of Excel.
+# ============================================================
+
+def pdf_safe(value):
+    """Clean text for ReportLab paragraphs."""
+    if value is None:
+        return ""
+    text = str(value)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("—", "-").replace("–", "-").replace("→", "->")
+    return text
+
+
+def pdf_number(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def pdf_first_nonblank(*values):
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def pdf_status_color(health):
+    health = str(health or "").upper()
+    if health == "GREEN":
+        return colors.HexColor("#C6EFCE")
+    if health == "RED":
+        return colors.HexColor("#FFC7CE")
+    return colors.HexColor("#FFEB9C")
+
+
+def derive_shift_health(summary_table, pacing, py_out):
+    """Simple transparent health rule for the PDF headline."""
+    net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
+    due_not_done = pdf_number(pacing.get("due_not_done", 0)) if pacing else 0
+    loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
+    picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
+
+    if due_not_done > 0 or loaded_short > 0 or net_gap <= -3:
+        return "RED"
+    if net_gap < 0 or picking_short > 0 or str(pacing.get("pacing", "")).upper() == "BEHIND":
+        return "YELLOW"
+    return "GREEN"
+
+
+def board_selected_rows_from_payload(board_text, day):
+    try:
+        payload = json.loads(board_text or "{}")
+        rows = payload.get("all_outbound_rows", [])
+    except Exception:
+        return []
+    return rows_for_selected_day(rows, day)
+
+
+def appointment_cutoff_from_rows(rows):
+    times = []
+    for row in rows or []:
+        m = board_minutes_for_pacing(row.get("time") or row.get("appt_time"))
+        if m is not None:
+            times.append(m)
+    if not times:
+        return "today's appointment wave"
+    return format_minutes_for_pacing(max(times))
+
+
+def find_oc_load_matches(board_rows, selected_day):
+    """Load-level OC matches for the PDF report."""
+    oc_list = load_oc_customer_list()
+    selected_day = str(selected_day or "").strip().lower()
+    matches = []
+    seen = set()
+
+    for row in board_rows or []:
+        if selected_day and str(row.get("day", "")).strip().lower() != selected_day:
+            continue
+        customer_text = str(row.get("customer", "")).strip().lower()
+        raw_text = str(row.get("raw_row", "")).strip().lower()
+        search_space = f"{customer_text} {raw_text}"
+        load = normalize_crossdock_load(row.get("load") or row.get("load_number"))
+
+        for customer in oc_list:
+            terms = [customer.get("name", "")] + customer.get("aliases", [])
+            found = [t for t in terms if t and str(t).lower() in search_space]
+            if not found:
+                continue
+            key = (load, customer.get("name"))
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({
+                "load": load,
+                "customer_on_board": row.get("customer", ""),
+                "time": row.get("time") or row.get("appt_time", ""),
+                "door": row.get("door", ""),
+                "status": row.get("status", ""),
+                "oc_name": customer.get("name", ""),
+                "priority": customer.get("priority", ""),
+                "requirements": customer.get("requirements", ""),
+                "sign_off": customer.get("sign_off", False),
+                "pictures": customer.get("pictures", False),
+                "matched_on": found,
+            })
+    return matches
+
+
+def pdf_add_footer(canvas, doc):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#666666"))
+    canvas.drawString(0.5 * inch, 0.35 * inch, "Staffing Report Generator")
+    canvas.drawRightString(7.8 * inch, 0.35 * inch, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def pdf_table(data, col_widths=None, header_fill="#0F5B78"):
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    style = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, -1), 7.5),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ])
+    table.setStyle(style)
+    return table
+
+
+def pdf_paragraph_list(items, styles):
+    story = []
+    for item in items or []:
+        if item is None or str(item).strip() == "":
+            continue
+        story.append(Paragraph(f"- {pdf_safe(item)}", styles["BodySmall"]))
+    return story
+
+
+def build_pdf_report(
+    day, shift, total_cases, hours_remaining, total_outbound_loads_day,
+    summary_table, present_recommendations, recommendations, board_text,
+    board_analysis_text, executive_summary_text, oc_matches, oc_load_matches,
+    crossdock_matches, tt4_matches, notes, override_mode=False,
+    actual_counts=None, recommended_counts=None, deviation_reason=None,
+):
+    """Create the final PDF bytes with facts + AI insights."""
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed. Add reportlab to requirements.txt.")
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.45 * inch,
+        leftMargin=0.45 * inch,
+        topMargin=0.45 * inch,
+        bottomMargin=0.55 * inch,
+    )
+
+    base = getSampleStyleSheet()
+    styles = {
+        "Title": ParagraphStyle(
+            "Title", parent=base["Title"], fontName="Helvetica-Bold", fontSize=18,
+            leading=22, alignment=TA_CENTER, textColor=colors.HexColor("#0F5B78"), spaceAfter=8,
+        ),
+        "Subtitle": ParagraphStyle(
+            "Subtitle", parent=base["Normal"], fontSize=9, leading=11,
+            alignment=TA_CENTER, textColor=colors.HexColor("#555555"), spaceAfter=12,
+        ),
+        "Section": ParagraphStyle(
+            "Section", parent=base["Heading1"], fontName="Helvetica-Bold", fontSize=14,
+            leading=17, textColor=colors.white, backColor=colors.HexColor("#0F5B78"),
+            borderPadding=6, spaceBefore=8, spaceAfter=8,
+        ),
+        "Subsection": ParagraphStyle(
+            "Subsection", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=10.5,
+            leading=13, textColor=colors.HexColor("#0F5B78"), spaceBefore=6, spaceAfter=4,
+        ),
+        "Body": ParagraphStyle("Body", parent=base["Normal"], fontSize=9, leading=12, spaceAfter=4),
+        "BodySmall": ParagraphStyle("BodySmall", parent=base["Normal"], fontSize=8.2, leading=10.5, spaceAfter=3),
+        "Tiny": ParagraphStyle("Tiny", parent=base["Normal"], fontSize=7.2, leading=9, spaceAfter=2),
+        "Box": ParagraphStyle(
+            "Box", parent=base["Normal"], fontSize=9, leading=12, borderWidth=0.5,
+            borderColor=colors.HexColor("#B7B7B7"), borderPadding=6,
+            backColor=colors.HexColor("#F7F9FB"), spaceAfter=6,
+        ),
+    }
+
+    story = []
+    story.append(Paragraph("Staffing + Board Full Report", styles["Title"]))
+    story.append(Paragraph(
+        pdf_safe(f"{day} {shift} Shift | Total cases: {total_cases:,} | Hours remaining: {hours_remaining} | Outbound loads input: {total_outbound_loads_day}"),
+        styles["Subtitle"],
+    ))
+
+    try:
+        payload = json.loads(board_text or "{}")
+    except Exception:
+        payload = {}
+    py_out = payload.get("python_verified_outbound_summary", {})
+    py_in = payload.get("python_verified_inbound_summary", {})
+    py_today = payload.get("python_verified_today_totals", {})
+    all_rows = payload.get("all_outbound_rows", [])
+    selected_rows = rows_for_selected_day(all_rows, day)
+    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
+    health = derive_shift_health(summary_table, pacing, py_out)
+    cutoff = appointment_cutoff_from_rows(selected_rows)
+
+    picks_left = py_today.get("picks_left_today", 0)
+    pulls_left = py_today.get("pulls_left_today", 0)
+    pickers = int(summary_table.loc["Picking", "Assigned"]) if summary_table is not None and "Picking" in summary_table.index else 0
+    loaders = int(summary_table.loc["Loading", "Assigned"]) if summary_table is not None and "Loading" in summary_table.index else 0
+    picking_capacity = pickers * float(hours_remaining or 0) * 185
+    loading_capacity = loaders * float(hours_remaining or 0)
+    net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
+
+    # 1. Staffing + Board Summary
+    story.append(Paragraph("1. Staffing + Board Summary (Workload and Capacity)", styles["Section"]))
+    health_table = Table([
+        [Paragraph("SHIFT HEALTH", styles["Tiny"]), Paragraph("SHIFT GOAL", styles["Tiny"])],
+        [Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]),
+         Paragraph(pdf_safe(f"Have all selected-day loads through {cutoff} controlled, with picks/pulls protected and every OC, Cross Dock, and TT4 action verified before release."), styles["BodySmall"])],
+    ], colWidths=[1.35 * inch, 6.0 * inch])
+    health_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F5B78")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND", (0, 1), (0, 1), pdf_status_color(health)),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(health_table)
+    story.append(Spacer(1, 6))
+
+    fact_rows = [
+        ["Selected-day loads", pacing.get("selected_day_total_loads", "not provided"), "Pacing", pacing.get("pacing", "not provided")],
+        ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
+        ["Due by now", pacing.get("due_by_now", 0), "Due not done", pacing.get("due_not_done", 0)],
+        ["Picks left", picks_left, "Pulls left", pulls_left],
+        ["Pickers assigned", pickers, "Picking capacity left", f"{picking_capacity:,.0f} cases"],
+        ["Loaders assigned", loaders, "Loading capacity left", f"{loading_capacity:,.1f} loads"],
+        ["Net staffing gap", f"{net_gap:+d}", "Total present", len(present_recommendations)],
+        ["Inbound loads", py_in.get("loads_read_from_inbound", 0), "Inbound on lot/at door", py_in.get("on_lot", 0) + py_in.get("at_door", 0)],
+    ]
+    story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.5*inch, 1.4*inch, 1.6*inch, 2.85*inch]))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Staffing by function", styles["Subsection"]))
+    staffing_rows = [["Function", "Needed", "Assigned", "Gap", "Status"]]
+    if summary_table is not None:
+        for task, row in summary_table.iterrows():
+            staffing_rows.append([
+                pdf_safe(task), int(row.get("Needed", 0)), int(row.get("Assigned", 0)),
+                f"{int(row.get('Difference', 0)):+d}", pdf_safe(row.get("Status", ""))
+            ])
+    story.append(pdf_table(staffing_rows, [1.55*inch, 1.0*inch, 1.0*inch, 0.8*inch, 1.35*inch]))
+
+    if override_mode:
+        story.append(Paragraph("Allocation override context", styles["Subsection"]))
+        override_lines = ["This report uses the actual counts entered by the supervisor as the staffing facts."]
+        if recommended_counts:
+            override_lines.append("Tool recommended allocation for comparison only: " + ", ".join(f"{k}: {v}" for k, v in recommended_counts.items()))
+        if deviation_reason:
+            override_lines.append("Supervisor reason: " + deviation_reason)
+        story.extend(pdf_paragraph_list(override_lines, styles))
+
+    if executive_summary_text:
+        story.append(Paragraph("Executive AI summary", styles["Subsection"]))
+        for line in str(executive_summary_text).splitlines()[:35]:
+            clean = line.strip().lstrip("- ").strip()
+            if clean:
+                story.append(Paragraph(f"- {pdf_safe(clean)}", styles["BodySmall"]))
+
+    story.append(PageBreak())
+
+    # 2. OC Loads and actions
+    story.append(Paragraph("2. OC Loads and Actions", styles["Section"]))
+    if oc_load_matches:
+        data = [["Load", "Customer", "Time / Status", "Priority", "Required Actions"]]
+        for m in oc_load_matches:
+            actions = []
+            if m.get("requirements"):
+                actions.append(m.get("requirements"))
+            if m.get("sign_off"):
+                actions.append("DC supervisor sign-off required before ship.")
+            if m.get("pictures"):
+                actions.append("Photos required: 3 on dock + 3 during loading; email to manager.")
+            data.append([
+                pdf_safe(m.get("load", "")),
+                pdf_safe(m.get("customer_on_board") or m.get("oc_name", "")),
+                pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
+                pdf_safe(m.get("priority", "")),
+                Paragraph(pdf_safe(" ".join(actions) if actions else "Special handling required per OC list."), styles["Tiny"]),
+            ])
+        story.append(pdf_table(data, [0.75*inch, 1.7*inch, 1.15*inch, 0.75*inch, 3.0*inch]))
+    elif oc_matches:
+        story.append(Paragraph("OC customers were detected in the board data. Load-level detail was not available from the current OC matching function.", styles["BodySmall"]))
+        for match in oc_matches:
+            c = match["customer"]
+            actions = []
+            if c.get("requirements"):
+                actions.append(c.get("requirements"))
+            if c.get("sign_off"):
+                actions.append("DC supervisor sign-off required before ship.")
+            if c.get("pictures"):
+                actions.append("Photos required: 3 on dock + 3 during loading; email to manager.")
+            story.append(Paragraph(f"<b>{pdf_safe(c.get('name','').upper())}</b> - {pdf_safe('; '.join(actions))}", styles["BodySmall"]))
+    else:
+        story.append(Paragraph("No Opportunity Customer loads detected on today's board.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # 3. Cross Dock
+    story.append(Paragraph("3. Cross Dock Loads, Pallets and Actions", styles["Section"]))
+    if crossdock_matches:
+        data = [["Load", "Board Customer", "Time / Status", "Cross Dock Customer", "Pallets", "Location", "Required Action"]]
+        for m in crossdock_matches:
+            action = f"Verify {m.get('pallets', 0)} pallet(s) at {m.get('location', '')} are 100% on load {m.get('load', '')} before shipping."
+            data.append([
+                pdf_safe(m.get("load", "")),
+                pdf_safe(m.get("board_customer", "")),
+                pdf_safe(f"{m.get('board_time','')} / {m.get('board_status','')}"),
+                pdf_safe(m.get("customer", "")),
+                pdf_safe(m.get("pallets", 0)),
+                pdf_safe(m.get("location", "")),
+                Paragraph(pdf_safe(action), styles["Tiny"]),
+            ])
+        story.append(pdf_table(data, [0.65*inch, 1.3*inch, 0.95*inch, 1.25*inch, 0.55*inch, 0.75*inch, 1.9*inch]))
+    else:
+        story.append(Paragraph("No Cross Dock pallets matched today's board loads, or no Cross Dock sheet was uploaded.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # 4. TT4
+    story.append(Paragraph("4. Loads with TT4", styles["Section"]))
+    if tt4_matches:
+        data = [["Load", "Customer", "Time / Status", "Required Action"]]
+        for m in tt4_matches:
+            action = f"Verify TT4 requirement is completed for load {m.get('load', '')} before this load ships."
+            data.append([
+                pdf_safe(m.get("load", "")),
+                pdf_safe(m.get("customer", "")),
+                pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
+                Paragraph(pdf_safe(action), styles["Tiny"]),
+            ])
+        story.append(pdf_table(data, [0.9*inch, 2.4*inch, 1.3*inch, 2.7*inch]))
+    else:
+        story.append(Paragraph("No TT4-required loads detected on today's board.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # 5. Prioritization
+    story.append(Paragraph("5. Prioritization", styles["Section"]))
+    if board_analysis_text:
+        story.append(Paragraph("AI prioritization and board execution insight", styles["Subsection"]))
+        in_priority = False
+        priority_lines = []
+        for line in str(board_analysis_text).splitlines():
+            raw = line.strip()
+            upper = raw.upper()
+            if "PRIORITIZATION" in upper:
+                in_priority = True
+            elif in_priority and upper.startswith("4."):
+                break
+            if in_priority and raw:
+                priority_lines.append(raw)
+        if not priority_lines:
+            priority_lines = [line.strip() for line in str(board_analysis_text).splitlines() if line.strip()][:45]
+        story.extend(pdf_paragraph_list(priority_lines[:60], styles))
+    else:
+        story.append(Paragraph("AI prioritization was not generated.", styles["Body"]))
+
+    story.append(Paragraph("Python-generated immediate priorities", styles["Subsection"]))
+    priority_items = []
+    if pacing and pdf_number(pacing.get("due_not_done", 0)) > 0:
+        for r in pacing.get("due_not_done_loads_first_10", []):
+            priority_items.append(f"Past due/not done: load {r.get('load','')} - {r.get('customer','')} - {r.get('time','')} - {r.get('status','')}.")
+    for m in crossdock_matches[:10]:
+        priority_items.append(f"Cross Dock verification: load {m.get('load','')} has {m.get('pallets',0)} pallet(s) at {m.get('location','')}.")
+    for m in tt4_matches[:10]:
+        priority_items.append(f"TT4 verification: load {m.get('load','')} - {m.get('customer','')} - {m.get('time','')}.")
+    if not priority_items:
+        priority_items.append("No special direct-alert priorities beyond standard board execution.")
+    story.extend(pdf_paragraph_list(priority_items, styles))
+
+    story.append(PageBreak())
+
+    # 6. Possible outcomes / what-if
+    story.append(Paragraph("6. Possible Outcomes If (?)", styles["Section"]))
+    story.append(Paragraph("Operational what-if scenarios based on the current facts", styles["Subsection"]))
+    outcomes = []
+    if net_gap < 0:
+        outcomes.append(f"If no labor is added or rebalanced, the operation remains short by {abs(net_gap)} worker(s), equal to about {abs(net_gap) * float(hours_remaining or 0):.1f} labor-hours over the remaining shift.")
+    else:
+        outcomes.append(f"If the current labor plan holds, staffing is not net-short; the focus should be protecting execution, shorts, and verification work.")
+    outcomes.append(f"If one extra picker is added, picking capacity increases by about {185 * float(hours_remaining or 0):,.0f} cases over the remaining shift.")
+    outcomes.append(f"If one extra loader is added, loading capacity increases by about {float(hours_remaining or 0):.1f} loads over the remaining shift.")
+    if crossdock_matches:
+        outcomes.append("If Cross Dock verification is skipped, pallets may ship on the wrong load or miss the intended load, creating customer and service failures.")
+    if tt4_matches:
+        outcomes.append("If TT4 checks are not completed before departure, the load can leave without the required trailer/temperature/handling verification.")
+    if oc_matches or oc_load_matches:
+        outcomes.append("If OC actions are missed, documented high-sensitivity customers may ship without the required sign-off/photos/special handling.")
+    if recommendations:
+        outcomes.append("If the top recommendations are executed in the next 30 minutes, the shift has the best chance to protect the next appointment wave and reduce second-shift carryover.")
+    story.extend(pdf_paragraph_list(outcomes, styles))
+
+    if recommendations:
+        story.append(Paragraph("Recommendations / what-ifs from the staffing engine", styles["Subsection"]))
+        story.extend(pdf_paragraph_list(recommendations[:18], styles))
+
+    if board_analysis_text:
+        story.append(Paragraph("Full AI board analysis", styles["Subsection"]))
+        for line in str(board_analysis_text).splitlines():
+            clean = line.strip()
+            if clean:
+                story.append(Paragraph(pdf_safe(clean), styles["BodySmall"]))
+
+    doc.build(story, onFirstPage=pdf_add_footer, onLaterPages=pdf_add_footer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def compute_recommended_allocation(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     crossroads_open, deer_creek_open, msb_open, present_workers, board_file=None,
@@ -2913,6 +3364,7 @@ def run_full_generation(
 
     board_analysis_text = None
     oc_matches = []
+    oc_load_matches = []
     crossdock_matches = []
     tt4_matches = []
 
@@ -2925,6 +3377,7 @@ def run_full_generation(
             board_payload_for_alerts = json.loads(board_text)
             board_rows_for_alerts = board_payload_for_alerts.get("all_outbound_rows", [])
 
+            oc_load_matches = find_oc_load_matches(board_rows_for_alerts, day)
             tt4_matches = find_tt4_required_loads(board_rows_for_alerts, day)
             write_tt4_alerts_to_excel(wb, tt4_matches)
 
@@ -2984,14 +3437,28 @@ def run_full_generation(
         executive_summary_text=executive_summary_text,
     )
 
+    pdf_output_bytes = build_pdf_report(
+        day=day, shift=shift, total_cases=total_cases, hours_remaining=hours_remaining,
+        total_outbound_loads_day=total_outbound_loads_day, summary_table=summary_table,
+        present_recommendations=present_recommendations, recommendations=recommendations,
+        board_text=board_text, board_analysis_text=board_analysis_text,
+        executive_summary_text=executive_summary_text, oc_matches=oc_matches,
+        oc_load_matches=oc_load_matches, crossdock_matches=crossdock_matches,
+        tt4_matches=tt4_matches, notes=notes, override_mode=override_mode,
+        actual_counts=actual_counts, recommended_counts=recommended_counts,
+        deviation_reason=deviation_reason,
+    )
+
     return {
-        "output_bytes": output.getvalue(),
+        "output_bytes": pdf_output_bytes,
+        "excel_output_bytes": output.getvalue(),
         "summary_table": summary_table,
         "present_recommendations": present_recommendations,
         "recommendations": recommendations,
         "board_analysis_text": board_analysis_text,
         "executive_summary_text": executive_summary_text,
         "oc_matches": oc_matches,
+        "oc_load_matches": oc_load_matches,
         "crossdock_matches": crossdock_matches,
         "tt4_matches": tt4_matches,
         "email_subject": email_subject,
@@ -3325,7 +3792,7 @@ if reco:
 
         prev = st.session_state.get("gen_result")
         if not prev or prev.get("signature") != signature:
-            with st.spinner("Generating report (writing workbook, reading board, running AI)..."):
+            with st.spinner("Generating PDF report (reading board, running AI, building PDF)..."):
                 result = run_full_generation(
                     day,
                     shift,
@@ -3359,7 +3826,7 @@ if result:
     board_analysis_text = result["board_analysis_text"]
     executive_summary_text = result["executive_summary_text"]
 
-    st.success("Staffing report generated successfully.")
+    st.success("PDF staffing report generated successfully.")
 
     if result["override_mode"]:
         st.info(
@@ -3458,10 +3925,10 @@ if result:
         st.markdown(board_analysis_text)
 
     st.download_button(
-        label="Download Staffing Report",
+        label="Download PDF Staffing Report",
         data=result["output_bytes"],
-        file_name="Staffing Report Generated.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_name="Staffing Board Full Report.pdf",
+        mime="application/pdf",
     )
 
     if executive_summary_text:
