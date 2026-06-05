@@ -1750,7 +1750,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
 - No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
-- If we are running behind and we have loads that are DROPS from a reser's customer (priority 4) State that if have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
+- If we are running behind and we have loads that are DROPS (specify that only drops) from a reser's customer (priority 4) State that if have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
 
 4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 - Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
