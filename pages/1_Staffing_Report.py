@@ -2750,48 +2750,14 @@ Thanks,
 #  Generates the final organized report as PDF instead of Excel.
 # ============================================================
 
-def clean_pdf_text(value):
-    """Clean AI/Markdown text so the PDF prints plain readable text only."""
+def pdf_safe(value):
+    """Clean text for ReportLab paragraphs."""
     if value is None:
         return ""
-
     text = str(value)
-
-    replacements = {
-        "—": "-", "–": "-", "−": "-", "‐": "-", "‑": "-",
-        "→": "->", "≤": "<=", "≥": ">=",
-        "•": "-", "▪": "-", "■": "-", "●": "-", "·": "-",
-        "“": '"', "”": '"', "‘": "'", "’": "'",
-        " ": " ",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-
-    # Remove markdown artifacts that were showing in the PDF.
-    text = re.sub(r"^\s*#{1,6}\s*", "", text)
-    text = text.replace("**", "").replace("__", "")
-    text = text.replace("###", "").replace("####", "")
-    text = text.replace("---", "")
-    text = re.sub(r"`([^`]*)`", r"", text)
-
-    # Normalize bullets/dashes without creating weird glyphs.
-    text = re.sub(r"^\s*[-*]+\s*", "", text).strip()
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def pdf_safe(value):
-    """Clean and HTML-escape text for ReportLab paragraphs."""
-    text = clean_pdf_text(value)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("—", "-").replace("–", "-").replace("→", "->")
     return text
-
-
-def pdf_cell(value, style):
-    """Create a wrapping PDF table cell so long names/actions do not collide."""
-    if isinstance(value, Paragraph):
-        return value
-    return Paragraph(pdf_safe(value), style)
 
 
 def pdf_number(value, default=0):
@@ -2901,29 +2867,24 @@ def pdf_add_footer(canvas, doc):
 
 
 def pdf_table(data, col_widths=None, header_fill="#0F5B78"):
-    wrapped = []
-    for r, row in enumerate(data):
-        wrapped_row = []
-        for value in row:
-            style = _PDF_STYLES_FOR_TABLE["HeaderCell"] if r == 0 else _PDF_STYLES_FOR_TABLE["TableCell"]
-            wrapped_row.append(pdf_cell(value, style))
-        wrapped.append(wrapped_row)
-
-    table = Table(wrapped, colWidths=col_widths, repeatRows=1, hAlign="LEFT", splitByRow=1)
+    table = Table(data, colWidths=col_widths, repeatRows=1)
     style = TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, -1), 7.5),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ])
     table.setStyle(style)
     return table
+
 
 def pdf_paragraph_list(items, styles):
     story = []
@@ -2935,55 +2896,27 @@ def pdf_paragraph_list(items, styles):
 
 
 def extract_ai_shift_goal(board_analysis_text):
-    """Pull and shorten the Shift goal line from the AI board analysis."""
+    """Pull the Shift goal line from the AI board analysis for the PDF headline."""
     text = str(board_analysis_text or "")
     if not text.strip():
         return ""
 
     lines = [line.strip() for line in text.splitlines()]
-    goal = ""
-
     for i, line in enumerate(lines):
-        clean = clean_pdf_text(line)
+        clean = re.sub(r"^[#\-*\s]+", "", line).strip()
         if re.search(r"shift\s*goal", clean, flags=re.IGNORECASE):
+            # Handles: **Shift goal:** Pick and stage...
+            clean = re.sub(r"\*", "", clean).strip()
             parts = re.split(r":", clean, maxsplit=1)
             if len(parts) == 2 and parts[1].strip():
-                goal = parts[1].strip()
-            else:
-                for nxt in lines[i + 1:i + 4]:
-                    nxt_clean = clean_pdf_text(nxt)
-                    if nxt_clean and not re.search(r"shift\s*goal", nxt_clean, flags=re.IGNORECASE):
-                        goal = nxt_clean
-                        break
-            break
+                return parts[1].strip()
+            # Handles a title line followed by the actual goal.
+            for nxt in lines[i + 1:i + 4]:
+                nxt_clean = re.sub(r"^[#\-*\s]+", "", nxt).replace("**", "").strip()
+                if nxt_clean and not re.search(r"shift\s*goal", nxt_clean, flags=re.IGNORECASE):
+                    return nxt_clean
+    return ""
 
-    if not goal:
-        return ""
-
-    # Keep only the operational goal sentence, not the explanation after it.
-    goal = re.split(r"(?<=[.!?])\s+", goal)[0].strip()
-
-    # Make the wording concise and direct.
-    goal = re.sub(r"\b[Pp]ick and stage\b", "Pick & stage", goal)
-    goal = re.sub(r"\b[Pp]ick/stage\b", "Pick & stage", goal)
-    goal = re.sub(r"\b[Pp]icked and staged\b", "picked & staged", goal)
-    goal = re.sub(r"\bappointment\s*<=\s*", "appointment <= ", goal)
-    goal = re.sub(r"\bappointment\s*<\s*=\s*", "appointment <= ", goal)
-
-    # If AI gave the exact target form, keep only that phrase.
-    m = re.search(
-        r"(Pick\s*&\s*stage\s+every\s+load\s+with\s+appointment\s*<=\s*\d{1,2}:\d{2}\s*\([^)]*loads?\)\s+by\s+[^.]+)",
-        goal,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        goal = m.group(1).strip()
-
-    # Avoid long first-page block; keep the headline readable.
-    if len(goal) > 150:
-        goal = goal[:147].rstrip(" ,;:-") + "..."
-
-    return goal
 
 def extract_ai_prioritization_lines(board_analysis_text):
     """Return only the AI prioritization section. No Python-generated priority list."""
@@ -3019,37 +2952,134 @@ def extract_ai_prioritization_lines(board_analysis_text):
 
     cleaned = []
     for line in output:
-        clean = clean_pdf_text(line)
-        # Remove section numbering/markdown labels that add noise in the PDF.
-        clean = re.sub(r"^\d+\.\s*", "", clean).strip()
+        clean = line.strip()
+        clean = clean.replace("###", "").replace("####", "")
+        clean = clean.replace("**", "")
+        clean = clean.replace("---", "")
+        clean = clean.strip()
         if clean:
             cleaned.append(clean)
     return cleaned
 
 
-def pdf_alert_table(data, col_widths=None, header_fill="#0F5B78", header_text="#000000"):
-    wrapped = []
-    for r, row in enumerate(data):
-        wrapped_row = []
-        for value in row:
-            style = _PDF_STYLES_FOR_TABLE["HeaderCell"] if r == 0 else _PDF_STYLES_FOR_TABLE["AlertCell"]
-            wrapped_row.append(pdf_cell(value, style))
-        wrapped.append(wrapped_row)
 
-    table = Table(wrapped, colWidths=col_widths, repeatRows=1, hAlign="LEFT", splitByRow=1)
+def extract_ai_top_action_items_lines(board_analysis_text):
+    """Return only the AI Top Action Items section for the final PDF page."""
+    text = str(board_analysis_text or "")
+    if not text.strip():
+        return []
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    output = []
+    in_actions = False
+
+    for line in lines:
+        raw = line.strip()
+        upper = raw.upper()
+
+        if "TOP ACTION ITEMS" in upper:
+            in_actions = True
+
+        if in_actions:
+            # Stop only if another major numbered section starts after top actions.
+            if output and re.match(r"^#{0,6}\s*[5-9]\.\s", raw):
+                break
+            if raw:
+                clean = clean_pdf_text(raw)
+                clean = re.sub(r"^\d+\.\s*", "", clean).strip()
+                if clean:
+                    output.append(clean)
+
+    return output
+
+
+def build_pdf_board_summary_rows(selected_rows):
+    """Small first-page board summary table for the selected day only."""
+    counts = {
+        "Total loads": 0,
+        "Completed": 0,
+        "RTL": 0,
+        "R/S waiting for product": 0,
+        "Picking/Short": 0,
+        "Picking no short": 0,
+        "Blank/Not Started": 0,
+        "Loaded Short": 0,
+        "Loaded": 0,
+    }
+
+    for row in selected_rows or []:
+        counts["Total loads"] += 1
+        status = str(row.get("status", "") or "").strip()
+        status_upper = status.upper()
+
+        if status_upper in {"COMPLETED", "COMPLETE"}:
+            counts["Completed"] += 1
+        elif status_upper == "RTL" or "READY TO LOAD" in status_upper:
+            counts["RTL"] += 1
+        elif status_upper in {"R/S", "READY/SHORT"} or "R/S" in status_upper:
+            counts["R/S waiting for product"] += 1
+        elif "PICKING/SHORT" in status_upper or "PICKING SHORT" in status_upper:
+            counts["Picking/Short"] += 1
+        elif status_upper == "PICKING":
+            counts["Picking no short"] += 1
+        elif "LOADED SHORT" in status_upper:
+            counts["Loaded Short"] += 1
+        elif status_upper == "LOADED":
+            counts["Loaded"] += 1
+        elif not status:
+            counts["Blank/Not Started"] += 1
+        else:
+            # Treat unknown active statuses as not-started/needs review for the compact summary.
+            counts["Blank/Not Started"] += 1
+
+    return [
+        ["Outbound - selected day", ""],
+        ["Total loads", counts["Total loads"]],
+        ["Completed", counts["Completed"]],
+        ["RTL", counts["RTL"]],
+        ["R/S waiting for product", counts["R/S waiting for product"]],
+        ["Picking/Short", counts["Picking/Short"]],
+        ["Picking no short", counts["Picking no short"]],
+        ["Blank/Not Started", counts["Blank/Not Started"]],
+        ["Loaded Short", counts["Loaded Short"]],
+        ["Loaded", counts["Loaded"]],
+    ]
+
+
+def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, crossdock_matches, tt4_matches):
+    """First-page service risk level based on actual allocation gaps and selected-day board risk."""
+    net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
+    due_not_done = pdf_number(pacing.get("due_not_done", 0)) if pacing else 0
+    picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
+    loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
+    alert_count = len(oc_load_matches or []) + len(crossdock_matches or []) + len(tt4_matches or [])
+
+    if due_not_done > 0 or loaded_short > 0 or net_gap <= -3:
+        return "HIGH", "Past-due/short exposure or a major actual staffing gap is present."
+    if picking_short > 0 or net_gap < 0 or alert_count > 0:
+        return "MEDIUM", "Execution is controllable, but staffing gaps or customer/load alerts require follow-up."
+    return "LOW", "No major service risk detected from current pacing, staffing, or direct alerts."
+
+
+
+def pdf_alert_table(data, col_widths=None, header_fill="#0F5B78", header_text="#000000"):
+    table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(header_text)),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTSIZE", (0, 1), (-1, -1), 7.2),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     return table
+
 
 def build_pdf_report(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
@@ -3105,13 +3135,6 @@ def build_pdf_report(
         ),
     }
 
-    global _PDF_STYLES_FOR_TABLE
-    _PDF_STYLES_FOR_TABLE = {
-        "HeaderCell": ParagraphStyle("HeaderCell", parent=base["Normal"], fontName="Helvetica-Bold", fontSize=7.2, leading=8.5, textColor=colors.white),
-        "TableCell": ParagraphStyle("TableCell", parent=base["Normal"], fontSize=7.2, leading=8.8, textColor=colors.black),
-        "AlertCell": ParagraphStyle("AlertCell", parent=base["Normal"], fontSize=6.7, leading=8.2, textColor=colors.black),
-    }
-
     story = []
     story.append(Paragraph("Staffing + Board Full Report", styles["Title"]))
     story.append(Paragraph(
@@ -3143,17 +3166,29 @@ def build_pdf_report(
     picking_capacity = pickers * float(hours_remaining or 0) * 185
     loading_capacity = loaders * float(hours_remaining or 0)
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
+    service_risk, service_risk_reason = derive_service_risk_level(
+        summary_table, pacing, py_out, oc_load_matches, crossdock_matches, tt4_matches
+    )
 
     # 1. Staffing + Board Summary
     story.append(Paragraph("1. Staffing + Board Summary (Workload and Capacity)", styles["Section"]))
     health_table = Table([
-        [Paragraph("SHIFT HEALTH", styles["Tiny"]), Paragraph("SHIFT GOAL - FROM AI BOARD ANALYSIS", styles["Tiny"])],
-        [Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]), Paragraph(pdf_safe(ai_shift_goal), styles["BodySmall"])],
-    ], colWidths=[1.35 * inch, 6.0 * inch])
+        [
+            Paragraph("SHIFT HEALTH", styles["Tiny"]),
+            Paragraph("SERVICE RISK", styles["Tiny"]),
+            Paragraph("SHIFT GOAL - FROM AI BOARD ANALYSIS", styles["Tiny"]),
+        ],
+        [
+            Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]),
+            Paragraph(f"<b>{pdf_safe(service_risk)}</b><br/>{pdf_safe(service_risk_reason)}", styles["BodySmall"]),
+            Paragraph(pdf_safe(ai_shift_goal), styles["BodySmall"]),
+        ],
+    ], colWidths=[1.15 * inch, 2.0 * inch, 4.2 * inch])
     health_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F5B78")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("BACKGROUND", (0, 1), (0, 1), pdf_status_color(health)),
+        ("BACKGROUND", (1, 1), (1, 1), pdf_status_color(service_risk)),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
@@ -3177,19 +3212,40 @@ def build_pdf_report(
     story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.5*inch, 1.4*inch, 1.6*inch, 2.85*inch]))
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("Staffing by function", styles["Subsection"]))
-    staffing_rows = [["Function", "Needed", "Assigned", "Gap", "Status"]]
-    if summary_table is not None:
-        for task, row in summary_table.iterrows():
-            staffing_rows.append([
-                pdf_safe(task), int(row.get("Needed", 0)), int(row.get("Assigned", 0)),
-                f"{int(row.get('Difference', 0)):+d}", pdf_safe(row.get("Status", ""))
-            ])
-    story.append(pdf_table(staffing_rows, [1.55*inch, 1.0*inch, 1.0*inch, 0.8*inch, 1.35*inch]))
+    story.append(Paragraph(f"Board summary - selected day ({pdf_safe(day)})", styles["Subsection"]))
+    board_summary_rows = build_pdf_board_summary_rows(selected_rows)
+    board_summary_data = [["Status", "Count"]] + board_summary_rows[1:]
+    story.append(pdf_table(board_summary_data, [2.45*inch, 1.05*inch]))
+    story.append(Spacer(1, 8))
+
+    staffing_title = "Staffing by function - actual allocation" if override_mode else "Staffing by function"
+    story.append(Paragraph(staffing_title, styles["Subsection"]))
+    if override_mode:
+        staffing_rows = [["Function", "Needed", "Actual", "Actual Gap", "Tool Rec.", "Status"]]
+        if summary_table is not None:
+            for task, row in summary_table.iterrows():
+                staffing_rows.append([
+                    pdf_safe(task),
+                    int(row.get("Needed", 0)),
+                    int(row.get("Assigned", 0)),
+                    f"{int(row.get('Difference', 0)):+d}",
+                    int((recommended_counts or {}).get(task, 0)),
+                    pdf_safe(row.get("Status", "")),
+                ])
+        story.append(pdf_table(staffing_rows, [1.25*inch, 0.75*inch, 0.75*inch, 0.85*inch, 0.85*inch, 1.25*inch]))
+    else:
+        staffing_rows = [["Function", "Needed", "Assigned", "Gap", "Status"]]
+        if summary_table is not None:
+            for task, row in summary_table.iterrows():
+                staffing_rows.append([
+                    pdf_safe(task), int(row.get("Needed", 0)), int(row.get("Assigned", 0)),
+                    f"{int(row.get('Difference', 0)):+d}", pdf_safe(row.get("Status", ""))
+                ])
+        story.append(pdf_table(staffing_rows, [1.55*inch, 1.0*inch, 1.0*inch, 0.8*inch, 1.35*inch]))
 
     if override_mode:
         story.append(Paragraph("Allocation override context", styles["Subsection"]))
-        override_lines = ["This report uses the actual counts entered by the supervisor as the staffing facts."]
+        override_lines = ["The staffing table above uses the supervisor's actual allocation and shows the real gaps being run right now."]
         if recommended_counts:
             override_lines.append("Tool recommended allocation for comparison only: " + ", ".join(f"{k}: {v}" for k, v in recommended_counts.items()))
         if deviation_reason:
@@ -3218,9 +3274,9 @@ def build_pdf_report(
                 pdf_safe(m.get("customer_on_board") or m.get("oc_name", "")),
                 pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
                 pdf_safe(m.get("priority", "")),
-                " ".join(actions) if actions else "Special handling required per OC list.",
+                Paragraph(pdf_safe(" ".join(actions) if actions else "Special handling required per OC list."), styles["Tiny"]),
             ])
-        story.append(pdf_alert_table(data, [0.7*inch, 1.65*inch, 1.05*inch, 0.65*inch, 3.3*inch], header_fill="#FFD966", header_text="#000000"))
+        story.append(pdf_alert_table(data, [0.75*inch, 1.55*inch, 1.1*inch, 0.7*inch, 3.2*inch], header_fill="#FFD966", header_text="#000000"))
     elif oc_matches:
         story.append(Paragraph("OC customers were detected in the board data. Load-level detail was not available from the current OC matching function.", styles["BodySmall"]))
         for match in oc_matches:
@@ -3249,9 +3305,9 @@ def build_pdf_report(
                 pdf_safe(m.get("customer", "")),
                 pdf_safe(m.get("pallets", 0)),
                 pdf_safe(m.get("location", "")),
-                action,
+                Paragraph(pdf_safe(action), styles["Tiny"]),
             ])
-        story.append(pdf_alert_table(data, [0.55*inch, 1.25*inch, 0.9*inch, 1.15*inch, 0.42*inch, 0.65*inch, 2.43*inch], header_fill="#A9D18E", header_text="#000000"))
+        story.append(pdf_alert_table(data, [0.62*inch, 1.2*inch, 0.88*inch, 1.2*inch, 0.5*inch, 0.7*inch, 2.2*inch], header_fill="#A9D18E", header_text="#000000"))
     else:
         story.append(Paragraph("No Cross Dock pallets matched today's board loads, or no Cross Dock sheet was uploaded.", styles["BodySmall"]))
 
@@ -3265,9 +3321,9 @@ def build_pdf_report(
                 pdf_safe(m.get("load", "")),
                 pdf_safe(m.get("customer", "")),
                 pdf_safe(f"{m.get('time','')} / {m.get('status','')}"),
-                action,
+                Paragraph(pdf_safe(action), styles["Tiny"]),
             ])
-        story.append(pdf_alert_table(data, [0.75*inch, 2.6*inch, 1.15*inch, 2.85*inch], header_fill="#C00000", header_text="#FFFFFF"))
+        story.append(pdf_alert_table(data, [0.8*inch, 2.45*inch, 1.2*inch, 2.9*inch], header_fill="#C00000", header_text="#FFFFFF"))
     else:
         story.append(Paragraph("No TT4-required loads detected on today's board.", styles["BodySmall"]))
 
@@ -3284,31 +3340,16 @@ def build_pdf_report(
 
     story.append(PageBreak())
 
-    # 4. Possible outcomes / what-if
-    story.append(Paragraph("4. Possible Outcomes If (?)", styles["Section"]))
-    story.append(Paragraph("Operational what-if scenarios based on the current facts", styles["Subsection"]))
-    outcomes = []
-    if net_gap < 0:
-        outcomes.append(f"If no labor is added or rebalanced, the operation remains short by {abs(net_gap)} worker(s), equal to about {abs(net_gap) * float(hours_remaining or 0):.1f} labor-hours over the remaining shift.")
+    # 4. Top Action Items - AI only
+    story.append(Paragraph("4. Top Action Items", styles["Section"]))
+    story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
+    top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
+    if top_action_lines:
+        story.extend(pdf_paragraph_list(top_action_lines[:80], styles))
     else:
-        outcomes.append("If the current labor plan holds, staffing is not net-short; the focus should be protecting execution, shorts, and verification work.")
-    outcomes.append(f"If one extra picker is added, picking capacity increases by about {185 * float(hours_remaining or 0):,.0f} cases over the remaining shift.")
-    outcomes.append(f"If one extra loader is added, loading capacity increases by about {float(hours_remaining or 0):.1f} loads over the remaining shift.")
-    if crossdock_matches:
-        outcomes.append("If Cross Dock verification is skipped, pallets may ship on the wrong load or miss the intended load, creating customer and service failures.")
-    if tt4_matches:
-        outcomes.append("If TT4 checks are not completed before departure, the load can leave without the required trailer/temperature/handling verification.")
-    if oc_matches or oc_load_matches:
-        outcomes.append("If OC actions are missed, documented high-sensitivity customers may ship without the required sign-off/photos/special handling.")
-    if recommendations:
-        outcomes.append("If the top recommendations are executed in the next 30 minutes, the shift has the best chance to protect the next appointment wave and reduce second-shift carryover.")
-    story.extend(pdf_paragraph_list(outcomes, styles))
+        story.append(Paragraph("AI top action items were not generated.", styles["Body"]))
 
-    if recommendations:
-        story.append(Paragraph("Recommendations / what-ifs from the staffing engine", styles["Subsection"]))
-        story.extend(pdf_paragraph_list(recommendations[:18], styles))
-
-    # Removed full AI board analysis from the PDF bottom because its useful pieces are already used above.
+    # Removed possible outcomes / staffing-engine recommendation page per report cleanup.
     doc.build(story, onFirstPage=pdf_add_footer, onLaterPages=pdf_add_footer)
     buffer.seek(0)
     return buffer.getvalue()
