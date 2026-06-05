@@ -430,6 +430,145 @@ def write_crossdock_alerts_to_excel(wb, crossdock_matches):
 
 
 # ============================================================
+#  TT4 ALERTS
+#  Direct Python alert only. Lists today's outbound loads that require TT4.
+#  Does NOT go to AI.
+# ============================================================
+
+def tt4_value_requires_action(value):
+    text = normalize_board_text(value).strip().upper()
+    if not text:
+        return False
+    if text in ["N", "NO", "NONE", "0", "FALSE"]:
+        return False
+    return True
+
+
+def find_tt4_required_loads(board_rows, selected_day):
+    """
+    Find selected-day loads that require TT4.
+    A load requires TT4 when:
+    - The parsed board flags include TT4-NEEDED from the blue Excel fill, or
+    - The TT4 column contains any meaningful value.
+    """
+    selected_day = str(selected_day or "").strip().lower()
+    matches = []
+    seen_loads = set()
+
+    for row in board_rows or []:
+        row_day = str(row.get("day", "")).strip().lower()
+
+        if selected_day and row_day != selected_day:
+            continue
+
+        load = normalize_crossdock_load(row.get("load") or row.get("load_number"))
+        if not load or load in seen_loads:
+            continue
+
+        flags = row.get("flags", []) or []
+        tt4_value = row.get("tt4", "")
+
+        requires_tt4 = "TT4-NEEDED" in flags or tt4_value_requires_action(tt4_value)
+
+        if not requires_tt4:
+            continue
+
+        seen_loads.add(load)
+
+        matches.append({
+            "load": load,
+            "customer": row.get("customer", ""),
+            "carrier": row.get("carrier", ""),
+            "time": row.get("time") or row.get("appt_time", ""),
+            "door": row.get("door", ""),
+            "trailer": row.get("trailer", ""),
+            "status": row.get("status", ""),
+            "type": row.get("type", ""),
+            "tt4": tt4_value,
+            "flags": flags,
+            "comments": row.get("comments", ""),
+        })
+
+    return matches
+
+
+def write_tt4_alerts_to_excel(wb, tt4_matches):
+    """Create a workbook tab with today's loads requiring TT4."""
+    if not tt4_matches:
+        return
+
+    sheet_name = "TT4 Alerts"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue = "0F5B78"
+    orange = "C55A11"
+    white = "FFFFFF"
+    light_orange = "FCE4D6"
+    thin = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "TT4 Alerts — Today's Loads Requiring TT4"
+    ws["A1"].font = Font(size=16, bold=True, color=white)
+    ws["A1"].fill = PatternFill("solid", fgColor=orange)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:J1")
+
+    headers = [
+        "Load #", "Customer", "Carrier", "Appt Time", "Door",
+        "Trailer", "Status", "Type", "TT4 Value / Flag", "Required Action"
+    ]
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(3, col)
+        cell.value = header
+        cell.font = Font(bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=dark_blue)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    for row_idx, match in enumerate(tt4_matches, 4):
+        tt4_source = match.get("tt4", "")
+        if not tt4_source and "TT4-NEEDED" in (match.get("flags") or []):
+            tt4_source = "TT4-NEEDED flag"
+
+        action = (
+            f"Verify TT4 requirement is completed for load {match.get('load', '')} "
+            f"before this load ships."
+        )
+
+        values = [
+            match.get("load", ""),
+            match.get("customer", ""),
+            match.get("carrier", ""),
+            match.get("time", ""),
+            match.get("door", ""),
+            match.get("trailer", ""),
+            match.get("status", ""),
+            match.get("type", ""),
+            tt4_source,
+            action,
+        ]
+
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row_idx, col)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=light_orange)
+
+    widths = [14, 30, 18, 12, 10, 18, 16, 18, 22, 65]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "A4"
+
+
+# ============================================================
 #  NAME LOADING
 #  Reads directly from the staffing sheets (col A), filtered
 #  by the selected shift. No caching — avoids stale lists
@@ -2850,22 +2989,28 @@ if st.button("Generate Staffing Report"):
     board_analysis_text = None
     oc_matches = []
     crossdock_matches = []
+    tt4_matches = []
 
     if board_file is not None:
         with st.spinner("Reading board file → scanning for Opportunity Customers → running AI analysis (single call)..."):
             board_text    = read_board_file_to_text(board_file)
 
-            # Cross Dock matching is a direct Python alert only. It does not go to AI.
-            if crossdock_file is not None:
-                try:
-                    board_payload_for_crossdock = json.loads(board_text)
-                    board_rows_for_crossdock = board_payload_for_crossdock.get("all_outbound_rows", [])
+            # Direct Python alerts only. These do not go to AI.
+            try:
+                board_payload_for_alerts = json.loads(board_text)
+                board_rows_for_alerts = board_payload_for_alerts.get("all_outbound_rows", [])
+
+                tt4_matches = find_tt4_required_loads(board_rows_for_alerts, day)
+                write_tt4_alerts_to_excel(wb, tt4_matches)
+
+                if crossdock_file is not None:
                     crossdock_rows = read_crossdock_rows(crossdock_file)
-                    crossdock_matches = find_crossdock_matches(crossdock_rows, board_rows_for_crossdock)
+                    crossdock_matches = find_crossdock_matches(crossdock_rows, board_rows_for_alerts)
                     write_crossdock_alerts_to_excel(wb, crossdock_matches)
-                except Exception as e:
-                    st.error(f"Cross Dock alert matching failed: {e}")
-                    st.exception(e)
+
+            except Exception as e:
+                st.error(f"Direct alert matching failed: {e}")
+                st.exception(e)
 
             oc_matches    = find_oc_customers_in_board(board_text)
             oc_alert_text = build_oc_alert_text(oc_matches)
@@ -2926,6 +3071,35 @@ if st.button("Generate Staffing Report"):
         pass
 
     st.success("Staffing report generated successfully.")
+
+    if tt4_matches:
+        st.markdown("---")
+        st.subheader("TT4 Alerts")
+        st.error(
+            "The following loads on today's board require TT4. "
+            "Verify TT4 is completed before these loads ship."
+        )
+        for match in tt4_matches:
+            with st.expander(
+                f"Load {match.get('load', '')} — {match.get('customer', '')} — {match.get('time', '')}",
+                expanded=True,
+            ):
+                st.markdown(f"**Customer:** {match.get('customer', '')}")
+                st.markdown(f"**Carrier:** {match.get('carrier', '')}")
+                st.markdown(f"**Time / Door / Status:** {match.get('time', '')} / {match.get('door', '')} / {match.get('status', '')}")
+                st.markdown(f"**Trailer / Type:** {match.get('trailer', '')} / {match.get('type', '')}")
+                tt4_source = match.get("tt4", "")
+                if not tt4_source and "TT4-NEEDED" in (match.get("flags") or []):
+                    tt4_source = "TT4-NEEDED flag"
+                st.markdown(f"**TT4 Indicator:** {tt4_source}")
+                if match.get("comments"):
+                    st.markdown(f"**Comments:** {match.get('comments', '')}")
+                st.markdown(
+                    f"**Required Action:** Verify TT4 requirement is completed for load "
+                    f"{match.get('load', '')} before this load ships."
+                )
+    elif board_file is not None:
+        st.info("No TT4-required loads detected on today's board.")
 
     if crossdock_matches:
         st.markdown("---")
