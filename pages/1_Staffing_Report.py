@@ -186,6 +186,249 @@ def get_groq_client():
     )
 
 
+
+# ============================================================
+#  CROSS DOCK DAILY INPUT ALERTS
+#  Daily uploaded Excel. Matches Cross Dock Trip # to board load #.
+#  Does NOT go to AI. This is a direct Python alert only.
+# ============================================================
+
+def normalize_crossdock_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.strftime("%m/%d/%Y")
+    text = str(value).replace("\n", " ").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def normalize_crossdock_load(value):
+    """Return a clean 5-9 digit load number from Trip # / load fields."""
+    text = normalize_crossdock_text(value)
+    if not text:
+        return ""
+    if re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", text):
+        return ""
+    if re.fullmatch(r"\d{1,2}:\d{2}", text):
+        return ""
+    text = re.sub(r"^LD", "", text, flags=re.IGNORECASE)
+    digits = re.sub(r"[^0-9]", "", text)
+    return digits if 5 <= len(digits) <= 9 else ""
+
+
+def parse_crossdock_pallets(value):
+    text = normalize_crossdock_text(value).replace(",", "")
+    if not text:
+        return 0
+    try:
+        return int(round(float(text)))
+    except Exception:
+        digits = re.sub(r"[^0-9]", "", text)
+        return int(digits) if digits else 0
+
+
+def normalize_crossdock_header(value):
+    return re.sub(r"[^a-z0-9]+", "", normalize_crossdock_text(value).lower())
+
+
+def detect_crossdock_header_map(values):
+    """
+    Expected headers in the uploaded Cross Dock file:
+    Order# -PO# | Customer | #pallets | Location | Est Dispatch | Trip #
+    """
+    header_map = {}
+    for idx, value in enumerate(values):
+        header = normalize_crossdock_header(value)
+        if not header:
+            continue
+        if "order" in header or "po" in header:
+            header_map["order_po"] = idx
+        elif "customer" in header:
+            header_map["customer"] = idx
+        elif "pallet" in header:
+            header_map["pallets"] = idx
+        elif "location" in header:
+            header_map["location"] = idx
+        elif "dispatch" in header:
+            header_map["est_dispatch"] = idx
+        elif "trip" in header or "load" in header:
+            header_map["trip_load"] = idx
+    if "trip_load" in header_map and ("location" in header_map or "pallets" in header_map):
+        return header_map
+    return None
+
+
+def get_crossdock_value(values, header_map, key):
+    idx = header_map.get(key)
+    if idx is None or idx >= len(values):
+        return ""
+    return values[idx]
+
+
+def read_crossdock_rows(crossdock_file):
+    """Read every routed Cross Dock row from the daily upload."""
+    if crossdock_file is None:
+        return []
+
+    crossdock_file.seek(0)
+    file_name = crossdock_file.name.lower()
+    rows = []
+
+    try:
+        if file_name.endswith(".xls"):
+            sheets = pd.read_excel(crossdock_file, sheet_name=None, header=None, engine="xlrd")
+            for sheet_name, df in sheets.items():
+                header_map = None
+                for idx, row in df.fillna("").iterrows():
+                    values = [normalize_crossdock_text(v) for v in row.tolist()]
+                    detected = detect_crossdock_header_map(values)
+                    if detected:
+                        header_map = detected
+                        continue
+                    if not header_map:
+                        continue
+                    trip_load = normalize_crossdock_load(get_crossdock_value(values, header_map, "trip_load"))
+                    if not trip_load:
+                        continue
+                    rows.append({
+                        "source_sheet": sheet_name,
+                        "row_number": int(idx) + 1,
+                        "trip_load": trip_load,
+                        "order_po": normalize_crossdock_text(get_crossdock_value(values, header_map, "order_po")),
+                        "customer": normalize_crossdock_text(get_crossdock_value(values, header_map, "customer")),
+                        "pallets": parse_crossdock_pallets(get_crossdock_value(values, header_map, "pallets")),
+                        "location": normalize_crossdock_text(get_crossdock_value(values, header_map, "location")),
+                        "est_dispatch": normalize_crossdock_text(get_crossdock_value(values, header_map, "est_dispatch")),
+                    })
+            return rows
+
+        wb = load_workbook(crossdock_file, data_only=True)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            header_map = None
+            for row_idx in range(1, ws.max_row + 1):
+                values = [normalize_crossdock_text(ws.cell(row_idx, col).value) for col in range(1, ws.max_column + 1)]
+                detected = detect_crossdock_header_map(values)
+                if detected:
+                    header_map = detected
+                    continue
+                if not header_map:
+                    continue
+                trip_load = normalize_crossdock_load(get_crossdock_value(values, header_map, "trip_load"))
+                if not trip_load:
+                    continue
+                rows.append({
+                    "source_sheet": sheet_name,
+                    "row_number": row_idx,
+                    "trip_load": trip_load,
+                    "order_po": normalize_crossdock_text(get_crossdock_value(values, header_map, "order_po")),
+                    "customer": normalize_crossdock_text(get_crossdock_value(values, header_map, "customer")),
+                    "pallets": parse_crossdock_pallets(get_crossdock_value(values, header_map, "pallets")),
+                    "location": normalize_crossdock_text(get_crossdock_value(values, header_map, "location")),
+                    "est_dispatch": normalize_crossdock_text(get_crossdock_value(values, header_map, "est_dispatch")),
+                })
+        return rows
+
+    finally:
+        crossdock_file.seek(0)
+
+
+def find_crossdock_matches(crossdock_rows, board_rows):
+    """Match Cross Dock Trip # to parsed board load number."""
+    board_by_load = {}
+    for row in board_rows or []:
+        load = normalize_crossdock_load(row.get("load") or row.get("load_number"))
+        if load and load not in board_by_load:
+            board_by_load[load] = row
+
+    matches = []
+    for cd in crossdock_rows or []:
+        load = normalize_crossdock_load(cd.get("trip_load"))
+        if not load or load not in board_by_load:
+            continue
+        board = board_by_load[load]
+        matches.append({
+            **cd,
+            "load": load,
+            "board_customer": board.get("customer", ""),
+            "board_time": board.get("time") or board.get("appt_time", ""),
+            "board_door": board.get("door", ""),
+            "board_status": board.get("status", ""),
+            "board_type": board.get("type", ""),
+        })
+    return matches
+
+
+def write_crossdock_alerts_to_excel(wb, crossdock_matches):
+    """Create a workbook tab with matched Cross Dock alerts."""
+    if not crossdock_matches:
+        return
+
+    sheet_name = "Cross Dock Alerts"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue = "0F5B78"
+    orange = "C55A11"
+    white = "FFFFFF"
+    light_orange = "FCE4D6"
+    thin = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "Cross Dock Alerts — Verify Before Shipping"
+    ws["A1"].font = Font(size=16, bold=True, color=white)
+    ws["A1"].fill = PatternFill("solid", fgColor=orange)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:J1")
+
+    headers = [
+        "Load #", "Board Customer", "Appt Time", "Door", "Status",
+        "Cross Dock Customer", "Order/PO", "Pallets", "Location", "Required Action"
+    ]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(3, col)
+        cell.value = header
+        cell.font = Font(bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=dark_blue)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    for row_idx, match in enumerate(crossdock_matches, 4):
+        action = (
+            f"Verify {match.get('pallets', 0)} pallet(s) located at {match.get('location', '')} "
+            f"are 100% on load {match.get('load', '')} before this load ships."
+        )
+        values = [
+            match.get("load", ""),
+            match.get("board_customer", ""),
+            match.get("board_time", ""),
+            match.get("board_door", ""),
+            match.get("board_status", ""),
+            match.get("customer", ""),
+            match.get("order_po", ""),
+            match.get("pallets", 0),
+            match.get("location", ""),
+            action,
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row_idx, col)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=light_orange)
+
+    widths = [14, 28, 12, 10, 16, 28, 18, 10, 14, 70]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = "A4"
+
+
 # ============================================================
 #  NAME LOADING
 #  Reads directly from the staffing sheets (col A), filtered
@@ -2343,6 +2586,17 @@ board_file = st.file_uploader(
 if board_file:
     st.success("Board file loaded — ready for analysis.")
 
+st.subheader("Cross Dock Sheet Excel")
+crossdock_file = st.file_uploader(
+    "Upload the daily Cross Dock sheet Excel",
+    type=["xlsx", "xls"],
+    help="Matches Cross Dock Trip # against the board load # and alerts you when a pallet/location must be verified before shipping.",
+)
+
+if crossdock_file:
+    st.success("Cross Dock sheet loaded — alerts will be matched against the board.")
+
+if board_file:
     with st.expander("Preview: What Python parsed from the board (no AI tokens used)", expanded=False):
         try:
             board_file.seek(0)
@@ -2595,10 +2849,24 @@ if st.button("Generate Staffing Report"):
 
     board_analysis_text = None
     oc_matches = []
+    crossdock_matches = []
 
     if board_file is not None:
         with st.spinner("Reading board file → scanning for Opportunity Customers → running AI analysis (single call)..."):
             board_text    = read_board_file_to_text(board_file)
+
+            # Cross Dock matching is a direct Python alert only. It does not go to AI.
+            if crossdock_file is not None:
+                try:
+                    board_payload_for_crossdock = json.loads(board_text)
+                    board_rows_for_crossdock = board_payload_for_crossdock.get("all_outbound_rows", [])
+                    crossdock_rows = read_crossdock_rows(crossdock_file)
+                    crossdock_matches = find_crossdock_matches(crossdock_rows, board_rows_for_crossdock)
+                    write_crossdock_alerts_to_excel(wb, crossdock_matches)
+                except Exception as e:
+                    st.error(f"Cross Dock alert matching failed: {e}")
+                    st.exception(e)
+
             oc_matches    = find_oc_customers_in_board(board_text)
             oc_alert_text = build_oc_alert_text(oc_matches)
 
@@ -2658,6 +2926,30 @@ if st.button("Generate Staffing Report"):
         pass
 
     st.success("Staffing report generated successfully.")
+
+    if crossdock_matches:
+        st.markdown("---")
+        st.subheader("Cross Dock Alerts")
+        st.error(
+            "The following Cross Dock pallet(s) matched loads on today's board. "
+            "Verify these pallet(s) are 100% on the correct load before shipping."
+        )
+        for match in crossdock_matches:
+            with st.expander(
+                f"Load {match.get('load', '')} — {match.get('pallets', 0)} pallet(s) at {match.get('location', '')}",
+                expanded=True,
+            ):
+                st.markdown(f"**Board Customer:** {match.get('board_customer', '')}")
+                st.markdown(f"**Board Time / Door / Status:** {match.get('board_time', '')} / {match.get('board_door', '')} / {match.get('board_status', '')}")
+                st.markdown(f"**Cross Dock Customer:** {match.get('customer', '')}")
+                st.markdown(f"**Order/PO:** {match.get('order_po', '')}")
+                st.markdown(f"**Location:** {match.get('location', '')}")
+                st.markdown(
+                    f"**Required Action:** Verify {match.get('pallets', 0)} pallet(s) located at "
+                    f"{match.get('location', '')} are 100% on load {match.get('load', '')} before this load ships."
+                )
+    elif crossdock_file is not None and board_file is not None:
+        st.info("No Cross Dock pallets matched the load numbers on today's board.")
 
     if oc_matches:
         st.markdown("---")
