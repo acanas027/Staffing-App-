@@ -3027,6 +3027,79 @@ def extract_ai_top_action_items_lines(board_analysis_text):
     return output
 
 
+
+def is_oc_related_pdf_action(line):
+    """Return True when an AI action is an OC/customer-alert action already covered in Critical Load Alerts."""
+    clean = clean_pdf_text(line).lower()
+    if not clean:
+        return False
+
+    oc_terms = [
+        " oc ", " oc-", "oc ", "opportunity customer", "customer list",
+        "sign-off", "sign off", "photo", "photos", "picture", "pictures",
+        "special handling", "dc supervisor sign",
+    ]
+    padded = f" {clean} "
+    return any(term in padded for term in oc_terms)
+
+
+def filter_ai_actions_for_pdf(lines):
+    """Remove OC-specific AI actions from the PDF action page because OC actions already have their own alert table."""
+    filtered = []
+    seen = set()
+    for line in lines or []:
+        clean = clean_pdf_text(line)
+        if not clean or is_oc_related_pdf_action(clean):
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(clean)
+    return filtered
+
+
+def filter_written_recommendations_for_pdf(recommendations):
+    """Keep only analytical/insight recommendations; remove lines that only restate staffing facts."""
+    insight_lines = []
+    seen = set()
+
+    fact_patterns = [
+        r"^current labor balance estimate",
+        r"^(unloading|receiving|picking|tasking|loading):\s*approximately\s+[-+]?\d",
+        r"^(unloading|receiving|picking|tasking|loading):\s*staffing is balanced",
+        r"^(unloading|receiving|picking|tasking|loading):\s*approximately.*labor-hours",
+    ]
+
+    for rec in recommendations or []:
+        clean = clean_pdf_text(rec)
+        if not clean:
+            continue
+        low = clean.lower()
+
+        if any(re.search(pattern, low) for pattern in fact_patterns):
+            continue
+
+        # Keep insight/action language only.
+        insight_keywords = [
+            "risk", "avoid", "protect", "prioritize", "no surplus", "no safe",
+            "requires overtime", "early 2nd", "borrowing labor", "flow",
+            "congestion", "late departures", "service failures", "shorts",
+            "significantly heavier", "focus on", "use lead/extra", "move into",
+            "proactively", "final hours", "get ahead",
+        ]
+        if not any(k in low for k in insight_keywords):
+            continue
+
+        key = low
+        if key in seen:
+            continue
+        seen.add(key)
+        insight_lines.append(clean)
+
+    return insight_lines
+
+
 def build_pdf_board_summary_rows(selected_rows):
     """Small first-page board summary table for the selected day only."""
     counts = {
@@ -3373,14 +3446,20 @@ def build_pdf_report(
 
     story.append(PageBreak())
 
-    # 4. Top Action Items - AI only
+    # 4. Top Action Items - AI actions, excluding OC actions already covered in Critical Load Alerts.
     story.append(Paragraph("4. Top Action Items", styles["Section"]))
     story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
-    top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
+    top_action_lines = filter_ai_actions_for_pdf(extract_ai_top_action_items_lines(board_analysis_text))
     if top_action_lines:
         story.extend(pdf_paragraph_list_large(top_action_lines[:80], styles))
     else:
-        story.append(Paragraph("AI top action items were not generated.", styles["Body"]))
+        story.append(Paragraph("No non-OC AI top action items were generated.", styles["Body"]))
+
+    insight_recommendations = filter_written_recommendations_for_pdf(recommendations)
+    if insight_recommendations:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Written Recommendations - Operational Insights", styles["Subsection"]))
+        story.extend(pdf_paragraph_list_large(insight_recommendations[:30], styles))
 
     # Removed possible outcomes / staffing-engine recommendation page per report cleanup.
     doc.build(story, onFirstPage=pdf_add_footer, onLaterPages=pdf_add_footer)
@@ -3432,19 +3511,25 @@ def compute_recommended_allocation(
     present_recommendations, summary_table = build_summary(staff, needed)
 
     task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+
+    # The recommendation pop-up should show the operational NEED by function,
+    # not the number the skill-based assignment was able to fill with the people present.
+    # This keeps the pop-up aligned with the Staffing Summary "Needed" column and
+    # preserves the minimum rule: 2 Unloaders and 2 Receivers.
     recommended_counts = {
-        t: int(summary_table.loc[t, "Assigned"]) if t in summary_table.index else 0
+        t: int(needed.get(t, 0))
         for t in task_order
     }
     total_present = len(present_recommendations)
-    lead_extra = int(
-        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
-    )
+    total_recommended = sum(recommended_counts.values())
+    lead_extra = max(0, total_present - total_recommended)
 
     return {
         "needed": needed,
         "recommended_counts": recommended_counts,
         "total_present": total_present,
+        "total_recommended": total_recommended,
+        "short_by": max(0, total_recommended - total_present),
         "lead_extra": lead_extra,
     }
 
@@ -3907,9 +3992,14 @@ if reco:
     rc = reco["recommended_counts"]
 
     st.subheader("Recommended Allocation")
+    short_by = int(reco.get("short_by", 0))
+    bench_text = (
+        f"Short versus recommended need: {short_by}." if short_by > 0
+        else f"Extra over today's workload (bench): {reco['lead_extra']}."
+    )
     st.caption(
         f"Built from {reco['total_present']} present. "
-        f"Extra over today's workload (bench): {reco['lead_extra']}. "
+        f"{bench_text} "
         "If you change any input on the left, click Compute again to refresh."
     )
     reco_df = pd.DataFrame(
