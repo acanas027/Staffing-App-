@@ -2149,13 +2149,34 @@ def appointment_controlled_by_allocation(
     pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
     load_frac = min(1.0, (loaders * LOAD_RATE * hrs) / loading_target_loads) if loading_target_loads > 0 else 1.0
 
-    binding_frac = min(pick_frac, pull_frac, load_frac)
-    loads_controlled = min(total_loads, int(round(binding_frac * loading_target_loads)))
+    # Convert each stream's coverage into load ceilings separately.
+    # Picking and Tasking are measured against the full selected-day board because
+    # they create/feed ready freight. Loading is capped by the 52% day-load target.
+    # This avoids undercounting controlled loads by multiplying the weakest percent
+    # against only the loading target.
+    pick_supported_loads = int(round(pick_frac * total_loads))
+    pull_supported_loads = int(round(pull_frac * total_loads))
+    load_supported_loads = int(round(min(loaders * LOAD_RATE * hrs, loading_target_loads)))
 
-    # Which stream is the wall?
-    fr_map = {"Picking": pick_frac, "Tasking/Pulls": pull_frac, "Loading": load_frac}
-    binding_name = min(fr_map, key=fr_map.get)
-    if binding_frac >= 0.999:
+    loads_controlled = max(
+        0,
+        min(
+            total_loads,
+            pick_supported_loads,
+            pull_supported_loads,
+            load_supported_loads,
+        )
+    )
+
+    # Which stream is the wall? Use load ceilings, not percentages, so the
+    # bottleneck matches the actual controlled-through calculation.
+    support_map = {
+        "Picking": pick_supported_loads,
+        "Tasking/Pulls": pull_supported_loads,
+        "Loading": load_supported_loads,
+    }
+    binding_name = min(support_map, key=support_map.get)
+    if loads_controlled >= total_loads:
         binding_name = "None (controls full day)"
 
     # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
