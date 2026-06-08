@@ -1939,6 +1939,7 @@ PICK_RATE = 185.0   # cases/hr/person
 PULL_RATE = 25.0    # full pallets/hr/person
 LOAD_RATE = 1.0     # trailers/hr/person
 TASK_FLOOR = 4      # always-on replenishment + putaway, before full-pallet pulls
+LOAD_TARGET_SHARE = 0.52  # 1st-shift loading target = 52% of selected-day outbound loads
 
 
 def compute_throughput_optimal_allocation(
@@ -1975,6 +1976,14 @@ def compute_throughput_optimal_allocation(
     except Exception:
         total_loads = 0
 
+    # Loading is not optimized against the entire day board. Operationally,
+    # 1st shift loading target is 52% of selected-day loads; Picking/Tasking
+    # may still create more ready freight to set up 2nd shift, but loaders
+    # should not be over-assigned beyond the 52% loading target.
+    loading_target_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
+    if total_loads > 0 and loading_target_loads <= 0:
+        loading_target_loads = 1
+
     picks_left = max(0.0, float(picks_left or 0))
     pulls_left = max(0.0, float(pulls_left or 0))
 
@@ -1996,7 +2005,7 @@ def compute_throughput_optimal_allocation(
 
     # If there are outbound loads, keep at least one loader. More loaders must be
     # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
-    min_loading = 1 if total_loads > 0 else 0
+    min_loading = 1 if loading_target_loads > 0 else 0
     if min_loading and remaining > 0:
         alloc["Loading"] = 1
         remaining -= 1
@@ -2033,7 +2042,10 @@ def compute_throughput_optimal_allocation(
             pick_feed = _loads_feedable_by_pick(pickers)
             pull_feed = _loads_feedable_by_pull(pull_extra)
             freight_feed = min(pick_feed, pull_feed, float(total_loads))
-            loading_capacity = min(float(total_loads), loaders * LOAD_RATE * hrs)
+            # Loading target is 52% of selected-day loads, not the full board.
+            # This prevents loading from taking people that Picking/Tasking need
+            # to create ready freight and set up 2nd shift.
+            loading_capacity = min(float(loading_target_loads), loaders * LOAD_RATE * hrs)
             controlled = min(freight_feed, loading_capacity)
 
             # Do not reward loaders that cannot be fed by Picking/Tasking.
@@ -2127,15 +2139,18 @@ def appointment_controlled_by_allocation(
     picks_left = pdf_number(today_totals.get("picks_left_today", 0))
     pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
     total_loads = len(selected_rows)
+    loading_target_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
+    if total_loads > 0 and loading_target_loads <= 0:
+        loading_target_loads = 1
 
     pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
 
     pick_frac = min(1.0, (pickers * PICK_RATE * hrs) / picks_left) if picks_left > 0 else 1.0
     pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
-    load_frac = min(1.0, (loaders * LOAD_RATE * hrs) / total_loads) if total_loads > 0 else 1.0
+    load_frac = min(1.0, (loaders * LOAD_RATE * hrs) / loading_target_loads) if loading_target_loads > 0 else 1.0
 
     binding_frac = min(pick_frac, pull_frac, load_frac)
-    loads_controlled = int(round(binding_frac * total_loads))
+    loads_controlled = min(total_loads, int(round(binding_frac * loading_target_loads)))
 
     # Which stream is the wall?
     fr_map = {"Picking": pick_frac, "Tasking/Pulls": pull_frac, "Loading": load_frac}
@@ -2167,7 +2182,8 @@ def appointment_controlled_by_allocation(
         "pick_frac": round(pick_frac, 3),
         "pull_frac": round(pull_frac, 3),
         "load_frac": round(load_frac, 3),
-        "note": "Capacity ceiling for shift end; loading depends on picking finishing first.",
+        "loading_target_loads": loading_target_loads,
+        "note": f"Capacity ceiling for shift end; loading target uses 52% of selected-day loads ({loading_target_loads}). Loading still depends on Picking/Tasking feed.",
     }
 
 
@@ -2254,6 +2270,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "pick_coverage_pct": 0,
         "pull_coverage_pct": 0,
         "load_coverage_pct": 0,
+        "loading_target_loads": 0,
     }
 
     if not board_text:
@@ -2306,6 +2323,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     loading_capacity = loaders * LOAD_RATE * hrs
 
     total_loads = int(controlled.get("selected_day_loads", 0) or 0)
+    loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
     loads_controlled = int(controlled.get("loads_controlled", 0) or 0)
     cutoff = str(controlled.get("cutoff", "n/a"))
     bottleneck = str(controlled.get("binding", "Unknown"))
@@ -2363,6 +2381,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "estimated_pulls_for_target": round(pulls_left * float(controlled.get("pull_frac", 0) or 0)),
         "loads_controlled": loads_controlled,
         "selected_day_loads": total_loads,
+        "loading_target_loads": loading_target_loads,
         "controlled_through_appt": cutoff,
         "pick_coverage_pct": int(float(controlled.get("pick_frac", 0) or 0) * 100),
         "pull_coverage_pct": int(float(controlled.get("pull_frac", 0) or 0) * 100),
@@ -2401,7 +2420,8 @@ def render_python_shift_goal_preview(preview):
     st.caption(
         f"Picks left: {preview.get('picks_left', 0):,} | "
         f"Pulls left: {preview.get('pulls_left', 0):,} | "
-        f"Open loads in target wave: {preview.get('loads_to_stage_for_target', 0)}"
+        f"Open loads in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
+        f"Loading target: {preview.get('loading_target_loads', 0)} loads (52% of day)"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
