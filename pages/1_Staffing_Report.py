@@ -7,6 +7,7 @@ from openpyxl.chart.layout import Layout, ManualLayout
 from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
+import shutil
 import re
 import json
 import datetime
@@ -3613,18 +3614,50 @@ def pdf_add_footer(canvas, doc):
 
 
 def pdf_table(data, col_widths=None, header_fill="#0F5B78"):
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    """
+    Standard PDF table that wraps cell text.
+    This prevents long staffing/capacity values from running into neighboring cells.
+    """
+    header_style = ParagraphStyle(
+        "PdfTableHeader",
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=9.5,
+        textColor=colors.white,
+        wordWrap="CJK",
+    )
+    body_style = ParagraphStyle(
+        "PdfTableBody",
+        fontName="Helvetica",
+        fontSize=7.1,
+        leading=8.6,
+        textColor=colors.black,
+        wordWrap="CJK",
+    )
+
+    def _wrap_cell(value, style):
+        # Leave existing ReportLab flowables alone.
+        if hasattr(value, "wrapOn"):
+            return value
+        return Paragraph(pdf_safe(value), style)
+
+    wrapped_data = []
+    for row_idx, row in enumerate(data):
+        style_for_row = header_style if row_idx == 0 else body_style
+        wrapped_data.append([_wrap_cell(cell, style_for_row) for cell in row])
+
+    table = Table(wrapped_data, colWidths=col_widths, repeatRows=1)
     style = TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_fill)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTSIZE", (0, 1), (-1, -1), 7.5),
+        ("FONTSIZE", (0, 1), (-1, -1), 7.1),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FB")]),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ])
@@ -3745,11 +3778,10 @@ def build_pdf_board_summary_rows(selected_rows):
         "Total loads": 0,
         "Completed": 0,
         "RTL": 0,
-        "R/S waiting for product": 0,
+        "R/S + Loaded Short": 0,
         "Picking/Short": 0,
         "Picking no short": 0,
         "Blank/Not Started": 0,
-        "Loaded Short": 0,
     }
 
     for row in selected_rows or []:
@@ -3761,14 +3793,16 @@ def build_pdf_board_summary_rows(selected_rows):
             counts["Completed"] += 1
         elif status_upper == "RTL" or "READY TO LOAD" in status_upper:
             counts["RTL"] += 1
-        elif status_upper in {"R/S", "READY/SHORT"} or "R/S" in status_upper:
-            counts["R/S waiting for product"] += 1
+        elif (
+            status_upper in {"R/S", "READY/SHORT"}
+            or "R/S" in status_upper
+            or "LOADED SHORT" in status_upper
+        ):
+            counts["R/S + Loaded Short"] += 1
         elif "PICKING/SHORT" in status_upper or "PICKING SHORT" in status_upper:
             counts["Picking/Short"] += 1
         elif status_upper == "PICKING":
             counts["Picking no short"] += 1
-        elif "LOADED SHORT" in status_upper:
-            counts["Loaded Short"] += 1
         elif status_upper == "LOADED":
             pass
         elif not status:
@@ -3782,11 +3816,10 @@ def build_pdf_board_summary_rows(selected_rows):
         ["Total loads", counts["Total loads"]],
         ["Completed", counts["Completed"]],
         ["RTL", counts["RTL"]],
-        ["R/S waiting for product", counts["R/S waiting for product"]],
+        ["R/S + Loaded Short", counts["R/S + Loaded Short"]],
         ["Picking/Short", counts["Picking/Short"]],
         ["Picking no short", counts["Picking no short"]],
         ["Blank/Not Started", counts["Blank/Not Started"]],
-        ["Loaded Short", counts["Loaded Short"]],
     ]
 
 
@@ -3911,9 +3944,57 @@ def build_pdf_report(
 
     picks_left = py_today.get("picks_left_today", 0)
     pulls_left = py_today.get("pulls_left_today", 0)
-    pickers = int(summary_table.loc["Picking", "Assigned"]) if summary_table is not None and "Picking" in summary_table.index else 0
-    loaders = int(summary_table.loc["Loading", "Assigned"]) if summary_table is not None and "Loading" in summary_table.index else 0
+
+    def _assigned_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Assigned"])
+        except Exception:
+            pass
+        return 0
+
+    def _needed_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Needed"])
+        except Exception:
+            pass
+        return 0
+
+    def _gap_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Difference"])
+        except Exception:
+            pass
+        return 0
+
+    def _tool_rec_count(task):
+        try:
+            if recommended_counts is not None and task in recommended_counts:
+                return int(recommended_counts.get(task, 0))
+        except Exception:
+            pass
+        return None
+
+    def _staffing_fact(task):
+        assigned = _assigned_count(task)
+        needed_val = _needed_count(task)
+        gap_val = _gap_count(task)
+        text = f"{assigned} assigned / need {needed_val} / gap {gap_val:+d}"
+        tool_rec = _tool_rec_count(task)
+        if override_mode and tool_rec is not None:
+            text += f" / tool {tool_rec}"
+        return text
+
+    pickers = _assigned_count("Picking")
+    taskers = _assigned_count("Tasking")
+    loaders = _assigned_count("Loading")
+    unloaders = _assigned_count("Unloading")
+    receivers = _assigned_count("Receiving")
+
     picking_capacity = pickers * float(hours_remaining or 0) * 185
+    tasking_pull_capacity = max(0, taskers - TASK_FLOOR) * float(hours_remaining or 0) * 25
     loading_capacity = loaders * float(hours_remaining or 0)
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     service_risk, service_risk_reason = derive_service_risk_level(
@@ -3922,20 +4003,6 @@ def build_pdf_report(
 
     # 1. Staffing + Board Summary
     story.append(Paragraph("1. Staffing + Board Summary (Workload and Capacity)", styles["Section"]))
-
-    # Keep the top health/service/goal cells compact. The full goal detail is still
-    # available in the detailed facts and handoff sections, but this headline row
-    # should stay one-row tall in the PDF.
-    if python_shift_goal_preview:
-        _goal_cutoff = python_shift_goal_preview.get("target_cutoff", "") or python_shift_goal_preview.get("controlled_through_appt", "") or "n/a"
-        _goal_done = python_shift_goal_preview.get("loads_controlled", python_shift_goal_preview.get("target_load_count", 0))
-        _goal_total = python_shift_goal_preview.get("selected_day_loads", pacing.get("selected_day_total_loads", ""))
-        ai_shift_goal_compact = f"Control through appt {_goal_cutoff} ({_goal_done}/{_goal_total}) by {shift_end_label(shift)}."
-    else:
-        ai_shift_goal_compact = clean_pdf_text(ai_shift_goal)
-        if len(ai_shift_goal_compact) > 95:
-            ai_shift_goal_compact = ai_shift_goal_compact[:92].rstrip() + "..."
-
     health_table = Table([
         [
             Paragraph("SHIFT HEALTH", styles["Tiny"]),
@@ -3943,11 +4010,11 @@ def build_pdf_report(
             Paragraph("SHIFT GOAL - PYTHON SOURCE OF TRUTH", styles["Tiny"]),
         ],
         [
-            Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Tiny"]),
-            Paragraph(f"<b>{pdf_safe(service_risk)}</b>", styles["Tiny"]),
-            Paragraph(pdf_safe(ai_shift_goal_compact), styles["Tiny"]),
+            Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]),
+            Paragraph(f"<b>{pdf_safe(service_risk)}</b><br/>{pdf_safe(service_risk_reason)}", styles["BodySmall"]),
+            Paragraph(pdf_safe(ai_shift_goal), styles["BodySmall"]),
         ],
-    ], colWidths=[1.15 * inch, 1.25 * inch, 4.95 * inch], rowHeights=[0.24 * inch, 0.32 * inch])
+    ], colWidths=[1.15 * inch, 2.0 * inch, 4.2 * inch])
     health_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F5B78")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -3955,10 +4022,10 @@ def build_pdf_report(
         ("BACKGROUND", (1, 1), (1, 1), pdf_status_color(service_risk)),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]))
     story.append(health_table)
     story.append(Spacer(1, 6))
@@ -3968,13 +4035,15 @@ def build_pdf_report(
         ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
         ["Due by now", pacing.get("due_by_now", 0), "Due not done", pacing.get("due_not_done", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
-        ["Pickers assigned", pickers, "Picking capacity left", f"{picking_capacity:,.0f} cases"],
-        ["Loaders assigned", loaders, "Loading capacity left", f"{loading_capacity:,.1f} loads"],
+        ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
+        ["Tasking staffing", _staffing_fact("Tasking"), "Tasking/pull capacity", f"{tasking_pull_capacity:,.0f} pallets"],
+        ["Loading staffing", _staffing_fact("Loading"), "Loading capacity", f"{loading_capacity:,.1f} loads"],
+        ["Unloading staffing", _staffing_fact("Unloading"), "Receiving staffing", _staffing_fact("Receiving")],
         ["Net staffing gap", f"{net_gap:+d}", "Total present", len(present_recommendations)],
         ["Inbound loads", py_in.get("loads_read_from_inbound", 0), "Inbound on lot/at door", py_in.get("on_lot", 0) + py_in.get("at_door", 0)],
     ]
-    story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.5*inch, 1.4*inch, 1.6*inch, 2.85*inch]))
-    story.append(Spacer(1, 8))
+    story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.35*inch, 2.05*inch, 1.45*inch, 2.5*inch]))
+    story.append(Spacer(1, 5))
 
     handoff = build_second_shift_handoff_forecast(
         board_text=board_text,
@@ -3992,47 +4061,16 @@ def build_pdf_report(
     ]
     story.append(pdf_table([["Handoff Fact", "Value", "Handoff Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in handoff_rows], [1.65*inch, 1.25*inch, 1.85*inch, 2.6*inch]))
     story.append(Paragraph(pdf_safe(handoff.get("handoff_message", "")), styles["BodySmall"]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 5))
 
     story.append(Paragraph(f"Board summary - selected day ({pdf_safe(day)})", styles["Subsection"]))
     board_summary_rows = build_pdf_board_summary_rows(selected_rows)
     board_summary_data = [["Status", "Count"]] + board_summary_rows[1:]
     story.append(pdf_table(board_summary_data, [2.45*inch, 1.05*inch]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 4))
 
-    staffing_title = "Staffing by function - actual allocation" if override_mode else "Staffing by function"
-    story.append(Paragraph(staffing_title, styles["Subsection"]))
-    if override_mode:
-        staffing_rows = [["Function", "Needed", "Actual", "Actual Gap", "Tool Rec.", "Status"]]
-        if summary_table is not None:
-            for task, row in summary_table.iterrows():
-                staffing_rows.append([
-                    pdf_safe(task),
-                    int(row.get("Needed", 0)),
-                    int(row.get("Assigned", 0)),
-                    f"{int(row.get('Difference', 0)):+d}",
-                    int((recommended_counts or {}).get(task, 0)),
-                    pdf_safe(row.get("Status", "")),
-                ])
-        story.append(pdf_table(staffing_rows, [1.25*inch, 0.75*inch, 0.75*inch, 0.85*inch, 0.85*inch, 1.25*inch]))
-    else:
-        staffing_rows = [["Function", "Needed", "Assigned", "Gap", "Status"]]
-        if summary_table is not None:
-            for task, row in summary_table.iterrows():
-                staffing_rows.append([
-                    pdf_safe(task), int(row.get("Needed", 0)), int(row.get("Assigned", 0)),
-                    f"{int(row.get('Difference', 0)):+d}", pdf_safe(row.get("Status", ""))
-                ])
-        story.append(pdf_table(staffing_rows, [1.55*inch, 1.0*inch, 1.0*inch, 0.8*inch, 1.35*inch]))
-
-    if override_mode:
-        story.append(Paragraph("Allocation override context", styles["Subsection"]))
-        override_lines = ["The staffing table above uses the supervisor's actual allocation and shows the real gaps being run right now."]
-        if recommended_counts:
-            override_lines.append("Tool recommended allocation for comparison only: " + ", ".join(f"{k}: {v}" for k, v in recommended_counts.items()))
-        if deviation_reason:
-            override_lines.append("Supervisor reason: " + deviation_reason)
-        story.extend(pdf_paragraph_list(override_lines, styles))
+    # Staffing by function was folded into the first-page fact table above so the full
+    # first-page summary stays on one PDF page.
 
     # Removed executive AI summary from the first page to avoid repeating the KPI facts.
     story.append(PageBreak())
@@ -4120,7 +4158,9 @@ def build_pdf_report(
     else:
         story.append(Paragraph("AI prioritization was not generated.", styles["Body"]))
 
-    story.append(PageBreak())
+    # Keep Top Action Items on the same page when Prioritization is short.
+    # ReportLab will naturally continue onto a new page if the content is too long.
+    story.append(Spacer(1, 10))
 
     # 4. Top Action Items - AI only
     story.append(Paragraph("4. Top Action Items", styles["Section"]))
@@ -4250,13 +4290,22 @@ def run_full_generation(
     crossdock_file=None, override_mode=False, actual_counts=None,
     recommended_counts=None, deviation_reason=None,
 ):
-    """Phase 2: full report: reads template inputs, reads board, runs AI, and builds PDF only.
+    """Phase 2: full report: writes workbook, reads board, runs AI, and builds direct alerts."""
+    working_file = f"working_staffing_file_{day}_{shift}.xlsx"
+    shutil.copyfile(TEMPLATE_FILE, working_file)
 
-    Important: the staffing_template.xlsx file is still the source for worker names,
-    skills, best fit, and the staffing sheets. This function no longer creates,
-    writes, saves, or returns a generated Excel workbook.
-    """
+    wb = load_workbook(working_file)
+    ws = wb["Inputs"]
+
     total_outbound_loads_actual = total_outbound_loads_day * 0.52
+
+    ws["B1"] = day
+    ws["B2"] = shift
+    ws["B3"] = total_cases
+    ws["B4"] = hours_remaining
+    ws["B8"] = crossroads_open
+    ws["B9"] = deer_creek_open
+    ws["B10"] = msb_open
 
     board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
     if board_file is not None:
@@ -4265,11 +4314,6 @@ def run_full_generation(
             board_input_totals = read_board_today_totals_from_excel(board_file)
         except Exception:
             board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
-        finally:
-            try:
-                board_file.seek(0)
-            except Exception:
-                pass
 
     if board_file is not None and (
         board_input_totals.get("picks_left_today") is not None
@@ -4280,6 +4324,29 @@ def run_full_generation(
     else:
         cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
 
+    ws["B5"] = cases_to_pick
+    ws["B6"] = full_pallets
+    ws["B7"] = total_outbound_loads_actual
+
+    selected = {name.strip().lower() for name in present_workers}
+    ws_crew_ref = wb["Crew Sheet"]
+    crew_name_to_inputs_row = {}
+    for _r in range(2, ws_crew_ref.max_row + 1):
+        crew_name = ws_crew_ref.cell(_r, 1).value
+        if crew_name and str(crew_name).strip():
+            crew_name_to_inputs_row[str(crew_name).strip().lower()] = _r + 1
+    for _r in range(3, max(crew_name_to_inputs_row.values(), default=3) + 1):
+        ws.cell(_r, 7).value = ""
+    for worker in selected:
+        if worker in crew_name_to_inputs_row:
+            ws.cell(crew_name_to_inputs_row[worker], 7).value = "x"
+
+    ws["B12"] = notes
+
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(working_file)
+
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
@@ -4287,14 +4354,10 @@ def run_full_generation(
         full_pallets_override=full_pallets,
     )
 
-    # Keep using the template Excel as INPUT only. This preserves names, skills,
-    # best-fit logic, and shift-specific staffing sheets without generating an Excel output.
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
-    staff = pd.read_excel(TEMPLATE_FILE, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
+    staff = pd.read_excel(working_file, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
     staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
     staff = staff[staff["Name"].notna()].copy()
-
-    selected = {name.strip().lower() for name in present_workers}
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
@@ -4335,6 +4398,9 @@ def run_full_generation(
     )
 
     executive_summary_text = None
+    wb = load_workbook(working_file)
+    write_recommendations_to_excel(wb, staff, shift)
+
     board_analysis_text = None
     python_shift_goal_preview = None
     oc_matches = []
@@ -4346,17 +4412,19 @@ def run_full_generation(
         board_file.seek(0)
         board_text = read_board_file_to_text(board_file)
 
-        # Direct Python alerts only. These do not go to AI or an Excel workbook.
+        # Direct Python alerts only. These do not go to AI.
         try:
             board_payload_for_alerts = json.loads(board_text)
             board_rows_for_alerts = board_payload_for_alerts.get("all_outbound_rows", [])
 
             oc_load_matches = find_oc_load_matches(board_rows_for_alerts, day)
             tt4_matches = find_tt4_required_loads(board_rows_for_alerts, day)
+            write_tt4_alerts_to_excel(wb, tt4_matches)
 
             if crossdock_file is not None:
                 crossdock_rows = read_crossdock_rows(crossdock_file)
                 crossdock_matches = find_crossdock_matches(crossdock_rows, board_rows_for_alerts)
+                write_crossdock_alerts_to_excel(wb, crossdock_matches)
 
         except Exception as e:
             st.error(f"Direct alert matching failed: {e}")
@@ -4382,6 +4450,8 @@ def run_full_generation(
             recommended_allocation=ai_recommended, deviation_reason=ai_reason,
             python_shift_goal_preview=python_shift_goal_preview,
         )
+
+        write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
         
         # --- Snapshot today's commitments + shift goal for end-of-shift closeout ---
         try:
@@ -4420,6 +4490,20 @@ def run_full_generation(
     else:
         board_text = ""
 
+    build_dashboard(
+        wb, summary_table, present_recommendations, recommendations,
+        oc_matches=oc_matches, lead_extra_override=lead_extra_override,
+    )
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    try:
+        os.remove(working_file)
+    except Exception:
+        pass
+
     email_subject, email_body = build_email_draft(
         day=day, shift=shift, total_cases=total_cases, hours_remaining=hours_remaining,
         total_outbound_loads_day=total_outbound_loads_day, summary_table=summary_table,
@@ -4443,6 +4527,7 @@ def run_full_generation(
 
     return {
         "output_bytes": pdf_output_bytes,
+        "excel_output_bytes": output.getvalue(),
         "summary_table": summary_table,
         "present_recommendations": present_recommendations,
         "recommendations": recommendations,
@@ -4460,6 +4545,7 @@ def run_full_generation(
         "deviation_reason": deviation_reason,
         "python_shift_goal_preview": python_shift_goal_preview,
     }
+
 
 # ============================================================
 #  STREAMLIT INTERFACE
