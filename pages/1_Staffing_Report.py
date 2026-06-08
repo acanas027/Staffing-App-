@@ -2150,6 +2150,11 @@ def appointment_controlled_by_allocation(
         "loading_target_loads": 0,
         "base_loading_goal_loads": 0,
         "additional_loads_controlled": 0,
+        "remaining_candidate_loads": 0,
+        "pick_supported_total": 0,
+        "pull_supported_total": 0,
+        "load_supported_total": 0,
+        "final_controlled_total": 0,
         "note": "No board / allocation data.",
     }
     if not board_text:
@@ -2246,10 +2251,15 @@ def appointment_controlled_by_allocation(
 
     loads_controlled = min(total_loads, already_controlled + additional_controlled)
 
+    pick_supported_total = min(total_loads, already_controlled + pick_supported_additional)
+    pull_supported_total = min(total_loads, already_controlled + pull_supported_additional)
+    load_supported_total = min(total_loads, already_controlled + load_supported_additional)
+    final_controlled_total = loads_controlled
+
     support_map = {
-        "Picking": already_controlled + pick_supported_additional,
-        "Tasking/Pulls": already_controlled + pull_supported_additional,
-        "Loading": already_controlled + load_supported_additional,
+        "Picking": pick_supported_total,
+        "Tasking/Pulls": pull_supported_total,
+        "Loading": load_supported_total,
     }
     if remaining_candidate_loads <= 0 or loads_controlled >= total_loads:
         binding_name = "None (controls full day)"
@@ -2287,6 +2297,11 @@ def appointment_controlled_by_allocation(
         "loading_target_loads": loading_target_loads,
         "base_loading_goal_loads": base_loading_goal_loads,
         "additional_loads_controlled": additional_controlled,
+        "remaining_candidate_loads": remaining_candidate_loads,
+        "pick_supported_total": pick_supported_total,
+        "pull_supported_total": pull_supported_total,
+        "load_supported_total": load_supported_total,
+        "final_controlled_total": final_controlled_total,
         "note": (
             f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
             f"RTL counts for appointment cutoff but still needs loader work; R/S remains controlled but needs product follow-up. "
@@ -2376,6 +2391,11 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "rtl_controlled_loads": 0,
         "loading_target_loads": 0,
         "base_loading_goal_loads": 0,
+        "remaining_candidate_loads": 0,
+        "pick_supported_total": 0,
+        "pull_supported_total": 0,
+        "load_supported_total": 0,
+        "final_controlled_total": 0,
         "controlled_through_appt": "",
         "pick_coverage_pct": 0,
         "pull_coverage_pct": 0,
@@ -2438,6 +2458,11 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     rtl_controlled = int(controlled.get("rtl_controlled_loads", 0) or 0)
     loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
     base_loading_goal_loads = int(controlled.get("base_loading_goal_loads", 0) or 0)
+    remaining_candidate_loads = int(controlled.get("remaining_candidate_loads", 0) or 0)
+    pick_supported_total = int(controlled.get("pick_supported_total", 0) or 0)
+    pull_supported_total = int(controlled.get("pull_supported_total", 0) or 0)
+    load_supported_total = int(controlled.get("load_supported_total", 0) or 0)
+    final_controlled_total = int(controlled.get("final_controlled_total", loads_controlled) or 0)
     cutoff = str(controlled.get("cutoff", "n/a"))
     bottleneck = str(controlled.get("binding", "Unknown"))
 
@@ -2501,6 +2526,11 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "rtl_controlled_loads": rtl_controlled,
         "loading_target_loads": loading_target_loads,
         "base_loading_goal_loads": base_loading_goal_loads,
+        "remaining_candidate_loads": remaining_candidate_loads,
+        "pick_supported_total": pick_supported_total,
+        "pull_supported_total": pull_supported_total,
+        "load_supported_total": load_supported_total,
+        "final_controlled_total": final_controlled_total,
         "controlled_through_appt": cutoff,
         "pick_coverage_pct": int(float(controlled.get("pick_frac", 0) or 0) * 100),
         "pull_coverage_pct": int(float(controlled.get("pull_frac", 0) or 0) * 100),
@@ -2531,23 +2561,48 @@ def render_python_shift_goal_preview(preview):
     c2.metric("Main constraint", preview.get("main_constraint", "Unknown"))
     c3.metric("Target cutoff", preview.get("target_cutoff", ""))
 
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Picking capacity left", f"{preview.get('pick_capacity', 0):,} cases")
-    c5.metric("Tasking / pull capacity", f"{preview.get('pull_capacity', 0):,} pallets")
-    c6.metric("Loading capacity left", f"{preview.get('loading_capacity', 0)} loads")
+    st.markdown("**Capacity ceiling breakdown**")
+    selected_day_loads = int(preview.get("selected_day_loads", 0) or 0)
+    final_controlled = int(preview.get("final_controlled_total", preview.get("loads_controlled", 0)) or 0)
+
+    ceiling_rows = [
+        {
+            "Ceiling": "Already controlled now",
+            "Loads": f"{int(preview.get('already_controlled_loads', 0) or 0)} / {selected_day_loads}",
+            "Meaning": "Completed/Loaded/RTL/R/S already protected for appointment cutoff.",
+        },
+        {
+            "Ceiling": "Picking-supported total",
+            "Loads": f"{int(preview.get('pick_supported_total', 0) or 0)} / {selected_day_loads}",
+            "Meaning": "How many total loads the current pick capacity can feed.",
+        },
+        {
+            "Ceiling": "Tasking/Pulls-supported total",
+            "Loads": f"{int(preview.get('pull_supported_total', 0) or 0)} / {selected_day_loads}",
+            "Meaning": "How many total loads the current tasking/pull capacity can support.",
+        },
+        {
+            "Ceiling": "Loading-supported total",
+            "Loads": f"{int(preview.get('load_supported_total', 0) or 0)} / {selected_day_loads}",
+            "Meaning": "How many total loads the current loading capacity can support against the loading goal.",
+        },
+        {
+            "Ceiling": "Final controlled by shift end",
+            "Loads": f"{final_controlled} / {selected_day_loads}",
+            "Meaning": "Lowest ceiling wins; this is the controlled-through appointment target.",
+        },
+    ]
+    st.table(pd.DataFrame(ceiling_rows))
 
     st.caption(
+        f"Target cutoff: {preview.get('target_cutoff', '')} | "
+        f"Main constraint: {preview.get('main_constraint', 'Unknown')} | "
         f"Picks left: {preview.get('picks_left', 0):,} | "
         f"Pulls left: {preview.get('pulls_left', 0):,} | "
-        f"Loads controlled in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
-        f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
         f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
         f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
         f"(Completed/Loaded now + 52% of day)"
     )
-    st.write(f"**Why:** {preview.get('reason', '')}")
-    st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
-
 
 
 def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining, summary_table_or_counts):
