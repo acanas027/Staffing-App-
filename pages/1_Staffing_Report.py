@@ -1926,6 +1926,198 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
 
 
 
+
+# ============================================================
+#  THROUGHPUT-OPTIMAL ALLOCATION  (paste near compute_python_shift_goal_preview)
+#  Goal: control (pick + pull + stage) as many of TODAY's loads as possible
+#  before 2nd shift takes over at shift end. Picking is usually the wall, but
+#  Tasking has a hard floor of 4 (replenishment + putaway) before any full-pallet
+#  taskers are added, and Loading must keep up or staged loads pile up.
+# ============================================================
+
+PICK_RATE = 185.0   # cases/hr/person
+PULL_RATE = 25.0    # full pallets/hr/person
+LOAD_RATE = 1.0     # trailers/hr/person
+TASK_FLOOR = 4      # always-on replenishment + putaway, before full-pallet pulls
+
+
+def compute_throughput_optimal_allocation(
+    picks_left, pulls_left, total_loads, hours_remaining, present_total,
+    min_unload=2, min_receive=2, task_floor=TASK_FLOOR,
+):
+    """
+    Distribute present workers to MAXIMIZE loads controlled by shift end.
+    Reserves unload/receive minimums and the fixed tasking floor off the top,
+    then splits the rest across Picking, Loading, and ADDITIONAL full-pallet
+    taskers in proportion to each stream's remaining work measured in person-hours.
+    Returns a dict: Unloading, Receiving, Picking, Tasking, Loading.
+    """
+    try:
+        hrs = max(0.0, float(hours_remaining or 0))
+    except Exception:
+        hrs = 0.0
+
+    alloc = {
+        "Unloading": min_unload,
+        "Receiving": min_receive,
+        "Picking": 0,
+        "Tasking": task_floor,
+        "Loading": 0,
+    }
+
+    available = max(0, int(present_total) - min_unload - min_receive - task_floor)
+    if available <= 0 or hrs <= 0:
+        return alloc
+
+    pick_h = (picks_left or 0) / PICK_RATE          # picking work-hours
+    pull_h = (pulls_left or 0) / PULL_RATE          # ONLY full-pallet pulls flex here
+    load_h = (total_loads or 0) / LOAD_RATE         # staging work-hours
+    total_h = pick_h + pull_h + load_h
+    if total_h <= 0:
+        # No measurable work; park everyone on picking as the safe default.
+        alloc["Picking"] = available
+        return alloc
+
+    raw = {
+        "Picking": available * pick_h / total_h,
+        "Loading": available * load_h / total_h,
+        "PullExtra": available * pull_h / total_h,
+    }
+    floors = {k: int(v) for k, v in raw.items()}
+    used = sum(floors.values())
+    order = sorted(raw, key=lambda k: raw[k] - floors[k], reverse=True)
+    i = 0
+    while used < available:
+        floors[order[i % len(order)]] += 1
+        used += 1
+        i += 1
+
+    alloc["Picking"] = floors["Picking"]
+    alloc["Loading"] = floors["Loading"]
+    alloc["Tasking"] = task_floor + floors["PullExtra"]   # floor + flexible pulls
+    return alloc
+
+
+def appointment_controlled_by_allocation(
+    board_text, day, shift, hours_remaining, summary_table_or_counts,
+    task_floor=TASK_FLOOR,
+):
+    """
+    Given an allocation, compute how many of TODAY's loads it can control
+    (pick + pull + stage) by shift end, and the appointment time of the last
+    load in that controlled wave. The cutoff is the CONSEQUENCE of the plan:
+    a stronger plan controls a later appointment time.
+
+    `summary_table_or_counts` may be the staffing summary_table (uses 'Assigned')
+    or a plain dict like {"Picking":n,"Tasking":n,"Loading":n}.
+    Returns a dict for display.
+    """
+    blank = {
+        "loads_controlled": 0,
+        "selected_day_loads": 0,
+        "cutoff": "n/a",
+        "binding": "Unknown",
+        "pick_frac": 0.0, "pull_frac": 0.0, "load_frac": 0.0,
+        "note": "No board / allocation data.",
+    }
+    if not board_text:
+        return blank
+    try:
+        payload = json.loads(board_text or "{}")
+    except Exception:
+        return blank
+
+    all_rows = payload.get("all_outbound_rows", []) or []
+    today_totals = payload.get("python_verified_today_totals", {}) or {}
+    selected_rows = rows_for_selected_day(all_rows, day)
+    if not selected_rows:
+        return blank
+
+    # Pull the allocation counts out of either a DataFrame or a dict.
+    def _count(key):
+        try:
+            if hasattr(summary_table_or_counts, "loc") and key in summary_table_or_counts.index:
+                return int(summary_table_or_counts.loc[key, "Assigned"])
+        except Exception:
+            pass
+        try:
+            return int((summary_table_or_counts or {}).get(key, 0))
+        except Exception:
+            return 0
+
+    pickers = _count("Picking")
+    taskers = _count("Tasking")
+    loaders = _count("Loading")
+
+    try:
+        hrs = max(0.0, float(hours_remaining or 0))
+    except Exception:
+        hrs = 0.0
+
+    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
+    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
+    total_loads = len(selected_rows)
+
+    pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
+
+    pick_frac = min(1.0, (pickers * PICK_RATE * hrs) / picks_left) if picks_left > 0 else 1.0
+    pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
+    load_frac = min(1.0, (loaders * LOAD_RATE * hrs) / total_loads) if total_loads > 0 else 1.0
+
+    binding_frac = min(pick_frac, pull_frac, load_frac)
+    loads_controlled = int(round(binding_frac * total_loads))
+
+    # Which stream is the wall?
+    fr_map = {"Picking": pick_frac, "Tasking/Pulls": pull_frac, "Loading": load_frac}
+    binding_name = min(fr_map, key=fr_map.get)
+    if binding_frac >= 0.999:
+        binding_name = "None (controls full day)"
+
+    # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
+    timed = []
+    for r in selected_rows:
+        m = board_minutes_for_pacing(r.get("time") or r.get("appt_time"))
+        if m is not None:
+            timed.append(m)
+    timed.sort()
+    if not timed:
+        cutoff = "no appt times on board"
+    elif loads_controlled <= 0:
+        cutoff = "none — before first appt"
+    elif loads_controlled >= len(timed):
+        cutoff = f"{format_minutes_for_pacing(timed[-1])} (all today)"
+    else:
+        cutoff = format_minutes_for_pacing(timed[loads_controlled - 1])
+
+    return {
+        "loads_controlled": loads_controlled,
+        "selected_day_loads": total_loads,
+        "cutoff": cutoff,
+        "binding": binding_name,
+        "pick_frac": round(pick_frac, 3),
+        "pull_frac": round(pull_frac, 3),
+        "load_frac": round(load_frac, 3),
+        "note": "Capacity ceiling for shift end; loading depends on picking finishing first.",
+    }
+
+
+def render_allocation_controls_preview(label, controlled):
+    """Streamlit display of what one allocation controls by shift end."""
+    if not controlled:
+        return
+    st.markdown(f"**{label}**")
+    a, b, c = st.columns(3)
+    a.metric("Loads controlled by shift end",
+             f"{controlled['loads_controlled']} / {controlled['selected_day_loads']}")
+    b.metric("Controlled through appt", controlled["cutoff"])
+    c.metric("Bottleneck", controlled["binding"])
+    st.caption(
+        f"Coverage — picking {int(controlled['pick_frac']*100)}%, "
+        f"pulls {int(controlled['pull_frac']*100)}%, loading {int(controlled['load_frac']*100)}%. "
+        f"{controlled['note']}"
+    )
+
+
 # ============================================================
 #  PYTHON SHIFT GOAL / APPOINTMENT TARGET PREVIEW
 #  Source of truth for pre-report decision, AI goal, and PDF goal.
@@ -1968,9 +2160,9 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     """
     Python-only appointment target preview.
 
-    IMPORTANT: this now uses appointment_controlled_by_allocation() as the
-    source of truth, so the top target preview, the allocation controlled-through
-    preview, the AI goal, and the PDF goal all use the same cutoff/bottleneck.
+    IMPORTANT: this uses appointment_controlled_by_allocation() as the single
+    source of truth for the cutoff, bottleneck, and loads controlled. That keeps
+    the app preview, AI goal, PDF goal, and controlled-through display aligned.
     """
     empty = {
         "goal": "Upload a board and compute allocation to generate the appointment target.",
@@ -2010,7 +2202,6 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         empty["reason"] = "The board parser did not find rows matching the selected day."
         return empty
 
-    # Allocation-controlled result is the single source of truth for cutoff and bottleneck.
     controlled = appointment_controlled_by_allocation(
         board_text=board_text,
         day=day,
@@ -2035,72 +2226,59 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     pickers = _assigned("Picking")
     taskers = _assigned("Tasking")
     loaders = _assigned("Loading")
+
+    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
+    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
     pull_workers = max(0, taskers - TASK_FLOOR)
 
     pick_capacity = pickers * PICK_RATE * hrs
     pull_capacity = pull_workers * PULL_RATE * hrs
     loading_capacity = loaders * LOAD_RATE * hrs
 
-    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
-    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
-
+    total_loads = int(controlled.get("selected_day_loads", 0) or 0)
     loads_controlled = int(controlled.get("loads_controlled", 0) or 0)
-    selected_day_loads = int(controlled.get("selected_day_loads", len(selected_rows)) or 0)
-    cutoff = str(controlled.get("cutoff", "n/a") or "n/a")
-    binding = str(controlled.get("binding", "Unknown") or "Unknown")
+    cutoff = str(controlled.get("cutoff", "n/a"))
+    bottleneck = str(controlled.get("binding", "Unknown"))
 
-    if loads_controlled <= 0:
-        confidence = "NO"
-    elif loads_controlled < selected_day_loads:
-        confidence = "YES"
-    else:
-        confidence = "YES"
+    if total_loads <= 0:
+        return empty
 
-    if cutoff in ("n/a", "none — before first appt", "none - before first appt"):
-        goal = f"No appointment wave is fully controlled by shift end {shift_end_label(shift)}."
-    elif "all today" in cutoff:
-        goal = f"Pick & stage every selected-day load by shift end {shift_end_label(shift)}."
-    else:
-        goal = (
-            f"Pick & stage every load through appointment {cutoff} "
-            f"({loads_controlled}/{selected_day_loads} loads) by shift end {shift_end_label(shift)}."
-        )
+    confidence = "YES" if loads_controlled > 0 else "NO"
+    if loads_controlled < total_loads and bottleneck not in ("None", "None (controls full day)"):
+        confidence = "YES"  # The goal is the controlled wave, so this allocation can hit its own controlled cutoff.
 
-    pick_pct = int(round(float(controlled.get("pick_frac", 0) or 0) * 100))
-    pull_pct = int(round(float(controlled.get("pull_frac", 0) or 0) * 100))
-    load_pct = int(round(float(controlled.get("load_frac", 0) or 0) * 100))
+    goal = (
+        f"Pick & stage every load controlled by this allocation through appointment {cutoff} "
+        f"({loads_controlled} of {total_loads} selected-day loads) by shift end {shift_end_label(shift)}."
+    )
 
-    if loads_controlled >= selected_day_loads and selected_day_loads > 0:
+    if loads_controlled >= total_loads:
         reason = (
-            f"This allocation controls the full selected-day board by capacity ceiling: "
-            f"picking {pick_pct}%, pulls {pull_pct}%, loading {load_pct}%."
+            f"This allocation can control the full selected-day board by shift end: "
+            f"{loads_controlled} of {total_loads} load(s)."
         )
-        suggested_adjustment = "Protect current pickers, taskers, and loaders until the full day is controlled."
+        suggested_adjustment = "Protect current pickers, taskers, and loaders until the full board is controlled."
     elif loads_controlled > 0:
         reason = (
-            f"This allocation controls {loads_controlled} of {selected_day_loads} selected-day loads. "
-            f"The controlled-through cutoff is {cutoff}; bottleneck is {binding}. "
-            f"Coverage: picking {pick_pct}%, pulls {pull_pct}%, loading {load_pct}%."
+            f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end. "
+            f"The limiting stream is {bottleneck}."
         )
-        if "Picking" in binding:
-            suggested_adjustment = "Protect/add Picking first; do not pull labor out of Picking."
-        elif "Tasking" in binding or "Pull" in binding:
-            suggested_adjustment = "Protect Tasking above the floor for full-pallet pulls, replenishment, and putaway."
-        elif "Loading" in binding:
-            suggested_adjustment = "Protect loader time so controlled freight does not pile up unstaged."
+        if "Pick" in bottleneck:
+            suggested_adjustment = "Add/protect Picking first if you want to push the cutoff later."
+        elif "Task" in bottleneck or "Pull" in bottleneck:
+            suggested_adjustment = "Add/protect Tasking above the floor if you want to push the cutoff later."
+        elif "Load" in bottleneck:
+            suggested_adjustment = "Add/protect Loading if you want to push the cutoff later."
         else:
-            suggested_adjustment = "Protect current pickers, taskers, and loaders until the controlled wave is complete."
+            suggested_adjustment = "Protect current allocation until the controlled wave is complete."
     else:
-        reason = (
-            f"This allocation does not control the first selected-day appointment wave. "
-            f"Bottleneck is {binding}. Coverage: picking {pick_pct}%, pulls {pull_pct}%, loading {load_pct}%."
-        )
-        suggested_adjustment = "Move available labor toward the bottleneck or borrow labor before generating the report."
+        reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}."
+        suggested_adjustment = "Add labor to the bottleneck before generating the final report."
 
     return {
         "goal": goal,
         "confidence": confidence,
-        "main_constraint": binding,
+        "main_constraint": bottleneck,
         "target_cutoff": cutoff,
         "target_load_count": loads_controlled,
         "reason": reason,
@@ -2111,77 +2289,16 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "picks_left": picks_left,
         "pulls_left": pulls_left,
         "loads_to_stage_for_target": loads_controlled,
+        "estimated_picks_for_target": round(picks_left * float(controlled.get("pick_frac", 0) or 0)),
+        "estimated_pulls_for_target": round(pulls_left * float(controlled.get("pull_frac", 0) or 0)),
         "loads_controlled": loads_controlled,
-        "selected_day_loads": selected_day_loads,
+        "selected_day_loads": total_loads,
         "controlled_through_appt": cutoff,
-        "pick_coverage_pct": pick_pct,
-        "pull_coverage_pct": pull_pct,
-        "load_coverage_pct": load_pct,
+        "pick_coverage_pct": int(float(controlled.get("pick_frac", 0) or 0) * 100),
+        "pull_coverage_pct": int(float(controlled.get("pull_frac", 0) or 0) * 100),
+        "load_coverage_pct": int(float(controlled.get("load_frac", 0) or 0) * 100),
     }
 
-
-def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining, summary_table_or_counts):
-    """Forecast what the current allocation leaves for the next shift."""
-    blank = {
-        "loads_controlled": 0,
-        "selected_day_loads": 0,
-        "loads_left_for_next_shift": 0,
-        "controlled_through_appt": "n/a",
-        "bottleneck": "Unknown",
-        "picks_left_now": 0,
-        "pulls_left_now": 0,
-        "estimated_picks_left_at_handoff": 0,
-        "estimated_pulls_left_at_handoff": 0,
-        "handoff_message": "No board / allocation data available for handoff forecast.",
-    }
-    if not board_text:
-        return blank
-    try:
-        payload = json.loads(board_text or "{}")
-    except Exception:
-        return blank
-
-    today_totals = payload.get("python_verified_today_totals", {}) or {}
-    controlled = appointment_controlled_by_allocation(
-        board_text, day, shift, hours_remaining, summary_table_or_counts
-    )
-
-    total = int(controlled.get("selected_day_loads", 0) or 0)
-    done = int(controlled.get("loads_controlled", 0) or 0)
-    left = max(0, total - done)
-    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
-    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
-
-    pick_frac = max(0.0, min(1.0, float(controlled.get("pick_frac", 0) or 0)))
-    pull_frac = max(0.0, min(1.0, float(controlled.get("pull_frac", 0) or 0)))
-
-    est_picks_left = int(round(picks_left * (1.0 - pick_frac)))
-    est_pulls_left = int(round(pulls_left * (1.0 - pull_frac)))
-    cutoff = controlled.get("cutoff", "n/a")
-    bottleneck = controlled.get("binding", "Unknown")
-
-    if total <= 0:
-        message = "No selected-day outbound loads found for the handoff forecast."
-    elif left <= 0:
-        message = "Current allocation is projected to control the full selected-day board before handoff."
-    else:
-        message = (
-            f"Projected 2nd shift handoff: {left} selected-day load(s) remain after controlling "
-            f"{done}/{total} through {cutoff}. Main carryover risk: {bottleneck}."
-        )
-
-    return {
-        "loads_controlled": done,
-        "selected_day_loads": total,
-        "loads_left_for_next_shift": left,
-        "controlled_through_appt": cutoff,
-        "bottleneck": bottleneck,
-        "picks_left_now": picks_left,
-        "pulls_left_now": pulls_left,
-        "estimated_picks_left_at_handoff": est_picks_left,
-        "estimated_pulls_left_at_handoff": est_pulls_left,
-        "handoff_message": message,
-    }
 
 def render_python_shift_goal_preview(preview):
     """Streamlit display for the pre-report appointment target."""
@@ -2214,11 +2331,79 @@ def render_python_shift_goal_preview(preview):
     st.caption(
         f"Picks left: {preview.get('picks_left', 0):,} | "
         f"Pulls left: {preview.get('pulls_left', 0):,} | "
-        f"Loads controlled by shift end: {preview.get('loads_controlled', preview.get('loads_to_stage_for_target', 0)):,} / {preview.get('selected_day_loads', 0):,}"
+        f"Open loads in target wave: {preview.get('loads_to_stage_for_target', 0)}"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
 
+
+
+def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining, summary_table_or_counts):
+    """Forecast what this allocation leaves for 2nd shift using the same controlled-through logic."""
+    blank = {
+        "loads_controlled": 0,
+        "selected_day_loads": 0,
+        "loads_left_for_next_shift": 0,
+        "controlled_through_appt": "n/a",
+        "bottleneck": "Unknown",
+        "picks_left_now": 0,
+        "pulls_left_now": 0,
+        "estimated_picks_left_at_handoff": 0,
+        "estimated_pulls_left_at_handoff": 0,
+        "handoff_message": "No board / allocation data available for handoff forecast.",
+    }
+    if not board_text:
+        return blank
+    try:
+        payload = json.loads(board_text or "{}")
+    except Exception:
+        return blank
+
+    today_totals = payload.get("python_verified_today_totals", {}) or {}
+    controlled = appointment_controlled_by_allocation(
+        board_text=board_text,
+        day=day,
+        shift=shift,
+        hours_remaining=hours_remaining,
+        summary_table_or_counts=summary_table_or_counts,
+    )
+
+    total = int(controlled.get("selected_day_loads", 0) or 0)
+    done = int(controlled.get("loads_controlled", 0) or 0)
+    left = max(0, total - done)
+    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
+    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
+
+    pick_frac = max(0.0, min(1.0, float(controlled.get("pick_frac", 0) or 0)))
+    pull_frac = max(0.0, min(1.0, float(controlled.get("pull_frac", 0) or 0)))
+
+    est_picks_left = int(round(picks_left * (1.0 - pick_frac)))
+    est_pulls_left = int(round(pulls_left * (1.0 - pull_frac)))
+    cutoff = controlled.get("cutoff", "n/a")
+    bottleneck = controlled.get("binding", "Unknown")
+
+    if total <= 0:
+        message = "No selected-day outbound loads found for the handoff forecast."
+    elif left <= 0:
+        message = "This allocation is projected to control the full selected-day board before 2nd shift."
+    else:
+        message = (
+            f"2nd shift should expect about {left} selected-day load(s) left after the controlled wave. "
+            f"Main carryover constraint: {bottleneck}."
+        )
+
+    return {
+        "loads_controlled": done,
+        "selected_day_loads": total,
+        "loads_left_for_next_shift": left,
+        "controlled_through_appt": cutoff,
+        "bottleneck": bottleneck,
+        "picks_left_now": picks_left,
+        "pulls_left_now": pulls_left,
+        "estimated_picks_left_at_handoff": est_picks_left,
+        "estimated_pulls_left_at_handoff": est_pulls_left,
+        "handoff_message": message,
+    }
 
 def analyze_board_with_groq(
     board_text, day, shift, total_cases, hours_remaining, total_outbound_loads,
@@ -3566,6 +3751,24 @@ def build_pdf_report(
     story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.5*inch, 1.4*inch, 1.6*inch, 2.85*inch]))
     story.append(Spacer(1, 8))
 
+    handoff = build_second_shift_handoff_forecast(
+        board_text=board_text,
+        day=day,
+        shift=shift,
+        hours_remaining=hours_remaining,
+        summary_table_or_counts=summary_table,
+    )
+    story.append(Paragraph("Second Shift Handoff Forecast", styles["Subsection"]))
+    handoff_rows = [
+        ["Loads projected controlled", f"{handoff.get('loads_controlled', 0)} / {handoff.get('selected_day_loads', 0)}", "Controlled through appt", handoff.get("controlled_through_appt", "n/a")],
+        ["Loads left for 2nd shift", handoff.get("loads_left_for_next_shift", 0), "Carryover bottleneck", handoff.get("bottleneck", "Unknown")],
+        ["Picks left now", f"{handoff.get('picks_left_now', 0):,}", "Est. picks left at handoff", f"{handoff.get('estimated_picks_left_at_handoff', 0):,}"],
+        ["Pulls left now", f"{handoff.get('pulls_left_now', 0):,}", "Est. pulls left at handoff", f"{handoff.get('estimated_pulls_left_at_handoff', 0):,}"],
+    ]
+    story.append(pdf_table([["Handoff Fact", "Value", "Handoff Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in handoff_rows], [1.65*inch, 1.25*inch, 1.85*inch, 2.6*inch]))
+    story.append(Paragraph(pdf_safe(handoff.get("handoff_message", "")), styles["BodySmall"]))
+    story.append(Spacer(1, 8))
+
     story.append(Paragraph(f"Board summary - selected day ({pdf_safe(day)})", styles["Subsection"]))
     board_summary_rows = build_pdf_board_summary_rows(selected_rows)
     board_summary_data = [["Status", "Count"]] + board_summary_rows[1:]
@@ -3605,24 +3808,6 @@ def build_pdf_report(
         if deviation_reason:
             override_lines.append("Supervisor reason: " + deviation_reason)
         story.extend(pdf_paragraph_list(override_lines, styles))
-
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("Second Shift Handoff Forecast", styles["Subsection"]))
-    handoff = build_second_shift_handoff_forecast(
-        board_text=board_text,
-        day=day,
-        shift=shift,
-        hours_remaining=hours_remaining,
-        summary_table_or_counts=summary_table,
-    )
-    handoff_rows = [
-        ["Projected handoff item", "Value", "Projected handoff item", "Value"],
-        ["Loads controlled by shift end", f"{handoff.get('loads_controlled', 0)} / {handoff.get('selected_day_loads', 0)}", "Controlled through appt", handoff.get("controlled_through_appt", "n/a")],
-        ["Loads left for 2nd shift", handoff.get("loads_left_for_next_shift", 0), "Main carryover risk", handoff.get("bottleneck", "Unknown")],
-        ["Estimated picks left at handoff", f"{handoff.get('estimated_picks_left_at_handoff', 0):,}", "Estimated pulls left at handoff", f"{handoff.get('estimated_pulls_left_at_handoff', 0):,}"],
-    ]
-    story.append(pdf_table([[pdf_safe(c) for c in r] for r in handoff_rows], [1.7*inch, 1.2*inch, 1.85*inch, 2.6*inch]))
-    story.append(Paragraph(pdf_safe(handoff.get("handoff_message", "")), styles["BodySmall"]))
 
     # Removed executive AI summary from the first page to avoid repeating the KPI facts.
     story.append(PageBreak())
@@ -3786,6 +3971,23 @@ def compute_recommended_allocation(
         try:
             board_file.seek(0)
             board_text_for_preview = read_board_file_to_text(board_file)
+
+            # --- Throughput-optimal recommendation ------------------------
+            _payload = json.loads(board_text_for_preview or "{}")
+            _today = _payload.get("python_verified_today_totals", {}) or {}
+            _sel = rows_for_selected_day(_payload.get("all_outbound_rows", []) or [], day)
+            optimal = compute_throughput_optimal_allocation(
+                picks_left=pdf_number(_today.get("picks_left_today", 0)),
+                pulls_left=pdf_number(_today.get("pulls_left_today", 0)),
+                total_loads=len(_sel),
+                hours_remaining=hours_remaining,
+                present_total=len(present_recommendations),
+            )
+            recommended_counts = {t: int(optimal.get(t, 0)) for t in task_order}
+
+            # Rebuild the summary table off the optimal plan so the goal preview matches it.
+            summary_table = build_summary_table_from_counts(needed, optimal)
+
             python_shift_goal_preview = compute_python_shift_goal_preview(
                 board_text=board_text_for_preview,
                 day=day,
@@ -4324,6 +4526,13 @@ if reco:
         st.dataframe(reco["recommended_summary_table"], use_container_width=True)
 
     render_python_shift_goal_preview(reco.get("python_shift_goal_preview"))
+    render_allocation_controls_preview(
+        "Recommended allocation",
+        appointment_controlled_by_allocation(
+            reco.get("board_text_for_preview", ""), day, shift, hours_remaining,
+            reco["recommended_counts"],
+        ),
+    )
 
     choice = st.radio(
         "Are you running this recommended allocation?",
@@ -4338,7 +4547,8 @@ if reco:
     desired = None  # becomes (mode, actual_counts, reason) when a request is active
 
     if choice.startswith("Yes"):
-        desired = ("recommended", None, None)
+        # Running the recommended numbers AS the actual allocation — report on them as-is.
+        desired = ("override", dict(reco["recommended_counts"]), "Running the tool's recommended allocation.")
 
     elif choice.startswith("No"):
         st.markdown("**Enter what you actually have on each position:**")
@@ -4438,6 +4648,13 @@ if reco:
                 summary_table=actual_summary_for_preview,
             )
             render_python_shift_goal_preview(override_preview)
+            render_allocation_controls_preview(
+                "Your allocation",
+                appointment_controlled_by_allocation(
+                    reco.get("board_text_for_preview", ""), day, shift, hours_remaining,
+                    actual_counts,
+                ),
+            )
 
         reason = st.text_area(
             "Why are you running it differently? (the AI uses this so it won't flag an intentional gap)",
