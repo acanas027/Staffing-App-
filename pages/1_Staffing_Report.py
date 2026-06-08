@@ -3912,9 +3912,57 @@ def build_pdf_report(
 
     picks_left = py_today.get("picks_left_today", 0)
     pulls_left = py_today.get("pulls_left_today", 0)
-    pickers = int(summary_table.loc["Picking", "Assigned"]) if summary_table is not None and "Picking" in summary_table.index else 0
-    loaders = int(summary_table.loc["Loading", "Assigned"]) if summary_table is not None and "Loading" in summary_table.index else 0
+
+    def _assigned_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Assigned"])
+        except Exception:
+            pass
+        return 0
+
+    def _needed_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Needed"])
+        except Exception:
+            pass
+        return 0
+
+    def _gap_count(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Difference"])
+        except Exception:
+            pass
+        return 0
+
+    def _tool_rec_count(task):
+        try:
+            if recommended_counts is not None and task in recommended_counts:
+                return int(recommended_counts.get(task, 0))
+        except Exception:
+            pass
+        return None
+
+    def _staffing_fact(task):
+        assigned = _assigned_count(task)
+        needed_val = _needed_count(task)
+        gap_val = _gap_count(task)
+        text = f"{assigned} assigned / need {needed_val} / gap {gap_val:+d}"
+        tool_rec = _tool_rec_count(task)
+        if override_mode and tool_rec is not None:
+            text += f" / tool {tool_rec}"
+        return text
+
+    pickers = _assigned_count("Picking")
+    taskers = _assigned_count("Tasking")
+    loaders = _assigned_count("Loading")
+    unloaders = _assigned_count("Unloading")
+    receivers = _assigned_count("Receiving")
+
     picking_capacity = pickers * float(hours_remaining or 0) * 185
+    tasking_pull_capacity = max(0, taskers - TASK_FLOOR) * float(hours_remaining or 0) * 25
     loading_capacity = loaders * float(hours_remaining or 0)
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     service_risk, service_risk_reason = derive_service_risk_level(
@@ -3955,13 +4003,15 @@ def build_pdf_report(
         ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
         ["Due by now", pacing.get("due_by_now", 0), "Due not done", pacing.get("due_not_done", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
-        ["Pickers assigned", pickers, "Picking capacity left", f"{picking_capacity:,.0f} cases"],
-        ["Loaders assigned", loaders, "Loading capacity left", f"{loading_capacity:,.1f} loads"],
+        ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
+        ["Tasking staffing", _staffing_fact("Tasking"), "Tasking/pull capacity", f"{tasking_pull_capacity:,.0f} pallets"],
+        ["Loading staffing", _staffing_fact("Loading"), "Loading capacity", f"{loading_capacity:,.1f} loads"],
+        ["Unloading staffing", _staffing_fact("Unloading"), "Receiving staffing", _staffing_fact("Receiving")],
         ["Net staffing gap", f"{net_gap:+d}", "Total present", len(present_recommendations)],
         ["Inbound loads", py_in.get("loads_read_from_inbound", 0), "Inbound on lot/at door", py_in.get("on_lot", 0) + py_in.get("at_door", 0)],
     ]
-    story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.5*inch, 1.4*inch, 1.6*inch, 2.85*inch]))
-    story.append(Spacer(1, 8))
+    story.append(pdf_table([["Fact", "Value", "Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in fact_rows], [1.35*inch, 2.05*inch, 1.45*inch, 2.5*inch]))
+    story.append(Spacer(1, 5))
 
     handoff = build_second_shift_handoff_forecast(
         board_text=board_text,
@@ -3979,47 +4029,16 @@ def build_pdf_report(
     ]
     story.append(pdf_table([["Handoff Fact", "Value", "Handoff Fact", "Value"]] + [[pdf_safe(c) for c in r] for r in handoff_rows], [1.65*inch, 1.25*inch, 1.85*inch, 2.6*inch]))
     story.append(Paragraph(pdf_safe(handoff.get("handoff_message", "")), styles["BodySmall"]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 5))
 
     story.append(Paragraph(f"Board summary - selected day ({pdf_safe(day)})", styles["Subsection"]))
     board_summary_rows = build_pdf_board_summary_rows(selected_rows)
     board_summary_data = [["Status", "Count"]] + board_summary_rows[1:]
     story.append(pdf_table(board_summary_data, [2.45*inch, 1.05*inch]))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 4))
 
-    staffing_title = "Staffing by function - actual allocation" if override_mode else "Staffing by function"
-    story.append(Paragraph(staffing_title, styles["Subsection"]))
-    if override_mode:
-        staffing_rows = [["Function", "Needed", "Actual", "Actual Gap", "Tool Rec.", "Status"]]
-        if summary_table is not None:
-            for task, row in summary_table.iterrows():
-                staffing_rows.append([
-                    pdf_safe(task),
-                    int(row.get("Needed", 0)),
-                    int(row.get("Assigned", 0)),
-                    f"{int(row.get('Difference', 0)):+d}",
-                    int((recommended_counts or {}).get(task, 0)),
-                    pdf_safe(row.get("Status", "")),
-                ])
-        story.append(pdf_table(staffing_rows, [1.25*inch, 0.75*inch, 0.75*inch, 0.85*inch, 0.85*inch, 1.25*inch]))
-    else:
-        staffing_rows = [["Function", "Needed", "Assigned", "Gap", "Status"]]
-        if summary_table is not None:
-            for task, row in summary_table.iterrows():
-                staffing_rows.append([
-                    pdf_safe(task), int(row.get("Needed", 0)), int(row.get("Assigned", 0)),
-                    f"{int(row.get('Difference', 0)):+d}", pdf_safe(row.get("Status", ""))
-                ])
-        story.append(pdf_table(staffing_rows, [1.55*inch, 1.0*inch, 1.0*inch, 0.8*inch, 1.35*inch]))
-
-    if override_mode:
-        story.append(Paragraph("Allocation override context", styles["Subsection"]))
-        override_lines = ["The staffing table above uses the supervisor's actual allocation and shows the real gaps being run right now."]
-        if recommended_counts:
-            override_lines.append("Tool recommended allocation for comparison only: " + ", ".join(f"{k}: {v}" for k, v in recommended_counts.items()))
-        if deviation_reason:
-            override_lines.append("Supervisor reason: " + deviation_reason)
-        story.extend(pdf_paragraph_list(override_lines, styles))
+    # Staffing by function was folded into the first-page fact table above so the full
+    # first-page summary stays on one PDF page.
 
     # Removed executive AI summary from the first page to avoid repeating the KPI facts.
     story.append(PageBreak())
@@ -4107,7 +4126,9 @@ def build_pdf_report(
     else:
         story.append(Paragraph("AI prioritization was not generated.", styles["Body"]))
 
-    story.append(PageBreak())
+    # Keep Top Action Items on the same page when Prioritization is short.
+    # ReportLab will naturally continue onto a new page if the content is too long.
+    story.append(Spacer(1, 10))
 
     # 4. Top Action Items - AI only
     story.append(Paragraph("4. Top Action Items", styles["Section"]))
