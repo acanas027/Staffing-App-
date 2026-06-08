@@ -8,3 +8,5 @@ pytesseract
 openai
 xlrd
 reportlab
+gspread
+google-auth
