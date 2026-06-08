@@ -4273,33 +4273,90 @@ if reco:
 
     elif choice.startswith("No"):
         st.markdown("**Enter what you actually have on each position:**")
+        present_total = int(reco["total_present"])
+
+        def clamp_widget_value(key, max_value):
+            """Keep override inputs from ever exceeding the remaining present headcount."""
+            max_value = max(0, int(max_value))
+            if key in st.session_state:
+                try:
+                    current_value = int(st.session_state[key])
+                except Exception:
+                    current_value = 0
+                if current_value > max_value:
+                    st.session_state[key] = max_value
+                elif current_value < 0:
+                    st.session_state[key] = 0
+
         c1, c2, c3 = st.columns(3)
         c4, c5, _ = st.columns(3)
+
+        # These max values are dynamic by row order. The total entered allocation
+        # cannot exceed the number of present workers. To give more to a later
+        # area, lower an earlier area first.
+        remaining_for_pick = present_total
+        clamp_widget_value("act_pick", remaining_for_pick)
         a_pick = c1.number_input(
-            "Pickers", min_value=0, step=1, value=int(rc.get("Picking", 0)), key="act_pick"
+            "Pickers",
+            min_value=0,
+            max_value=remaining_for_pick,
+            step=1,
+            value=min(int(rc.get("Picking", 0)), remaining_for_pick),
+            key="act_pick",
         )
+
+        remaining_for_task = max(0, present_total - int(a_pick))
+        clamp_widget_value("act_task", remaining_for_task)
         a_task = c2.number_input(
-            "Taskers", min_value=0, step=1, value=int(rc.get("Tasking", 0)), key="act_task"
+            "Taskers",
+            min_value=0,
+            max_value=remaining_for_task,
+            step=1,
+            value=min(int(rc.get("Tasking", 0)), remaining_for_task),
+            key="act_task",
         )
+
+        remaining_for_load = max(0, present_total - int(a_pick) - int(a_task))
+        clamp_widget_value("act_load", remaining_for_load)
         a_load = c3.number_input(
-            "Loaders", min_value=0, step=1, value=int(rc.get("Loading", 0)), key="act_load"
+            "Loaders",
+            min_value=0,
+            max_value=remaining_for_load,
+            step=1,
+            value=min(int(rc.get("Loading", 0)), remaining_for_load),
+            key="act_load",
         )
+
+        remaining_for_unload = max(0, present_total - int(a_pick) - int(a_task) - int(a_load))
+        clamp_widget_value("act_unload", remaining_for_unload)
         a_unload = c4.number_input(
-            "Unloaders", min_value=0, step=1, value=int(rc.get("Unloading", 0)), key="act_unload"
+            "Unloaders",
+            min_value=0,
+            max_value=remaining_for_unload,
+            step=1,
+            value=min(int(rc.get("Unloading", 0)), remaining_for_unload),
+            key="act_unload",
         )
+
+        remaining_for_recv = max(0, present_total - int(a_pick) - int(a_task) - int(a_load) - int(a_unload))
+        clamp_widget_value("act_recv", remaining_for_recv)
         a_recv = c5.number_input(
-            "Receivers", min_value=0, step=1, value=int(rc.get("Receiving", 0)), key="act_recv"
+            "Receivers",
+            min_value=0,
+            max_value=remaining_for_recv,
+            step=1,
+            value=min(int(rc.get("Receiving", 0)), remaining_for_recv),
+            key="act_recv",
         )
 
         actual_counts = {
-            "Picking": a_pick,
-            "Tasking": a_task,
-            "Loading": a_load,
-            "Unloading": a_unload,
-            "Receiving": a_recv,
+            "Picking": int(a_pick),
+            "Tasking": int(a_task),
+            "Loading": int(a_load),
+            "Unloading": int(a_unload),
+            "Receiving": int(a_recv),
         }
         entered_total = sum(actual_counts.values())
-        present_total = reco["total_present"]
 
         override_preview = None
         if reco.get("board_text_for_preview"):
