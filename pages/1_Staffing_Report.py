@@ -3937,6 +3937,7 @@ def run_full_generation(
         )
 
         write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
+        
         # --- Snapshot today's commitments + shift goal for end-of-shift closeout ---
         try:
             import shift_log
@@ -3961,9 +3962,7 @@ def run_full_generation(
         except Exception as e:
             st.warning(f"Commitment snapshot skipped: {e}")
 
-        executive_summary_text = build_executive_summary_with_groq(
-        
-
+     
         executive_summary_text = build_executive_summary_with_groq(
             day=day, shift=shift, total_cases=total_cases, hours_remaining=hours_remaining,
             total_outbound_loads_day=total_outbound_loads_day, board_text=board_text,
