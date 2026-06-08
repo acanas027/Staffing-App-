@@ -1946,10 +1946,18 @@ def compute_throughput_optimal_allocation(
     min_unload=2, min_receive=2, task_floor=TASK_FLOOR,
 ):
     """
-    Distribute present workers to MAXIMIZE loads controlled by shift end.
-    Reserves unload/receive minimums and the fixed tasking floor off the top,
-    then splits the rest across Picking, Loading, and ADDITIONAL full-pallet
-    taskers in proportion to each stream's remaining work measured in person-hours.
+    Distribute present workers to MAXIMIZE what can actually be controlled by shift end,
+    without over-assigning loaders ahead of the freight Picking/Tasking can create.
+
+    Logic:
+    1. Protect Unloading and Receiving minimums.
+    2. Protect Tasking floor first for replenishment + putaway.
+    3. Test every possible split of the remaining crew across Picking, extra Tasking
+       for full-pallet pulls, and Loading.
+    4. Pick the split that controls the most loads by shift end.
+    5. If two splits control the same number of loads, prefer the one with less idle
+       loading capacity and more Picking/Tasking feed for 2nd shift.
+
     Returns a dict: Unloading, Receiving, Picking, Tasking, Loading.
     """
     try:
@@ -1957,46 +1965,108 @@ def compute_throughput_optimal_allocation(
     except Exception:
         hrs = 0.0
 
-    alloc = {
-        "Unloading": min_unload,
-        "Receiving": min_receive,
-        "Picking": 0,
-        "Tasking": task_floor,
-        "Loading": 0,
-    }
+    try:
+        present_total = int(present_total or 0)
+    except Exception:
+        present_total = 0
 
-    available = max(0, int(present_total) - min_unload - min_receive - task_floor)
-    if available <= 0 or hrs <= 0:
+    try:
+        total_loads = max(0, int(round(float(total_loads or 0))))
+    except Exception:
+        total_loads = 0
+
+    picks_left = max(0.0, float(picks_left or 0))
+    pulls_left = max(0.0, float(pulls_left or 0))
+
+    # Protect the fixed minimums, but never allocate more people than are present.
+    alloc = {"Unloading": 0, "Receiving": 0, "Picking": 0, "Tasking": 0, "Loading": 0}
+    remaining = present_total
+
+    alloc["Unloading"] = min(int(min_unload), remaining)
+    remaining -= alloc["Unloading"]
+
+    alloc["Receiving"] = min(int(min_receive), remaining)
+    remaining -= alloc["Receiving"]
+
+    alloc["Tasking"] = min(int(task_floor), remaining)
+    remaining -= alloc["Tasking"]
+
+    if remaining <= 0 or hrs <= 0:
         return alloc
 
-    pick_h = (picks_left or 0) / PICK_RATE          # picking work-hours
-    pull_h = (pulls_left or 0) / PULL_RATE          # ONLY full-pallet pulls flex here
-    load_h = (total_loads or 0) / LOAD_RATE         # staging work-hours
-    total_h = pick_h + pull_h + load_h
-    if total_h <= 0:
-        # No measurable work; park everyone on picking as the safe default.
-        alloc["Picking"] = available
-        return alloc
+    # If there are outbound loads, keep at least one loader. More loaders must be
+    # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
+    min_loading = 1 if total_loads > 0 else 0
+    if min_loading and remaining > 0:
+        alloc["Loading"] = 1
+        remaining -= 1
 
-    raw = {
-        "Picking": available * pick_h / total_h,
-        "Loading": available * load_h / total_h,
-        "PullExtra": available * pull_h / total_h,
-    }
-    floors = {k: int(v) for k, v in raw.items()}
-    used = sum(floors.values())
-    order = sorted(raw, key=lambda k: raw[k] - floors[k], reverse=True)
-    i = 0
-    while used < available:
-        floors[order[i % len(order)]] += 1
-        used += 1
-        i += 1
+    best = None
+    best_score = None
 
-    alloc["Picking"] = floors["Picking"]
-    alloc["Loading"] = floors["Loading"]
-    alloc["Tasking"] = task_floor + floors["PullExtra"]   # floor + flexible pulls
-    return alloc
+    def _loads_feedable_by_pick(pickers):
+        if total_loads <= 0:
+            return 0.0
+        if picks_left <= 0:
+            return float(total_loads)
+        return min(float(total_loads), (pickers * PICK_RATE * hrs / picks_left) * total_loads)
 
+    def _loads_feedable_by_pull(extra_pull_taskers):
+        if total_loads <= 0:
+            return 0.0
+        if pulls_left <= 0:
+            return float(total_loads)
+        return min(float(total_loads), (extra_pull_taskers * PULL_RATE * hrs / pulls_left) * total_loads)
+
+    # Brute force all integer allocations of the flexible crew. This is small and
+    # reliable, and it prevents the old issue where Loading took too many people
+    # just because total day loads were high.
+    for add_picking in range(remaining + 1):
+        for add_loading in range(remaining - add_picking + 1):
+            add_pull_extra = remaining - add_picking - add_loading
+
+            pickers = alloc["Picking"] + add_picking
+            loaders = alloc["Loading"] + add_loading
+            pull_extra = add_pull_extra
+            taskers = alloc["Tasking"] + pull_extra
+
+            pick_feed = _loads_feedable_by_pick(pickers)
+            pull_feed = _loads_feedable_by_pull(pull_extra)
+            freight_feed = min(pick_feed, pull_feed, float(total_loads))
+            loading_capacity = min(float(total_loads), loaders * LOAD_RATE * hrs)
+            controlled = min(freight_feed, loading_capacity)
+
+            # Do not reward loaders that cannot be fed by Picking/Tasking.
+            idle_loading_capacity = max(0.0, loading_capacity - freight_feed)
+            unmet_feed_capacity = max(0.0, freight_feed - loading_capacity)
+
+            # Objective order:
+            # 1) control the most loads by shift end
+            # 2) avoid idle loaders that Picking/Tasking cannot feed
+            # 3) keep more ready-freight creation capacity for 2nd shift
+            # 4) prefer fewer loaders when the same work is controlled
+            score = (
+                round(controlled, 4),
+                -round(idle_loading_capacity, 4),
+                round(freight_feed, 4),
+                -loaders,
+                -abs(pick_feed - pull_feed),
+                -round(unmet_feed_capacity, 4),
+            )
+
+            candidate = {
+                "Unloading": alloc["Unloading"],
+                "Receiving": alloc["Receiving"],
+                "Picking": pickers,
+                "Tasking": taskers,
+                "Loading": loaders,
+            }
+
+            if best_score is None or score > best_score:
+                best_score = score
+                best = candidate
+
+    return best or alloc
 
 def appointment_controlled_by_allocation(
     board_text, day, shift, hours_remaining, summary_table_or_counts,
