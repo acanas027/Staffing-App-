@@ -1942,9 +1942,43 @@ TASK_FLOOR = 4      # always-on replenishment + putaway, before full-pallet pull
 LOAD_TARGET_SHARE = 0.52  # 1st-shift loading target = 52% of selected-day outbound loads
 
 
+def status_is_completed_or_loaded(status):
+    """Physically completed/loaded now. These count toward the loading goal already banked."""
+    status_upper = str(status or "").strip().upper()
+    return status_upper in {"COMPLETED", "COMPLETE", "LOADED"}
+
+
+def status_is_rtl(status):
+    """Ready-to-load: controlled for appointment cutoff, but still needs loader work."""
+    status_upper = str(status or "").strip().upper()
+    return status_upper in {"RTL", "READY TO LOAD"}
+
+
+def status_is_controlled_appointment(status):
+    """
+    Controlled for appointment cutoff means the load is already protected for the appointment wave:
+    Completed, Loaded, RTL, or R/S. RTL still needs loader work. R/S is waiting for product,
+    but it should stay counted as controlled for cutoff/pacing so it does not consume new pick/stage capacity.
+    """
+    status_upper = str(status or "").strip().upper()
+    return status_is_completed_or_loaded(status) or status_is_rtl(status) or status_upper in {"R/S", "READY/SHORT"}
+
+
+def status_is_excluded_from_new_control(status):
+    """
+    Rows excluded from new labor-control capacity.
+    Loaded Short is a service issue, not a normal capacity wave.
+    R/S is controlled for appointment cutoff and therefore handled by status_is_controlled_appointment().
+    """
+    status_upper = str(status or "").strip().upper()
+    return status_upper in {"LOADED SHORT"}
+
+
+
 def compute_throughput_optimal_allocation(
     picks_left, pulls_left, total_loads, hours_remaining, present_total,
     min_unload=2, min_receive=2, task_floor=TASK_FLOOR,
+    completed_or_loaded_now=0,
 ):
     """
     Distribute present workers to MAXIMIZE what can actually be controlled by shift end,
@@ -1976,13 +2010,21 @@ def compute_throughput_optimal_allocation(
     except Exception:
         total_loads = 0
 
-    # Loading is not optimized against the entire day board. Operationally,
-    # 1st shift loading target is 52% of selected-day loads; Picking/Tasking
-    # may still create more ready freight to set up 2nd shift, but loaders
-    # should not be over-assigned beyond the 52% loading target.
-    loading_target_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
-    if total_loads > 0 and loading_target_loads <= 0:
-        loading_target_loads = 1
+    # Loading is not optimized against the entire day board.
+    # New rule: the loading goal is everything already completed/loaded now
+    # PLUS 52% of the selected-day loads. Completed/loaded loads are already banked,
+    # so the loader allocation is aimed at the remaining loading goal.
+    try:
+        completed_or_loaded_now = max(0, int(round(float(completed_or_loaded_now or 0))))
+    except Exception:
+        completed_or_loaded_now = 0
+
+    base_loading_goal = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
+    if total_loads > 0 and base_loading_goal <= 0:
+        base_loading_goal = 1
+
+    loading_target_loads = min(total_loads, completed_or_loaded_now + base_loading_goal)
+    remaining_loading_goal = max(0, loading_target_loads - completed_or_loaded_now)
 
     picks_left = max(0.0, float(picks_left or 0))
     pulls_left = max(0.0, float(pulls_left or 0))
@@ -2005,7 +2047,7 @@ def compute_throughput_optimal_allocation(
 
     # If there are outbound loads, keep at least one loader. More loaders must be
     # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
-    min_loading = 1 if loading_target_loads > 0 else 0
+    min_loading = 1 if remaining_loading_goal > 0 else 0
     if min_loading and remaining > 0:
         alloc["Loading"] = 1
         remaining -= 1
@@ -2042,10 +2084,10 @@ def compute_throughput_optimal_allocation(
             pick_feed = _loads_feedable_by_pick(pickers)
             pull_feed = _loads_feedable_by_pull(pull_extra)
             freight_feed = min(pick_feed, pull_feed, float(total_loads))
-            # Loading target is 52% of selected-day loads, not the full board.
-            # This prevents loading from taking people that Picking/Tasking need
-            # to create ready freight and set up 2nd shift.
-            loading_capacity = min(float(loading_target_loads), loaders * LOAD_RATE * hrs)
+            # Loading target is completed/loaded now + 52% of selected-day loads.
+            # The completed/loaded portion is already banked; the flexible loader
+            # allocation only covers the remaining loading goal.
+            loading_capacity = min(float(remaining_loading_goal), loaders * LOAD_RATE * hrs)
             controlled = min(freight_feed, loading_capacity)
 
             # Do not reward loaders that cannot be fed by Picking/Tasking.
@@ -2087,19 +2129,27 @@ def appointment_controlled_by_allocation(
     """
     Given an allocation, compute how many of TODAY's loads it can control
     (pick + pull + stage) by shift end, and the appointment time of the last
-    load in that controlled wave. The cutoff is the CONSEQUENCE of the plan:
-    a stronger plan controls a later appointment time.
+    load in that controlled wave.
 
-    `summary_table_or_counts` may be the staffing summary_table (uses 'Assigned')
-    or a plain dict like {"Picking":n,"Tasking":n,"Loading":n}.
-    Returns a dict for display.
+    Logic:
+    - Completed / Loaded / RTL already count as controlled for appointment cutoff.
+    - RTL still needs loader work in the report, but it is already controlled for cutoff.
+    - R/S counts as controlled for appointment cutoff, but it does not create new pick/stage capacity demand.
+    - Loading goal = Completed/Loaded now + 52% of selected-day loads.
     """
     blank = {
         "loads_controlled": 0,
         "selected_day_loads": 0,
+        "already_controlled_loads": 0,
+        "completed_or_loaded_now": 0,
+        "rtl_controlled_loads": 0,
+        "excluded_from_new_control_loads": 0,
         "cutoff": "n/a",
         "binding": "Unknown",
         "pick_frac": 0.0, "pull_frac": 0.0, "load_frac": 0.0,
+        "loading_target_loads": 0,
+        "base_loading_goal_loads": 0,
+        "additional_loads_controlled": 0,
         "note": "No board / allocation data.",
     }
     if not board_text:
@@ -2115,7 +2165,6 @@ def appointment_controlled_by_allocation(
     if not selected_rows:
         return blank
 
-    # Pull the allocation counts out of either a DataFrame or a dict.
     def _count(key):
         try:
             if hasattr(summary_table_or_counts, "loc") and key in summary_table_or_counts.index:
@@ -2139,45 +2188,73 @@ def appointment_controlled_by_allocation(
     picks_left = pdf_number(today_totals.get("picks_left_today", 0))
     pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
     total_loads = len(selected_rows)
-    loading_target_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
-    if total_loads > 0 and loading_target_loads <= 0:
-        loading_target_loads = 1
+
+    completed_or_loaded_now = sum(
+        1 for r in selected_rows if status_is_completed_or_loaded(r.get("status"))
+    )
+    rtl_controlled = sum(
+        1 for r in selected_rows if status_is_rtl(r.get("status"))
+    )
+    already_controlled = sum(
+        1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
+    )
+    excluded_from_new_control = sum(
+        1 for r in selected_rows
+        if (not status_is_controlled_appointment(r.get("status"))
+            and status_is_excluded_from_new_control(r.get("status")))
+    )
+
+    remaining_candidate_loads = max(
+        0,
+        total_loads - already_controlled - excluded_from_new_control,
+    )
+
+    # Loading goal = Completed/Loaded already banked + 52% of total selected-day loads.
+    # RTL is NOT included in completed_or_loaded_now because it still needs loader work.
+    base_loading_goal_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
+    if total_loads > 0 and base_loading_goal_loads <= 0:
+        base_loading_goal_loads = 1
+    loading_target_loads = min(total_loads, completed_or_loaded_now + base_loading_goal_loads)
+    remaining_loading_goal = max(0, loading_target_loads - completed_or_loaded_now)
 
     pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
 
     pick_frac = min(1.0, (pickers * PICK_RATE * hrs) / picks_left) if picks_left > 0 else 1.0
     pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
-    load_frac = min(1.0, (loaders * LOAD_RATE * hrs) / loading_target_loads) if loading_target_loads > 0 else 1.0
 
-    # Convert each stream's coverage into load ceilings separately.
-    # Picking and Tasking are measured against the full selected-day board because
-    # they create/feed ready freight. Loading is capped by the 52% day-load target.
-    # This avoids undercounting controlled loads by multiplying the weakest percent
-    # against only the loading target.
-    pick_supported_loads = int(round(pick_frac * total_loads))
-    pull_supported_loads = int(round(pull_frac * total_loads))
-    load_supported_loads = int(round(min(loaders * LOAD_RATE * hrs, loading_target_loads)))
+    loading_capacity_left = loaders * LOAD_RATE * hrs
+    load_frac = (
+        min(1.0, (completed_or_loaded_now + loading_capacity_left) / loading_target_loads)
+        if loading_target_loads > 0 else 1.0
+    )
 
-    loads_controlled = max(
+    # Convert each stream into ADDITIONAL load ceilings.
+    # Already-controlled loads are banked and never removed by a later bottleneck.
+    pick_supported_additional = int(round(pick_frac * remaining_candidate_loads))
+    pull_supported_additional = int(round(pull_frac * remaining_candidate_loads))
+    load_supported_additional = int(round(min(loading_capacity_left, remaining_loading_goal, remaining_candidate_loads)))
+
+    additional_controlled = max(
         0,
         min(
-            total_loads,
-            pick_supported_loads,
-            pull_supported_loads,
-            load_supported_loads,
+            remaining_candidate_loads,
+            pick_supported_additional,
+            pull_supported_additional,
+            load_supported_additional,
         )
     )
 
-    # Which stream is the wall? Use load ceilings, not percentages, so the
-    # bottleneck matches the actual controlled-through calculation.
+    loads_controlled = min(total_loads, already_controlled + additional_controlled)
+
     support_map = {
-        "Picking": pick_supported_loads,
-        "Tasking/Pulls": pull_supported_loads,
-        "Loading": load_supported_loads,
+        "Picking": already_controlled + pick_supported_additional,
+        "Tasking/Pulls": already_controlled + pull_supported_additional,
+        "Loading": already_controlled + load_supported_additional,
     }
-    binding_name = min(support_map, key=support_map.get)
-    if loads_controlled >= total_loads:
+    if remaining_candidate_loads <= 0 or loads_controlled >= total_loads:
         binding_name = "None (controls full day)"
+    else:
+        binding_name = min(support_map, key=support_map.get)
 
     # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
     timed = []
@@ -2198,13 +2275,24 @@ def appointment_controlled_by_allocation(
     return {
         "loads_controlled": loads_controlled,
         "selected_day_loads": total_loads,
+        "already_controlled_loads": already_controlled,
+        "completed_or_loaded_now": completed_or_loaded_now,
+        "rtl_controlled_loads": rtl_controlled,
+        "excluded_from_new_control_loads": excluded_from_new_control,
         "cutoff": cutoff,
         "binding": binding_name,
         "pick_frac": round(pick_frac, 3),
         "pull_frac": round(pull_frac, 3),
         "load_frac": round(load_frac, 3),
         "loading_target_loads": loading_target_loads,
-        "note": f"Capacity ceiling for shift end; loading target uses 52% of selected-day loads ({loading_target_loads}). Loading still depends on Picking/Tasking feed.",
+        "base_loading_goal_loads": base_loading_goal_loads,
+        "additional_loads_controlled": additional_controlled,
+        "note": (
+            f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
+            f"RTL counts for appointment cutoff but still needs loader work; R/S remains controlled but needs product follow-up. "
+            f"Loading goal = Completed/Loaded now ({completed_or_loaded_now}) "
+            f"+ 52% of selected-day loads ({base_loading_goal_loads}) = {loading_target_loads}."
+        ),
     }
 
 
@@ -2237,15 +2325,11 @@ def shift_end_label(shift):
 
 def is_controlled_for_target(status):
     """
-    Controlled means the load is already protected for execution.
-    R/S is excluded because it is waiting for product and should not consume
-    pick/stage capacity in the target calculation.
+    Controlled for appointment cutoff means the heavy warehouse work is done/protected.
+    RTL counts as controlled for appointment cutoff, but it still needs loader work.
+    R/S counts as controlled for appointment cutoff, but it is still a product follow-up item.
     """
-    status_upper = str(status or "").strip().upper()
-    return status_upper in {
-        "COMPLETED", "COMPLETE", "LOADED", "RTL", "READY TO LOAD",
-        "R/S", "READY/SHORT",
-    }
+    return status_is_controlled_appointment(status)
 
 
 def build_summary_table_from_counts(needed, assigned_counts):
@@ -2267,9 +2351,9 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     """
     Python-only appointment target preview.
 
-    IMPORTANT: this uses appointment_controlled_by_allocation() as the single
-    source of truth for the cutoff, bottleneck, and loads controlled. That keeps
-    the app preview, AI goal, PDF goal, and controlled-through display aligned.
+    This uses appointment_controlled_by_allocation() as the source of truth for:
+    cutoff, bottleneck, loads controlled, Completed/Loaded/RTL already banked,
+    and the loading goal.
     """
     empty = {
         "goal": "Upload a board and compute allocation to generate the appointment target.",
@@ -2287,11 +2371,15 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "loads_to_stage_for_target": 0,
         "loads_controlled": 0,
         "selected_day_loads": 0,
+        "already_controlled_loads": 0,
+        "completed_or_loaded_now": 0,
+        "rtl_controlled_loads": 0,
+        "loading_target_loads": 0,
+        "base_loading_goal_loads": 0,
         "controlled_through_appt": "",
         "pick_coverage_pct": 0,
         "pull_coverage_pct": 0,
         "load_coverage_pct": 0,
-        "loading_target_loads": 0,
     }
 
     if not board_text:
@@ -2344,8 +2432,12 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     loading_capacity = loaders * LOAD_RATE * hrs
 
     total_loads = int(controlled.get("selected_day_loads", 0) or 0)
-    loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
     loads_controlled = int(controlled.get("loads_controlled", 0) or 0)
+    already_controlled = int(controlled.get("already_controlled_loads", 0) or 0)
+    completed_or_loaded_now = int(controlled.get("completed_or_loaded_now", 0) or 0)
+    rtl_controlled = int(controlled.get("rtl_controlled_loads", 0) or 0)
+    loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
+    base_loading_goal_loads = int(controlled.get("base_loading_goal_loads", 0) or 0)
     cutoff = str(controlled.get("cutoff", "n/a"))
     bottleneck = str(controlled.get("binding", "Unknown"))
 
@@ -2353,8 +2445,6 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         return empty
 
     confidence = "YES" if loads_controlled > 0 else "NO"
-    if loads_controlled < total_loads and bottleneck not in ("None", "None (controls full day)"):
-        confidence = "YES"  # The goal is the controlled wave, so this allocation can hit its own controlled cutoff.
 
     goal = (
         f"Pick & stage every load controlled by this allocation through appointment {cutoff} "
@@ -2364,12 +2454,16 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     if loads_controlled >= total_loads:
         reason = (
             f"This allocation can control the full selected-day board by shift end: "
-            f"{loads_controlled} of {total_loads} load(s)."
+            f"{loads_controlled} of {total_loads} load(s). "
+            f"Already controlled now: {already_controlled} "
+            f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled})."
         )
         suggested_adjustment = "Protect current pickers, taskers, and loaders until the full board is controlled."
     elif loads_controlled > 0:
         reason = (
             f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end. "
+            f"Already controlled now: {already_controlled} "
+            f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled}). "
             f"The limiting stream is {bottleneck}."
         )
         if "Pick" in bottleneck:
@@ -2402,7 +2496,11 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "estimated_pulls_for_target": round(pulls_left * float(controlled.get("pull_frac", 0) or 0)),
         "loads_controlled": loads_controlled,
         "selected_day_loads": total_loads,
+        "already_controlled_loads": already_controlled,
+        "completed_or_loaded_now": completed_or_loaded_now,
+        "rtl_controlled_loads": rtl_controlled,
         "loading_target_loads": loading_target_loads,
+        "base_loading_goal_loads": base_loading_goal_loads,
         "controlled_through_appt": cutoff,
         "pick_coverage_pct": int(float(controlled.get("pick_frac", 0) or 0) * 100),
         "pull_coverage_pct": int(float(controlled.get("pull_frac", 0) or 0) * 100),
@@ -2441,8 +2539,11 @@ def render_python_shift_goal_preview(preview):
     st.caption(
         f"Picks left: {preview.get('picks_left', 0):,} | "
         f"Pulls left: {preview.get('pulls_left', 0):,} | "
-        f"Open loads in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
-        f"Loading target: {preview.get('loading_target_loads', 0)} loads (52% of day)"
+        f"Loads controlled in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
+        f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
+        f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
+        f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
+        f"(Completed/Loaded now + 52% of day)"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
@@ -4087,12 +4188,16 @@ def compute_recommended_allocation(
             _payload = json.loads(board_text_for_preview or "{}")
             _today = _payload.get("python_verified_today_totals", {}) or {}
             _sel = rows_for_selected_day(_payload.get("all_outbound_rows", []) or [], day)
+            completed_or_loaded_now = sum(
+                1 for r in _sel if status_is_completed_or_loaded(r.get("status"))
+            )
             optimal = compute_throughput_optimal_allocation(
                 picks_left=pdf_number(_today.get("picks_left_today", 0)),
                 pulls_left=pdf_number(_today.get("pulls_left_today", 0)),
                 total_loads=len(_sel),
                 hours_remaining=hours_remaining,
                 present_total=len(present_recommendations),
+                completed_or_loaded_now=completed_or_loaded_now,
             )
             recommended_counts = {t: int(optimal.get(t, 0)) for t in task_order}
 
