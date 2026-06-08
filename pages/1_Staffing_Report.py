@@ -101,7 +101,7 @@ def load_oc_customer_list():
             sign_off = str(raw_signoff).strip().upper() == "Y" if raw_signoff else False
             pictures = str(raw_pictures).strip().upper() == "Y" if raw_pictures else False
 
-            priority = "HIGH" if (sign_off or pictures) else "MEDIUM"
+            priority = "HIGH" if (sign_off or pictures) else "HIGH"
 
             base = name_clean.rstrip(" -").split(" - ")[0].strip()
             aliases = []
