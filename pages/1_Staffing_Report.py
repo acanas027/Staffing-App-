@@ -1925,11 +1925,280 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
     }
 
 
+
+# ============================================================
+#  PYTHON SHIFT GOAL / APPOINTMENT TARGET PREVIEW
+#  Source of truth for pre-report decision, AI goal, and PDF goal.
+# ============================================================
+
+def shift_end_label(shift):
+    """Return the planned shift-end label used in the Python goal."""
+    return "16:30" if "1" in str(shift).lower() else "23:30"
+
+
+def is_controlled_for_target(status):
+    """
+    Controlled means the load is already protected for execution.
+    R/S is excluded because it is waiting for product and should not consume
+    pick/stage capacity in the target calculation.
+    """
+    status_upper = str(status or "").strip().upper()
+    return status_upper in {
+        "COMPLETED", "COMPLETE", "LOADED", "RTL", "READY TO LOAD",
+        "R/S", "READY/SHORT",
+    }
+
+
+def build_summary_table_from_counts(needed, assigned_counts):
+    """Build the same Staffing Summary format from a manual/actual allocation."""
+    task_order = ["Unloading", "Receiving", "Picking", "Tasking", "Loading"]
+    needed_series = pd.Series({t: int(needed.get(t, 0)) for t in task_order}, name="Needed")
+    assigned_series = pd.Series({t: int(assigned_counts.get(t, 0)) for t in task_order}, name="Assigned")
+    summary_table = pd.concat([needed_series, assigned_series], axis=1).fillna(0)
+    summary_table["Needed"] = summary_table["Needed"].astype(int)
+    summary_table["Assigned"] = summary_table["Assigned"].astype(int)
+    summary_table["Difference"] = summary_table["Assigned"] - summary_table["Needed"]
+    summary_table["Status"] = summary_table["Difference"].apply(
+        lambda x: "Good" if x == 0 else ("Overstaffed" if x > 0 else "Understaffed")
+    )
+    return summary_table
+
+
+def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, summary_table):
+    """
+    Python-only appointment target preview.
+
+    Capacity rules:
+    - Picking capacity = 185 cases x pickers x hours remaining
+    - Tasking / pulls capacity = 25 full pallets x taskers x hours remaining
+    - Loading capacity = 1 trailer x loaders x hours remaining
+    Putaway + replenishment are included in Tasking.
+    """
+    empty = {
+        "goal": "Upload a board and compute allocation to generate the appointment target.",
+        "confidence": "UNKNOWN",
+        "main_constraint": "Unknown",
+        "target_cutoff": "",
+        "target_load_count": 0,
+        "reason": "Board data was not available.",
+        "suggested_adjustment": "Upload the board, select present workers, and compute allocation.",
+        "pick_capacity": 0,
+        "pull_capacity": 0,
+        "loading_capacity": 0,
+        "picks_left": 0,
+        "pulls_left": 0,
+        "loads_to_stage_for_target": 0,
+    }
+
+    if not board_text:
+        return empty
+
+    try:
+        payload = json.loads(board_text or "{}")
+    except Exception:
+        return empty
+
+    all_rows = payload.get("all_outbound_rows", []) or []
+    today_totals = payload.get("python_verified_today_totals", {}) or {}
+    selected_rows = rows_for_selected_day(all_rows, day)
+
+    if not selected_rows:
+        empty["goal"] = f"No selected-day board rows were found for {day}."
+        empty["reason"] = "The board parser did not find rows matching the selected day."
+        return empty
+
+    try:
+        hrs = max(0.0, float(hours_remaining or 0))
+    except Exception:
+        hrs = 0.0
+
+    pickers = int(summary_table.loc["Picking", "Assigned"]) if summary_table is not None and "Picking" in summary_table.index else 0
+    taskers = int(summary_table.loc["Tasking", "Assigned"]) if summary_table is not None and "Tasking" in summary_table.index else 0
+    loaders = int(summary_table.loc["Loading", "Assigned"]) if summary_table is not None and "Loading" in summary_table.index else 0
+
+    pick_capacity = pickers * 185 * hrs
+    pull_capacity = taskers * 25 * hrs
+    loading_capacity = loaders * 1 * hrs
+
+    picks_left = pdf_number(today_totals.get("picks_left_today", 0))
+    pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
+
+    appt_minutes = sorted({
+        board_minutes_for_pacing(row.get("time") or row.get("appt_time"))
+        for row in selected_rows
+        if board_minutes_for_pacing(row.get("time") or row.get("appt_time")) is not None
+    })
+
+    if not appt_minutes:
+        empty["goal"] = f"Control today's selected-day board by shift end {shift_end_label(shift)}."
+        empty["reason"] = "No appointment times were parsed from the selected-day board rows."
+        return empty
+
+    not_controlled_rows = [
+        row for row in selected_rows
+        if not is_controlled_for_target(row.get("status"))
+    ]
+    total_not_controlled = max(1, len(not_controlled_rows))
+
+    best = None
+    evaluated = []
+    for cutoff in appt_minutes:
+        rows_through_cutoff = [
+            row for row in selected_rows
+            if (board_minutes_for_pacing(row.get("time") or row.get("appt_time")) is not None
+                and board_minutes_for_pacing(row.get("time") or row.get("appt_time")) <= cutoff)
+        ]
+        open_through_cutoff = [
+            row for row in rows_through_cutoff
+            if not is_controlled_for_target(row.get("status"))
+        ]
+
+        target_load_count = len(rows_through_cutoff)
+        loads_to_stage = len(open_through_cutoff)
+
+        # Estimate how much of today's remaining picks/pulls belong to the target wave.
+        share = min(1.0, loads_to_stage / total_not_controlled) if total_not_controlled else 0
+        est_picks_needed = picks_left * share
+        est_pulls_needed = pulls_left * share
+
+        pick_ok = est_picks_needed <= pick_capacity
+        pull_ok = est_pulls_needed <= pull_capacity
+        load_ok = loads_to_stage <= loading_capacity
+
+        score = sum([pick_ok, pull_ok, load_ok])
+        candidate = {
+            "cutoff_minutes": cutoff,
+            "cutoff": format_minutes_for_pacing(cutoff),
+            "target_load_count": target_load_count,
+            "loads_to_stage": loads_to_stage,
+            "est_picks_needed": est_picks_needed,
+            "est_pulls_needed": est_pulls_needed,
+            "pick_ok": pick_ok,
+            "pull_ok": pull_ok,
+            "load_ok": load_ok,
+            "score": score,
+        }
+        evaluated.append(candidate)
+
+        if pick_ok and pull_ok and load_ok:
+            best = candidate
+
+    if best is None:
+        # Pick the earliest wave with the strongest feasibility score.
+        evaluated.sort(key=lambda c: (-c["score"], c["cutoff_minutes"]))
+        best = evaluated[0]
+
+    constraints = []
+    if best["est_picks_needed"] > pick_capacity:
+        constraints.append(("Picking", best["est_picks_needed"] - pick_capacity))
+    if best["est_pulls_needed"] > pull_capacity:
+        constraints.append(("Tasking/Pulls", best["est_pulls_needed"] - pull_capacity))
+    if best["loads_to_stage"] > loading_capacity:
+        constraints.append(("Loading", best["loads_to_stage"] - loading_capacity))
+
+    if constraints:
+        constraints.sort(key=lambda x: x[1], reverse=True)
+        main_constraint = constraints[0][0]
+        confidence = "RISKY" if best["score"] >= 2 else "NO"
+    else:
+        main_constraint = "None"
+        confidence = "YES"
+
+    if confidence == "YES":
+        reason = (
+            f"Current allocation can cover the estimated target wave: "
+            f"{best['loads_to_stage']} open load(s), {best['est_picks_needed']:.0f} estimated picks, "
+            f"and {best['est_pulls_needed']:.0f} estimated pulls."
+        )
+        suggested_adjustment = "Protect current pickers, taskers, and loaders until the target wave is controlled."
+    elif main_constraint == "Picking":
+        reason = (
+            f"Picking capacity is {pick_capacity:,.0f} cases vs about "
+            f"{best['est_picks_needed']:,.0f} estimated picks for the target wave."
+        )
+        suggested_adjustment = "Add/protect 1 picker if possible; do not pull labor out of Picking."
+    elif main_constraint == "Tasking/Pulls":
+        reason = (
+            f"Tasking pull capacity is {pull_capacity:,.0f} full pallets vs about "
+            f"{best['est_pulls_needed']:,.0f} estimated pulls for the target wave."
+        )
+        suggested_adjustment = "Protect Tasking for pulls, replenishment, and putaway before adding non-critical work."
+    elif main_constraint == "Loading":
+        reason = (
+            f"Loading capacity is {loading_capacity:,.1f} loads vs "
+            f"{best['loads_to_stage']} open load(s) needing control through the target."
+        )
+        suggested_adjustment = "Protect loader time for the earliest appointment wave before moving loading labor."
+    else:
+        reason = "The target is tight because at least one capacity area is close to its limit."
+        suggested_adjustment = "Keep labor locked on the bottleneck until the target wave is controlled."
+
+    goal = (
+        f"Pick & stage every load with appointment <= {best['cutoff']} "
+        f"({best['target_load_count']} loads) by shift end {shift_end_label(shift)}."
+    )
+
+    return {
+        "goal": goal,
+        "confidence": confidence,
+        "main_constraint": main_constraint,
+        "target_cutoff": best["cutoff"],
+        "target_load_count": best["target_load_count"],
+        "reason": reason,
+        "suggested_adjustment": suggested_adjustment,
+        "pick_capacity": round(pick_capacity),
+        "pull_capacity": round(pull_capacity),
+        "loading_capacity": round(loading_capacity, 1),
+        "picks_left": picks_left,
+        "pulls_left": pulls_left,
+        "loads_to_stage_for_target": best["loads_to_stage"],
+        "estimated_picks_for_target": round(best["est_picks_needed"]),
+        "estimated_pulls_for_target": round(best["est_pulls_needed"]),
+    }
+
+
+def render_python_shift_goal_preview(preview):
+    """Streamlit display for the pre-report appointment target."""
+    if not preview:
+        return
+
+    st.markdown("---")
+    st.subheader("Pre-Report Appointment Target Preview")
+
+    confidence = str(preview.get("confidence", "UNKNOWN")).upper()
+    if confidence == "YES":
+        st.success(preview.get("goal", ""))
+    elif confidence == "RISKY":
+        st.warning(preview.get("goal", ""))
+    elif confidence == "NO":
+        st.error(preview.get("goal", ""))
+    else:
+        st.info(preview.get("goal", ""))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Can this allocation hit target?", confidence)
+    c2.metric("Main constraint", preview.get("main_constraint", "Unknown"))
+    c3.metric("Target cutoff", preview.get("target_cutoff", ""))
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Picking capacity left", f"{preview.get('pick_capacity', 0):,} cases")
+    c5.metric("Tasking / pull capacity", f"{preview.get('pull_capacity', 0):,} pallets")
+    c6.metric("Loading capacity left", f"{preview.get('loading_capacity', 0)} loads")
+
+    st.caption(
+        f"Picks left: {preview.get('picks_left', 0):,} | "
+        f"Pulls left: {preview.get('pulls_left', 0):,} | "
+        f"Open loads in target wave: {preview.get('loads_to_stage_for_target', 0)}"
+    )
+    st.write(f"**Why:** {preview.get('reason', '')}")
+    st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
+
+
 def analyze_board_with_groq(
     board_text, day, shift, total_cases, hours_remaining, total_outbound_loads,
     crossroads_open, deer_creek_open, msb_open, needed, summary_table,
     cases_to_pick, inbound_pallets, notes, oc_alert_text=None,
-    recommended_allocation=None, deviation_reason=None,
+    recommended_allocation=None, deviation_reason=None, python_shift_goal_preview=None,
 ):
     client = get_groq_client()
     if client is None:
@@ -2064,6 +2333,18 @@ def analyze_board_with_groq(
 
     day_pacing_text = json.dumps(selected_day_pacing, ensure_ascii=False)
 
+    python_goal_text = ""
+    if python_shift_goal_preview:
+        python_goal_text = (
+            f"PYTHON-COMPUTED SHIFT GOAL (SOURCE OF TRUTH - use this exact goal):\n"
+            f"Goal: {python_shift_goal_preview.get('goal', '')}\n"
+            f"Confidence: {python_shift_goal_preview.get('confidence', '')}\n"
+            f"Main constraint: {python_shift_goal_preview.get('main_constraint', '')}\n"
+            f"Reason: {python_shift_goal_preview.get('reason', '')}\n"
+            f"Suggested decision: {python_shift_goal_preview.get('suggested_adjustment', '')}\n"
+            "Do not create a different shift goal. Explain this goal and use the same appointment cutoff everywhere.\n"
+        )
+
     actionable_table = _rows_to_table(
         today_actionable_rows,
         ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
@@ -2120,10 +2401,12 @@ DAY / PACE LOGIC:
 - A lower completed-vs-total count alone does NOT mean behind.
 - Use appointment cutoff times, never invented truck-count goals. Preferred goal format: "Have all 15:00 loads picked/staged before X."
 
-SHIFT GOAL: Build a realistic, optimistic, specific, achievable goal from the data from selected-day board, stated working rates, appointment times, staffing gaps, picks/pulls left, and short risk. Include an appointment cutoff time, not just a load %. Don't just repeat "52% of the day." If behind → recovery (protect next appointment wave, kill highest service-risk shorts). On track → stay ahead, set up 2nd shift. Ahead → pull future work forward, clear shorts, reduce 2nd shift risk.
+SHIFT GOAL: Use the PYTHON-COMPUTED SHIFT GOAL exactly as the source of truth. Do not invent a different appointment cutoff or target. You may explain why it matters, but the goal text and cutoff must match Python.
 
 TODAY SELECTED IN APP:
 {day} {shift} shift | Total cases: {total_cases:,} | Pulls left from K2: {pulls_left_today} | Picks left from L2: {picks_left_today} | Hours left: {hours_remaining} | Total outbound loads today: {total_outbound_loads} | Plants open: {", ".join(plants_open) if plants_open else "none"} | Notes: {notes.strip() or "none"}
+
+{python_goal_text}
 
 PYTHON DAY-SPECIFIC PACING GUARDRAIL (use first):
 {day_pacing_text}
@@ -2156,7 +2439,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 
 1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
-- Then: - Give one realistic shift goal (appointment times, working rates, picks/pulls, gaps). Explain how this sets up 2nd shift. the appointment time we want ready by end of shift (your own operational goal from board/pacing/labor/picks/pulls/times).
+- Then: state the PYTHON-COMPUTED SHIFT GOAL exactly. Explain briefly how it sets up 2nd shift.
 - State what staffing can fix now and the current bottleneck: Picking / Loading / Tasking / Inbound / none. - If no safe move: "No safe labor move from current staffing without creating another gap."
 - Summarize selected-day outbound first by status. State Completed / R/S / Loaded Short vs selected-day total.  mentionother-day late loads. Include day, load#, time, door, what's happening.
 - State loads still to pick/pull today = Total today − Completed − R/S − Loaded − RTL − Loaded Short.
@@ -2196,6 +2479,7 @@ def build_executive_summary_with_groq(
     board_text, summary_table, present_recommendations, availability,
     oc_matches, notes, board_analysis_text=None,
     recommended_allocation=None, deviation_reason=None,
+    python_shift_goal_preview=None,
 ):
     """
     Second, lightweight Groq call on llama-3.3-70b-versatile.
@@ -2299,6 +2583,11 @@ INBOUND (Python-verified):
 
 OPPORTUNITY CUSTOMERS: {oc_str}
 
+PYTHON-COMPUTED SHIFT GOAL (source of truth):
+{python_shift_goal_preview.get('goal', 'not provided') if python_shift_goal_preview else 'not provided'}
+Confidence: {python_shift_goal_preview.get('confidence', 'not provided') if python_shift_goal_preview else 'not provided'}
+Main constraint: {python_shift_goal_preview.get('main_constraint', 'not provided') if python_shift_goal_preview else 'not provided'}
+
 OPERATIONS NOTES: {notes.strip() or 'none'}
 """
 
@@ -2338,6 +2627,7 @@ Rules:
 - Keep it professional and direct.
 - Keep it under one page.
 - Do not invent numbers. Use only the facts provided below.
+- Use the PYTHON-COMPUTED SHIFT GOAL exactly; do not create a different appointment target.
 - If a number is missing from the facts, write "not provided".
 - If "Surplus labor available" is NO, do NOT suggest moving a worker as if one is free. State plainly that no safe internal move exists and that closing the gap requires overtime, an early 2nd-shift start, or borrowing labor.
 - If an allocation override and a reason are provided, treat the supervisor's reason as valid context: do not flag an intentionally-covered gap as a failure, but still note any genuine risk it creates.
@@ -3027,79 +3317,6 @@ def extract_ai_top_action_items_lines(board_analysis_text):
     return output
 
 
-
-def is_oc_related_pdf_action(line):
-    """Return True when an AI action is an OC/customer-alert action already covered in Critical Load Alerts."""
-    clean = clean_pdf_text(line).lower()
-    if not clean:
-        return False
-
-    oc_terms = [
-        " oc ", " oc-", "oc ", "opportunity customer", "customer list",
-        "sign-off", "sign off", "photo", "photos", "picture", "pictures",
-        "special handling", "dc supervisor sign",
-    ]
-    padded = f" {clean} "
-    return any(term in padded for term in oc_terms)
-
-
-def filter_ai_actions_for_pdf(lines):
-    """Remove OC-specific AI actions from the PDF action page because OC actions already have their own alert table."""
-    filtered = []
-    seen = set()
-    for line in lines or []:
-        clean = clean_pdf_text(line)
-        if not clean or is_oc_related_pdf_action(clean):
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        filtered.append(clean)
-    return filtered
-
-
-def filter_written_recommendations_for_pdf(recommendations):
-    """Keep only analytical/insight recommendations; remove lines that only restate staffing facts."""
-    insight_lines = []
-    seen = set()
-
-    fact_patterns = [
-        r"^current labor balance estimate",
-        r"^(unloading|receiving|picking|tasking|loading):\s*approximately\s+[-+]?\d",
-        r"^(unloading|receiving|picking|tasking|loading):\s*staffing is balanced",
-        r"^(unloading|receiving|picking|tasking|loading):\s*approximately.*labor-hours",
-    ]
-
-    for rec in recommendations or []:
-        clean = clean_pdf_text(rec)
-        if not clean:
-            continue
-        low = clean.lower()
-
-        if any(re.search(pattern, low) for pattern in fact_patterns):
-            continue
-
-        # Keep insight/action language only.
-        insight_keywords = [
-            "risk", "avoid", "protect", "prioritize", "no surplus", "no safe",
-            "requires overtime", "early 2nd", "borrowing labor", "flow",
-            "congestion", "late departures", "service failures", "shorts",
-            "significantly heavier", "focus on", "use lead/extra", "move into",
-            "proactively", "final hours", "get ahead",
-        ]
-        if not any(k in low for k in insight_keywords):
-            continue
-
-        key = low
-        if key in seen:
-            continue
-        seen.add(key)
-        insight_lines.append(clean)
-
-    return insight_lines
-
-
 def build_pdf_board_summary_rows(selected_rows):
     """Small first-page board summary table for the selected day only."""
     counts = {
@@ -3192,6 +3409,7 @@ def build_pdf_report(
     board_analysis_text, executive_summary_text, oc_matches, oc_load_matches,
     crossdock_matches, tt4_matches, notes, override_mode=False,
     actual_counts=None, recommended_counts=None, deviation_reason=None,
+    python_shift_goal_preview=None,
 ):
     """Create the final PDF bytes with facts + AI insights."""
     if not REPORTLAB_AVAILABLE:
@@ -3261,7 +3479,11 @@ def build_pdf_report(
     health = derive_shift_health(summary_table, pacing, py_out)
     cutoff = appointment_cutoff_from_rows(selected_rows)
 
-    ai_shift_goal = extract_ai_shift_goal(board_analysis_text)
+    ai_shift_goal = ""
+    if python_shift_goal_preview:
+        ai_shift_goal = python_shift_goal_preview.get("goal", "")
+    if not ai_shift_goal:
+        ai_shift_goal = extract_ai_shift_goal(board_analysis_text)
     if not ai_shift_goal:
         ai_shift_goal = f"Have all selected-day loads through {cutoff} controlled, with picks/pulls protected and every OC, Cross Dock, and TT4 action verified before release."
 
@@ -3282,7 +3504,7 @@ def build_pdf_report(
         [
             Paragraph("SHIFT HEALTH", styles["Tiny"]),
             Paragraph("SERVICE RISK", styles["Tiny"]),
-            Paragraph("SHIFT GOAL - FROM AI BOARD ANALYSIS", styles["Tiny"]),
+            Paragraph("SHIFT GOAL - PYTHON SOURCE OF TRUTH", styles["Tiny"]),
         ],
         [
             Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]),
@@ -3446,94 +3668,19 @@ def build_pdf_report(
 
     story.append(PageBreak())
 
-    # 4. Top Action Items - AI actions, excluding OC actions already covered in Critical Load Alerts.
+    # 4. Top Action Items - AI only
     story.append(Paragraph("4. Top Action Items", styles["Section"]))
     story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
-    top_action_lines = filter_ai_actions_for_pdf(extract_ai_top_action_items_lines(board_analysis_text))
+    top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
     if top_action_lines:
         story.extend(pdf_paragraph_list_large(top_action_lines[:80], styles))
     else:
-        story.append(Paragraph("No non-OC AI top action items were generated.", styles["Body"]))
-
-    insight_recommendations = filter_written_recommendations_for_pdf(recommendations)
-    if insight_recommendations:
-        story.append(Spacer(1, 10))
-        story.append(Paragraph("Written Recommendations - Operational Insights", styles["Subsection"]))
-        story.extend(pdf_paragraph_list_large(insight_recommendations[:30], styles))
+        story.append(Paragraph("AI top action items were not generated.", styles["Body"]))
 
     # Removed possible outcomes / staffing-engine recommendation page per report cleanup.
     doc.build(story, onFirstPage=pdf_add_footer, onLaterPages=pdf_add_footer)
     buffer.seek(0)
     return buffer.getvalue()
-
-def allocate_recommended_counts_to_present(needed, total_present):
-    """
-    Return a recommended allocation that always sums to the number of present workers.
-
-    Rules:
-    - Never recommend more workers than are present.
-    - Keep the operational minimum of 2 Unloaders and 2 Receivers whenever possible.
-    - If total need is lower than present, keep needed counts and leave the rest as bench/extra.
-    - If total need is higher than present, protect Unloading/Receiving first, then distribute
-      the remaining shortage proportionally across Picking, Tasking, and Loading.
-    """
-    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
-    total_present = int(total_present or 0)
-    need = {task: max(0, int(needed.get(task, 0))) for task in task_order}
-    total_need = sum(need.values())
-
-    if total_present <= 0:
-        return {task: 0 for task in task_order}
-
-    # If we have enough people to cover the full calculated need, show the full need.
-    # Extra workers remain bench/extra and are not forced into the function table.
-    if total_present >= total_need:
-        return need
-
-    allocation = {task: 0 for task in task_order}
-
-    # Protect the fixed minimum areas first, but never exceed present headcount.
-    for task in ["Unloading", "Receiving"]:
-        give = min(2, need.get(task, 0), total_present - sum(allocation.values()))
-        allocation[task] = max(0, give)
-
-    remaining_people = total_present - sum(allocation.values())
-    flexible_tasks = ["Picking", "Tasking", "Loading"]
-    flexible_need = {task: need.get(task, 0) for task in flexible_tasks}
-    total_flexible_need = sum(flexible_need.values())
-
-    if remaining_people <= 0 or total_flexible_need <= 0:
-        return allocation
-
-    # Proportional first pass.
-    raw = {task: (remaining_people * flexible_need[task] / total_flexible_need) for task in flexible_tasks}
-    for task in flexible_tasks:
-        allocation[task] = min(flexible_need[task], int(raw[task]))
-
-    # Give leftover workers to the largest fractional / highest need gaps until the total matches present.
-    while sum(allocation.values()) < total_present:
-        candidates = [
-            task for task in flexible_tasks
-            if allocation[task] < flexible_need[task]
-        ]
-        if not candidates:
-            break
-        candidates.sort(
-            key=lambda task: (raw[task] - int(raw[task]), flexible_need[task] - allocation[task], flexible_need[task]),
-            reverse=True,
-        )
-        allocation[candidates[0]] += 1
-
-    # Safety trim in case future edits ever over-allocate. Trim from flexible areas first.
-    while sum(allocation.values()) > total_present:
-        candidates = [task for task in flexible_tasks if allocation[task] > 0]
-        if not candidates:
-            break
-        candidates.sort(key=lambda task: allocation[task], reverse=True)
-        allocation[candidates[0]] -= 1
-
-    return {task: int(allocation.get(task, 0)) for task in task_order}
-
 
 def compute_recommended_allocation(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
@@ -3580,31 +3727,47 @@ def compute_recommended_allocation(
     present_recommendations, summary_table = build_summary(staff, needed)
 
     task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
-
-    total_present = len(present_recommendations)
-
-    # Source of truth for the pop-up: use the exact same Staffing Summary
-    # that the report uses. This keeps the pre-report table and the final
-    # Staffing Summary matched 1-for-1.
     recommended_counts = {
-        task: int(summary_table.loc[task, "Assigned"]) if task in summary_table.index else 0
-        for task in task_order
+        t: int(summary_table.loc[t, "Assigned"]) if t in summary_table.index else 0
+        for t in task_order
     }
-    total_recommended = sum(recommended_counts.values())
+    total_present = len(present_recommendations)
     lead_extra = int(
         (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
     )
+
+    board_text_for_preview = ""
+    python_shift_goal_preview = None
+    if board_file is not None:
+        try:
+            board_file.seek(0)
+            board_text_for_preview = read_board_file_to_text(board_file)
+            python_shift_goal_preview = compute_python_shift_goal_preview(
+                board_text=board_text_for_preview,
+                day=day,
+                shift=shift,
+                hours_remaining=hours_remaining,
+                summary_table=summary_table,
+            )
+        except Exception:
+            python_shift_goal_preview = None
+        finally:
+            try:
+                board_file.seek(0)
+            except Exception:
+                pass
 
     return {
         "needed": needed,
         "recommended_counts": recommended_counts,
         "recommended_summary_table": summary_table.copy(),
+        "board_text_for_preview": board_text_for_preview,
+        "python_shift_goal_preview": python_shift_goal_preview,
         "total_present": total_present,
-        "total_recommended": total_recommended,
+        "total_recommended": sum(recommended_counts.values()),
         "short_by": max(0, int(pd.Series(needed).sum()) - total_present),
         "lead_extra": lead_extra,
     }
-
 
 def run_full_generation(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
@@ -3724,6 +3887,7 @@ def run_full_generation(
     write_recommendations_to_excel(wb, staff, shift)
 
     board_analysis_text = None
+    python_shift_goal_preview = None
     oc_matches = []
     oc_load_matches = []
     crossdock_matches = []
@@ -3754,6 +3918,14 @@ def run_full_generation(
         oc_matches = find_oc_customers_in_board(board_text)
         oc_alert_text = build_oc_alert_text(oc_matches)
 
+        python_shift_goal_preview = compute_python_shift_goal_preview(
+            board_text=board_text,
+            day=day,
+            shift=shift,
+            hours_remaining=hours_remaining,
+            summary_table=summary_table,
+        )
+
         board_analysis_text = analyze_board_with_groq(
             board_text=board_text, day=day, shift=shift, total_cases=total_cases,
             hours_remaining=hours_remaining, total_outbound_loads=total_outbound_loads_day,
@@ -3761,6 +3933,7 @@ def run_full_generation(
             needed=needed, summary_table=summary_table, cases_to_pick=cases_to_pick,
             inbound_pallets=inbound_pallets, notes=notes, oc_alert_text=oc_alert_text,
             recommended_allocation=ai_recommended, deviation_reason=ai_reason,
+            python_shift_goal_preview=python_shift_goal_preview,
         )
 
         write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
@@ -3772,6 +3945,7 @@ def run_full_generation(
             availability=availability, oc_matches=oc_matches, notes=notes,
             board_analysis_text=board_analysis_text,
             recommended_allocation=ai_recommended, deviation_reason=ai_reason,
+            python_shift_goal_preview=python_shift_goal_preview,
         )
     else:
         board_text = ""
@@ -3808,6 +3982,7 @@ def run_full_generation(
         tt4_matches=tt4_matches, notes=notes, override_mode=override_mode,
         actual_counts=actual_counts, recommended_counts=recommended_counts,
         deviation_reason=deviation_reason,
+        python_shift_goal_preview=python_shift_goal_preview,
     )
 
     return {
@@ -3828,6 +4003,7 @@ def run_full_generation(
         "actual_counts": actual_counts,
         "recommended_counts": recommended_counts,
         "deviation_reason": deviation_reason,
+        "python_shift_goal_preview": python_shift_goal_preview,
     }
 
 
@@ -4063,27 +4239,22 @@ if reco:
     }
     rc = reco["recommended_counts"]
 
-    st.subheader("Staffing Summary")
-    short_by = int(reco.get("short_by", 0))
-    bench_text = (
-        f"Short versus recommended need: {short_by}." if short_by > 0
-        else f"Extra over today's workload (bench): {reco['lead_extra']}."
-    )
+    st.subheader("Recommended Allocation")
     st.caption(
         f"Built from {reco['total_present']} present. "
-        f"{bench_text} "
+        f"Extra over today's workload (bench): {reco['lead_extra']}. "
         "If you change any input on the left, click Compute again to refresh."
     )
+    reco_df = pd.DataFrame(
+        [{"Position": label_map[t], "Recommended": int(rc.get(t, 0))} for t in task_order]
+    )
+    st.table(reco_df)
 
-    reco_summary_table = reco.get("recommended_summary_table")
-    if reco_summary_table is not None:
-        st.dataframe(reco_summary_table, use_container_width=True)
-    else:
-        # Fallback only, in case an old session_state object is still cached.
-        reco_df = pd.DataFrame(
-            [{"Position": label_map[t], "Recommended": int(rc.get(t, 0))} for t in task_order]
-        )
-        st.table(reco_df)
+    if reco.get("recommended_summary_table") is not None:
+        st.subheader("Staffing Summary Used for This Preview")
+        st.dataframe(reco["recommended_summary_table"], use_container_width=True)
+
+    render_python_shift_goal_preview(reco.get("python_shift_goal_preview"))
 
     choice = st.radio(
         "Are you running this recommended allocation?",
@@ -4129,6 +4300,18 @@ if reco:
         }
         entered_total = sum(actual_counts.values())
         present_total = reco["total_present"]
+
+        override_preview = None
+        if reco.get("board_text_for_preview"):
+            actual_summary_for_preview = build_summary_table_from_counts(reco.get("needed", {}), actual_counts)
+            override_preview = compute_python_shift_goal_preview(
+                board_text=reco.get("board_text_for_preview", ""),
+                day=day,
+                shift=shift,
+                hours_remaining=hours_remaining,
+                summary_table=actual_summary_for_preview,
+            )
+            render_python_shift_goal_preview(override_preview)
 
         reason = st.text_area(
             "Why are you running it differently? (the AI uses this so it won't flag an intentional gap)",
