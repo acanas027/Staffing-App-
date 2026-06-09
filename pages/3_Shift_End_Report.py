@@ -103,7 +103,8 @@ def _in_shift_window(appt_time, shift):
     return mins >= 17 * 60 or mins <= 5 * 60      # >=1020 or <=300
 
 
-def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes):
+def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
+                   actual_cutoff=""):
     """Roll per-commitment outcomes into the one-row shift summary."""
     oc = [o for o in outcome_rows if o.get("type") == "OC"]
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
@@ -113,6 +114,7 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
         "total_shorts": total_shorts,
         "goal_met": _norm_na(goal_met),
         "shift_goal": shift_goal,
+        "actual_cutoff": actual_cutoff,
         "oc_total": len(oc),
         "oc_signoff_met": sum(1 for o in oc if o.get("signoff_done") == "Y"),
         "oc_photos_met": sum(1 for o in oc if o.get("photos_done") == "Y"),
@@ -491,10 +493,18 @@ with st.form("closeout_form"):
                 })
 
     # ----- Shift goal result -----
-    st.subheader("Shift goal")
+     st.subheader("Shift goal")
+    actual_cutoff = ""
     if shift_goal:
         st.caption(shift_goal)
         goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
+        actual_cutoff = st.text_input(
+            "If we missed: what appointment time did we actually control to? (HH:MM)",
+            key="actual_cutoff",
+            placeholder="e.g. 15:30",
+            help="Only needed if you answered No. The morning goal predicted a cutoff "
+                 "based on our pick/pull/load rates — this records the real.",
+        )
     else:
         goal_met = "NA"
         st.caption("No shift goal was recorded, so there's nothing to mark here.")
@@ -527,8 +537,20 @@ if submitted:
             f"and submit again."
         )
         st.stop()
+
+    # Actual cutoff is required only when the goal was missed.
+    goal_norm = _norm_na(goal_met)
+    if goal_norm == "N" and not str(actual_cutoff).strip():
+        st.error(
+            "You marked the shift goal as missed. Enter the actual appointment cutoff "
+            "you controlled to (HH:MM) so the variance from the prediction gets recorded."
+        )
+        st.stop()
+    if goal_norm != "N":
+        actual_cutoff = ""  # only store a cutoff when the goal was actually missed
+        
     summary = _build_summary(
-        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes
+        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes, actual_cutoff=actual_cutoff ,
     )
     report_rows, misses = build_report_rows(
         outcome_rows, loads_completed, total_shorts, goal_met, shift_goal
