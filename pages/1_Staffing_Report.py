@@ -2044,8 +2044,10 @@ def compute_throughput_optimal_allocation(
     if total_loads > 0 and base_loading_goal <= 0:
         base_loading_goal = 1
 
-    loading_target_loads = min(total_loads, completed_or_loaded_now + base_loading_goal)
-    remaining_loading_goal = max(0, loading_target_loads - completed_or_loaded_now)
+    # Loading goal is a flat 52% of selected-day loads. Completed loads are no longer
+    # added to inflate the goal, nor subtracted from it.
+    loading_target_loads = min(total_loads, base_loading_goal)
+    remaining_loading_goal = loading_target_loads
 
     picks_left = max(0.0, float(picks_left or 0))
     pulls_left = max(0.0, float(pulls_left or 0))
@@ -2235,8 +2237,9 @@ def appointment_controlled_by_allocation(
     base_loading_goal_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
     if total_loads > 0 and base_loading_goal_loads <= 0:
         base_loading_goal_loads = 1
-    loading_target_loads = min(total_loads, completed_or_loaded_now + base_loading_goal_loads)
-    remaining_loading_goal = max(0, loading_target_loads - completed_or_loaded_now)
+    # Loading goal is a flat 52% of selected-day loads (completed not added or subtracted).
+    loading_target_loads = min(total_loads, base_loading_goal_loads)
+    remaining_loading_goal = loading_target_loads
 
     pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
 
@@ -2245,7 +2248,7 @@ def appointment_controlled_by_allocation(
 
     loading_capacity_left = loaders * LOAD_RATE * hrs
     load_frac = (
-        min(1.0, (completed_or_loaded_now + loading_capacity_left) / loading_target_loads)
+        min(1.0, loading_capacity_left / loading_target_loads)
         if loading_target_loads > 0 else 1.0
     )
 
@@ -2311,8 +2314,7 @@ def appointment_controlled_by_allocation(
         "note": (
             f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
             f"RTL counts for appointment cutoff but still needs loader work; R/S remains controlled but needs product follow-up. "
-            f"Loading goal = Completed/Loaded now ({completed_or_loaded_now}) "
-            f"+ 52% of selected-day loads ({base_loading_goal_loads}) = {loading_target_loads}."
+            f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
         ),
     }
 
@@ -2564,7 +2566,7 @@ def render_python_shift_goal_preview(preview):
         f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
         f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
         f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
-        f"(Completed/Loaded now + 52% of day)"
+        f"(52% of day)"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
@@ -4027,11 +4029,7 @@ def build_pdf_report(
         assigned = _assigned_count(task)
         needed_val = _needed_count(task)
         gap_val = _gap_count(task)
-        text = f"{assigned} assigned / need {needed_val} / gap {gap_val:+d}"
-        tool_rec = _tool_rec_count(task)
-        if override_mode and tool_rec is not None:
-            text += f" / tool {tool_rec}"
-        return text
+        return f"{assigned} assigned / need {needed_val} / gap {gap_val:+d}"
 
     pickers = _assigned_count("Picking")
     taskers = _assigned_count("Tasking")
@@ -4079,7 +4077,7 @@ def build_pdf_report(
     fact_rows = [
         ["Selected-day loads", pacing.get("selected_day_total_loads", "not provided"), "Pacing", pacing.get("pacing", "not provided")],
         ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
-        ["Due by now", pacing.get("due_by_now", 0), "Due not done", pacing.get("due_not_done", 0)],
+        ["Due by now", pacing.get("due_by_now", 0), "Due now not RTL", pacing.get("due_not_done", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
         ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
         ["Tasking staffing", _staffing_fact("Tasking"), "Tasking/pull capacity", f"{tasking_pull_capacity:,.0f} pallets"],
@@ -4121,10 +4119,8 @@ def build_pdf_report(
     # Removed executive AI summary from the first page to avoid repeating the KPI facts.
     story.append(PageBreak())
 
-    # 2. Critical Load Alerts: OC + Cross Dock + TT4 together.
-    story.append(Paragraph("2. Critical Load Alerts", styles["Section"]))
-
-    story.append(Paragraph("OC Loads and Actions", styles["AlertTitle"]))
+    # 2. OC Loads and Actions — own page
+    story.append(Paragraph("2. OC Loads and Actions", styles["Section"]))
     if oc_load_matches:
         data = [["Load", "Customer", "Time / Status", "Priority", "Required Actions"]]
         for m in oc_load_matches:
@@ -4158,8 +4154,10 @@ def build_pdf_report(
     else:
         story.append(Paragraph("No Opportunity Customer loads detected on today's board.", styles["BodySmall"]))
 
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("Cross Dock Loads, Pallets and Actions", styles["AlertTitle"]))
+    story.append(PageBreak())
+
+    # 3. Cross Dock — own page
+    story.append(Paragraph("3. Cross Dock Loads, Pallets and Actions", styles["Section"]))
     if crossdock_matches:
         data = [["Load", "Board Customer", "Time / Status", "Cross Dock Customer", "Pallets", "Location", "Required Action"]]
         for m in crossdock_matches:
@@ -4177,8 +4175,10 @@ def build_pdf_report(
     else:
         story.append(Paragraph("No Cross Dock pallets matched today's board loads, or no Cross Dock sheet was uploaded.", styles["BodySmall"]))
 
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("Loads with TT4", styles["AlertTitle"]))
+    story.append(PageBreak())
+
+    # 4. TT4 — own page
+    story.append(Paragraph("4. Loads with TT4", styles["Section"]))
     if tt4_matches:
         data = [["Load", "Customer", "Time / Status", "Required Action"]]
         for m in tt4_matches:
@@ -4195,8 +4195,8 @@ def build_pdf_report(
 
     story.append(PageBreak())
 
-    # 3. Prioritization - AI only.
-    story.append(Paragraph("3. Prioritization", styles["Section"]))
+    # 5. Prioritization - AI only.
+    story.append(Paragraph("5. Prioritization", styles["Section"]))
     priority_lines = extract_ai_prioritization_lines(board_analysis_text)
     if priority_lines:
         story.append(Paragraph("AI prioritization and board execution insight", styles["Subsection"]))
@@ -4208,8 +4208,8 @@ def build_pdf_report(
     # ReportLab will naturally continue onto a new page if the content is too long.
     story.append(Spacer(1, 10))
 
-    # 4. Top Action Items - AI only
-    story.append(Paragraph("4. Top Action Items", styles["Section"]))
+    # 6. Top Action Items - AI only
+    story.append(Paragraph("6. Top Action Items", styles["Section"]))
     story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
     top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
     if top_action_lines:
