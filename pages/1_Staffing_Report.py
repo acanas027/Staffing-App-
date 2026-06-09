@@ -4039,8 +4039,8 @@ def build_pdf_report(
     unloaders = _assigned_count("Unloading")
     receivers = _assigned_count("Receiving")
 
-    picking_capacity = pickers * float(hours_remaining or 0) * 185
-    tasking_pull_capacity = max(0, taskers - TASK_FLOOR) * float(hours_remaining or 0) * 25
+    picking_capacity = pickers * float(hours_remaining or 0) * PICK_RATE
+    tasking_pull_capacity = max(0, taskers - TASK_FLOOR) * float(hours_remaining or 0) * PULL_RATE
     loading_capacity = loaders * float(hours_remaining or 0)
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     service_risk, service_risk_reason = derive_service_risk_level(
