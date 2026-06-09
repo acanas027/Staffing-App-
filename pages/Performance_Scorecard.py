@@ -1,14 +1,15 @@
 """
-4_Monthly_Scorecard.py
-=====================
-Cumulative monthly view of how well we met our goals. It reads the same persistent
-log the shift closeout writes to, so it updates automatically every time a shift is
-closed out — nothing extra to save. Pick a month, see the headline goal percentages,
-the per-shift breakdown, and every miss. A one-page PDF is available to hand off.
+4_Performance_Scorecard.py
+==========================
+Weekly or monthly view of how well we met our goals, from the same persistent log
+the shift closeout writes to. Pick Week or Month, see headline percentages, the
+top reasons loads missed requirements, the per-shift breakdown, and every miss.
+A one-page PDF is available to hand to the DC manager.
 """
 
 import datetime
 import io
+from collections import Counter
 
 import pandas as pd
 import streamlit as st
@@ -34,20 +35,18 @@ except Exception:
 # ============================================================
 
 def _metric(column, label, block, met_key, total_key):
-    """Render a goal metric, handling the no-data case."""
     rate = block.get("rate")
     met = block.get(met_key, 0)
     total = block.get(total_key, 0)
     if rate is None:
         column.metric(label, "—")
-        column.caption("No data this month.")
+        column.caption("No data this period.")
     else:
         column.metric(label, f"{rate}%")
         column.caption(f"{met} of {total}")
 
 
 def _recent_month_options(count=12):
-    """Return [(year, month, label)] for the last `count` months, newest first."""
     today = datetime.date.today()
     out = []
     y, m = today.year, today.month
@@ -60,8 +59,17 @@ def _recent_month_options(count=12):
     return out
 
 
-def build_monthly_pdf(score, month_label):
-    """One-page monthly goal scorecard PDF. Returns bytes, or None."""
+def rank_top_miss_reasons(misses, top_n=3):
+    """Count standardized miss reasons and return [(reason, count), ...] + total."""
+    counter = Counter()
+    for m in misses or []:
+        reason = str(m.get("miss_reason", "") or "").strip() or "Unspecified"
+        counter[reason] += 1
+    return counter.most_common(top_n), sum(counter.values())
+
+
+def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
+    """One-page scorecard PDF for any period. Returns bytes, or None."""
     if not REPORTLAB_AVAILABLE:
         return None
 
@@ -87,11 +95,8 @@ def build_monthly_pdf(score, month_label):
     body = ParagraphStyle("B", parent=base["Normal"], fontSize=9, leading=12)
 
     story = [
-        Paragraph("Monthly Goal Scorecard", title_style),
-        Paragraph(
-            f"{month_label} &nbsp;|&nbsp; {score['shifts_logged']} shift(s) closed out",
-            sub_style,
-        ),
+        Paragraph("Performance Scorecard", title_style),
+        Paragraph(f"{period_label} &nbsp;|&nbsp; {score['shifts_logged']} shift(s) closed out", sub_style),
     ]
 
     def _cell(block, met_key, total_key):
@@ -101,7 +106,7 @@ def build_monthly_pdf(score, month_label):
         return f"{rate}%  ({block.get(met_key, 0)} of {block.get(total_key, 0)})"
 
     goal_data = [
-        ["Goal Area", "This Month"],
+        ["Goal Area", "This Period"],
         ["OC Sign-Off Compliance", _cell(score["oc_signoff"], "met", "required")],
         ["OC Photo Compliance", _cell(score["oc_photos"], "met", "required")],
         ["CPU On-Time", _cell(score["cpu_on_time"], "met", "total")],
@@ -122,7 +127,30 @@ def build_monthly_pdf(score, month_label):
     ]))
     story.append(goal_table)
 
-    story.append(Paragraph("Misses this month", h_style))
+    # Top reasons loads missed requirements
+    story.append(Paragraph("Top reasons loads missed requirements", h_style))
+    if top_reasons:
+        rdata = [["#", "Reason", "Count", "% of misses"]]
+        for i, (reason, count) in enumerate(top_reasons, 1):
+            share = f"{round(100 * count / total_miss_events)}%" if total_miss_events else "—"
+            rdata.append([str(i), Paragraph(str(reason), body), str(count), share])
+        rt = Table(rdata, colWidths=[0.4 * inch, 4.5 * inch, 0.9 * inch, 1.3 * inch], repeatRows=1)
+        rt.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#C00000")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(rt)
+    else:
+        story.append(Paragraph("No misses recorded this period.", body))
+
+    # Full miss list
+    story.append(Paragraph("Misses this period", h_style))
     if score["misses"]:
         miss_data = [["Date", "Shift", "Type", "Load", "Customer", "Reason"]]
         for m in score["misses"]:
@@ -151,7 +179,7 @@ def build_monthly_pdf(score, month_label):
         ]))
         story.append(miss_table)
     else:
-        story.append(Paragraph("No misses recorded this month.", body))
+        story.append(Paragraph("No misses recorded this period.", body))
 
     doc.build(story)
     buffer.seek(0)
@@ -162,11 +190,11 @@ def build_monthly_pdf(score, month_label):
 #  PAGE
 # ============================================================
 
-st.set_page_config(page_title="Monthly Scorecard", layout="wide")
-st.title("Monthly Goal Scorecard")
+st.set_page_config(page_title="Performance Scorecard", layout="wide")
+st.title("Performance Scorecard")
 st.write(
-    "How much of our goals we've met this month. This updates automatically every "
-    "time a shift is closed out."
+    "How much of our goals we've met. Pick a week or a month. This updates "
+    "automatically every time a shift is closed out."
 )
 
 if not shift_log.is_configured():
@@ -180,22 +208,35 @@ if not shift_log.is_configured():
     )
     st.stop()
 
-options = _recent_month_options(12)
-labels = [o[2] for o in options]
-picked_label = st.selectbox("Month", labels, index=0)
-year, month, _ = next(o for o in options if o[2] == picked_label)
+period = st.radio("Period", ["This week", "Month"], horizontal=True)
 
-try:
-    score = shift_log.get_monthly_scorecard(year, month)
-except Exception as e:
-    st.error(f"Could not load the monthly scorecard: {e}")
-    st.stop()
+if period == "This week":
+    end = st.date_input("Week ending", value=datetime.date.today())
+    try:
+        score = shift_log.get_weekly_scorecard(end)
+    except Exception as e:
+        st.error(f"Could not load the weekly scorecard: {e}")
+        st.stop()
+    period_label = f"{score['start']} – {score['end']}"
+    file_tag = f"Weekly_{score['end'].replace('/', '-')}"
+else:
+    options = _recent_month_options(12)
+    labels = [o[2] for o in options]
+    picked_label = st.selectbox("Month", labels, index=0)
+    year, month, _ = next(o for o in options if o[2] == picked_label)
+    try:
+        score = shift_log.get_monthly_scorecard(year, month)
+    except Exception as e:
+        st.error(f"Could not load the monthly scorecard: {e}")
+        st.stop()
+    period_label = picked_label
+    file_tag = f"Monthly_{year}-{month:02d}"
 
 if score["shifts_logged"] == 0:
-    st.warning(f"No shifts have been closed out in {picked_label} yet.")
+    st.warning(f"No shifts have been closed out for {period_label} yet.")
     st.stop()
 
-st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in {picked_label}.")
+st.caption(f"Based on {score['shifts_logged']} shift(s) closed out — {period_label}.")
 
 # Headline goal metrics
 m1, m2, m3, m4 = st.columns(4)
@@ -204,15 +245,28 @@ _metric(m2, "OC Photos", score["oc_photos"], "met", "required")
 _metric(m3, "CPU On-Time", score["cpu_on_time"], "met", "total")
 _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
 
-# Month totals
+# Period totals
 t1, t2, t3 = st.columns(3)
 t1.metric("Shifts closed out", score["shifts_logged"])
 t2.metric("Loads completed (total)", score["loads_completed_total"])
 t3.metric("Shorts (total)", score["shorts_total"])
 
+# Top 3 reasons loads missed requirements
+top_reasons, total_miss_events = rank_top_miss_reasons(score["misses"], top_n=3)
+st.markdown("---")
+st.subheader("Top 3 reasons loads missed requirements")
+if top_reasons:
+    st.table(pd.DataFrame([
+        {"Reason": r, "Count": c,
+         "% of misses": f"{round(100 * c / total_miss_events)}%" if total_miss_events else "—"}
+        for r, c in top_reasons
+    ]))
+else:
+    st.success("No misses recorded this period.")
+
 # Per-shift breakdown
 st.markdown("---")
-st.subheader("Shift-by-shift this month")
+st.subheader("Shift-by-shift")
 if score["per_shift"]:
     st.dataframe(
         pd.DataFrame([
@@ -233,11 +287,11 @@ if score["per_shift"]:
         height=320,
     )
 else:
-    st.caption("No per-shift summary rows for this month.")
+    st.caption("No per-shift summary rows for this period.")
 
-# Misses
+# Full miss list
 st.markdown("---")
-st.subheader("Misses this month")
+st.subheader("Misses")
 if score["misses"]:
     st.dataframe(
         pd.DataFrame([
@@ -255,16 +309,16 @@ if score["misses"]:
         height=300,
     )
 else:
-    st.success("No misses recorded this month.")
+    st.success("No misses recorded this period.")
 
 # Download
 st.markdown("---")
-pdf_bytes = build_monthly_pdf(score, picked_label)
+pdf_bytes = build_scorecard_pdf(score, period_label, top_reasons, total_miss_events)
 if pdf_bytes:
     st.download_button(
-        "Download Monthly Scorecard (PDF)",
+        "Download Scorecard (PDF)",
         data=pdf_bytes,
-        file_name=f"Monthly_Scorecard_{year}-{month:02d}.pdf",
+        file_name=f"Performance_Scorecard_{file_tag}.pdf",
         mime="application/pdf",
     )
 elif not REPORTLAB_AVAILABLE:
