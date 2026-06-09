@@ -712,6 +712,25 @@ def generate_recommendations(staff, needed):
         if str(row["Skills"]).strip() == "P":
             assign_if_needed("Picking", idx)
 
+    # Fill Loading early with L-skilled workers before L-skilled taskers can be absorbed into Tasking.
+    for idx in present_indexes:
+        if assigned["Loading"] >= needed["Loading"]:
+            break
+        if staff.at[idx, "Recommended Task"] != "":
+            continue
+        row = staff.loc[idx]
+        if best_fit(row, "Load") and has_skill(row, "L"):
+            assign_if_needed("Loading", idx)
+
+    for idx in present_indexes:
+        if assigned["Loading"] >= needed["Loading"]:
+            break
+        if staff.at[idx, "Recommended Task"] != "":
+            continue
+        row = staff.loc[idx]
+        if has_skill(row, "L"):
+            assign_if_needed("Loading", idx)
+
     best_fit_steps = [
         ("Unloading", "Unload", "U"),
         ("Loading",   "Load",   "L"),
@@ -739,33 +758,50 @@ def generate_recommendations(staff, needed):
                 assign_if_needed(task, idx)
 
     backup_tasks = ["Unloading", "Receiving", "Loading", "Picking", "Tasking"]
+    backup_skill_map = {
+        "Unloading": "U",
+        "Receiving": "R",
+        "Loading": "L",
+        "Picking": "P",
+        "Tasking": "T",
+    }
+
     for task in backup_tasks:
+        required_skill = backup_skill_map[task]
+
         while assigned[task] < needed[task]:
             found_worker = False
+
+            # First: use best-fit workers who also have the required skill.
             for idx in present_indexes:
                 if staff.at[idx, "Recommended Task"] != "":
                     continue
                 row = staff.loc[idx]
-                if best_fit(row, "Task") and (has_skill(row, "T") or has_skill(row, "L") or has_skill(row, "P")):
+                if best_fit(row, task[:5]) and has_skill(row, required_skill):
                     assign_if_needed(task, idx)
                     found_worker = True
                     break
+
             if found_worker:
                 continue
+
+            # Second: use anyone with the required skill.
             for idx in present_indexes:
                 if staff.at[idx, "Recommended Task"] != "":
                     continue
                 row = staff.loc[idx]
-                if has_skill(row, "T") or has_skill(row, "L") or has_skill(row, "P"):
+                if has_skill(row, required_skill):
                     assign_if_needed(task, idx)
                     found_worker = True
                     break
+
             if not found_worker:
                 break
 
     for idx in present_indexes:
         if staff.at[idx, "Recommended Task"] == "":
-            if assigned["Tasking"] < needed["Tasking"]:
+            row = staff.loc[idx]
+            if assigned["Tasking"] < needed["Tasking"] and has_skill(row, "T"):
                 staff.at[idx, "Recommended Task"] = "Tasking"
                 assigned["Tasking"] += 1
             else:
