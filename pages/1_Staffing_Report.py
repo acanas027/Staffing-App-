@@ -4476,7 +4476,7 @@ def run_full_generation(
         
 
         executive_summary_text = None
-        )
+        
     else:
         board_text = ""
 
