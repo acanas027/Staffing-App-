@@ -2779,14 +2779,14 @@ def analyze_board_with_groq(
             f"Suggested decision: {python_shift_goal_preview.get('suggested_adjustment', '')}\n"
             "Do not create a different shift goal. Explain this goal and use the same appointment cutoff everywhere.\n"
         )
-
     actionable_table = _rows_to_table(
         today_actionable_rows,
         ["day","load","customer","time","door","status","type","flags","comments"]
     )
-    
-   other_day_actionable_count = len(other_day_actionable_rows)
+
+    other_day_actionable_count = len(other_day_actionable_rows)
     other_day_actionable_table = f"{other_day_actionable_count} other-day actionable load(s) on the board (context only — not today's work)."
+
 
     completed_table = _rows_to_table(
         today_done_rows,
@@ -4820,7 +4820,7 @@ if reco:
             "Yes - generate the report on these numbers",
             "No - I'm running a different allocation",
         ],
-        index=0
+        index=0,
         key="allocation_choice",
     )
 
