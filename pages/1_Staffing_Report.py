@@ -698,12 +698,10 @@ def generate_recommendations(staff, needed):
 
     for idx in present_indexes:
         row = staff.loc[idx]
-        if name_contains(row, "Dale"):
-            staff.at[idx, "Recommended Task"] = "Receiving"
-            assigned["Receiving"] += 1
-        elif name_contains(row, "Alex"):
-            staff.at[idx, "Recommended Task"] = "Unloading"
-            assigned["Unloading"] += 1
+        if name_contains(row, "Dale") and has_skill(row, "R"):
+            assign_if_needed("Receiving", idx)
+        elif name_contains(row, "Alex") and has_skill(row, "U"):
+            assign_if_needed("Unloading", idx)
 
     for idx in present_indexes:
         if staff.at[idx, "Recommended Task"] != "":
@@ -852,6 +850,41 @@ def build_summary(staff, needed):
     )
     return present_recommendations, summary_table
 
+
+
+
+def count_present_skill_capacity(staff):
+    """Return the maximum available workers by task based on who is present and their listed skills."""
+    task_skill_map = {
+        "Unloading": "U",
+        "Receiving": "R",
+        "Picking": "P",
+        "Tasking": "T",
+        "Loading": "L",
+    }
+    present_rows = staff[staff.apply(is_present, axis=1)]
+    return {
+        task: int(present_rows.apply(lambda row: has_skill(row, skill), axis=1).sum())
+        for task, skill in task_skill_map.items()
+    }
+
+
+def cap_allocation_to_available_skills(allocation, staff):
+    """Never recommend more workers in a task than the present crew can legally staff by skill."""
+    caps = count_present_skill_capacity(staff)
+    return {
+        task: min(int(allocation.get(task, 0) or 0), int(caps.get(task, 0) or 0))
+        for task in ["Unloading", "Receiving", "Picking", "Tasking", "Loading"]
+    }
+
+
+def assigned_counts_from_summary(summary_table):
+    """Return assigned counts from the staffing summary so high-level allocation matches named workers."""
+    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+    return {
+        task: int(summary_table.loc[task, "Assigned"]) if task in summary_table.index else 0
+        for task in task_order
+    }
 
 def compute_labor_availability(summary_table, present_recommendations, lead_extra_count=None):
     """
@@ -4334,10 +4367,14 @@ def compute_recommended_allocation(
                 present_total=len(present_recommendations),
                 completed_or_loaded_now=completed_or_loaded_now,
             )
-            recommended_counts = {t: int(optimal.get(t, 0)) for t in task_order}
 
-            # Rebuild the summary table off the optimal plan so the goal preview matches it.
-            summary_table = build_summary_table_from_counts(needed, optimal)
+            # Cap the optimized counts by actual present skill capacity, then assign names
+            # against those capped targets. The high-level Recommended Allocation must
+            # match the named Recommended Staffing Board below it.
+            optimal = cap_allocation_to_available_skills(optimal, staff)
+            staff = generate_recommendations(staff, optimal)
+            present_recommendations, summary_table = build_summary(staff, optimal)
+            recommended_counts = assigned_counts_from_summary(summary_table)
 
             python_shift_goal_preview = compute_python_shift_goal_preview(
                 board_text=board_text_for_preview,
@@ -4353,6 +4390,11 @@ def compute_recommended_allocation(
                 board_file.seek(0)
             except Exception:
                 pass
+
+    total_present = len(present_recommendations)
+    lead_extra = int(
+        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
+    )
 
     return {
         "needed": needed,
@@ -4454,16 +4496,12 @@ def run_full_generation(
     ai_reason = None
 
     if override_mode and actual_counts:
-        task_order = ["Unloading", "Receiving", "Picking", "Tasking", "Loading"]
-        needed_series = pd.Series({t: int(needed.get(t, 0)) for t in task_order}, name="Needed")
-        actual_series = pd.Series({t: int(actual_counts.get(t, 0)) for t in task_order}, name="Assigned")
-        summary_table = pd.concat([needed_series, actual_series], axis=1).fillna(0)
-        summary_table["Needed"] = summary_table["Needed"].astype(int)
-        summary_table["Assigned"] = summary_table["Assigned"].astype(int)
-        summary_table["Difference"] = summary_table["Assigned"] - summary_table["Needed"]
-        summary_table["Status"] = summary_table["Difference"].apply(
-            lambda x: "Good" if x == 0 else ("Overstaffed" if x > 0 else "Understaffed")
-        )
+        # Assign named workers to the requested actual/recommended allocation, but still
+        # enforce skills. If only 2 present workers have L, the named board and the
+        # assigned Loading count will both show 2, not an impossible 4.
+        actual_counts = cap_allocation_to_available_skills(actual_counts, staff)
+        staff = generate_recommendations(staff, actual_counts)
+        present_recommendations, summary_table = build_summary(staff, needed)
 
         # In override mode, every present worker must be assigned to one of the five functions.
         # Safe move sources are only the functions showing a positive gap.
