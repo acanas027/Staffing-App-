@@ -90,14 +90,52 @@ def _appt_minutes(appt_time):
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
-def _in_shift_window(appt_time, shift):
+def _fmt_minutes(mins):
+    """Minutes since midnight -> 'HH:MM'."""
+    mins = int(mins) % (24 * 60)
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _goal_predicted_cutoff(shift_goal):
     """
-    Keep only loads whose appointment falls in this shift's window.
-    Window boundaries come from dc_config (1st 06:00-16:30, 2nd 17:00-05:00),
-    so they stay in sync with the staffing report. Loads with no parseable appt
-    time are kept (can't confidently exclude them).
+    Pull the predicted appointment cutoff out of the morning goal text, which reads
+    '...through appointment 14:00 (...) by shift end 16:30.' We want the appointment
+    cutoff, never the shift-end time, so we only match the time right after the word
+    'appointment'. Returns minutes since midnight, or None if there's no real cutoff
+    (e.g. the goal said 'none - before first appt').
     """
-    return dc_config.in_shift_window(_appt_minutes(appt_time), str(shift).strip())
+    import re
+    m = re.search(r"appointment\s+(\d{1,2}):(\d{2})", str(shift_goal or ""), flags=re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _cutoff_variance(shift_goal, actual_cutoff):
+    """
+    Compare predicted cutoff (from the goal) to the actual cutoff controlled to.
+    Later actual = controlled further into the day = AHEAD of plan; earlier = BEHIND.
+    Returns a dict (predicted/actual/delta/direction/message) or None if either time
+    is missing or unparseable.
+    """
+    predicted = _goal_predicted_cutoff(shift_goal)
+    actual = _appt_minutes(actual_cutoff)
+    if predicted is None or actual is None:
+        return None
+    delta = actual - predicted  # + later = ahead, - earlier = behind
+    if delta > 0:
+        direction = "AHEAD"
+        message = (f"Controlled to {actual_cutoff} vs predicted {_fmt_minutes(predicted)} - "
+                   f"{delta} min ahead of plan.")
+    elif delta < 0:
+        direction = "BEHIND"
+        message = (f"Controlled to {actual_cutoff} vs predicted {_fmt_minutes(predicted)} - "
+                   f"{abs(delta)} min behind plan.")
+    else:
+        direction = "ON TARGET"
+        message = f"Controlled to {actual_cutoff}, exactly the predicted cutoff."
+    return {"predicted_min": predicted, "actual_min": actual,
+            "delta_min": delta, "direction": direction, "message": message}
 
 
 def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
@@ -497,12 +535,13 @@ with st.form("closeout_form"):
         st.caption(shift_goal)
         goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
         actual_cutoff = st.text_input(
-            "If we missed: what appointment time did we actually control to? (HH:MM)",
+            "Actual appointment cutoff we controlled to (HH:MM)",
             key="actual_cutoff",
             placeholder="e.g. 15:30",
-            help="Only needed if you answered No. The morning goal predicted a cutoff "
-                 "based on our pick/pull/load rates — this records the real cutoff so your "
-                 "manager can see how far off the prediction was.",
+            help="Enter the real appointment time we controlled loads through if it "
+                 "differed from the morning prediction — in EITHER direction. Earlier "
+                 "than predicted (we fell short) or later (we beat the plan) are both "
+                 "worth recording. Leave blank only if we landed exactly on the predicted cutoff.",
         )
     else:
         goal_met = "NA"
@@ -545,8 +584,11 @@ if submitted:
             "you controlled to (HH:MM) so the variance from the prediction gets recorded."
         )
         st.stop()
-    if goal_norm != "N":
-        actual_cutoff = ""  # only store a cutoff when the goal was actually missed
+
+    # Keep whatever cutoff was entered, in either direction. A met goal that also beat
+    # the predicted cutoff is a positive variance worth recording — no longer cleared.
+    actual_cutoff = str(actual_cutoff or "").strip()
+    cutoff_variance = _cutoff_variance(shift_goal, actual_cutoff) if actual_cutoff else None
 
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
@@ -572,6 +614,15 @@ if submitted:
         )
     except Exception as e:
         st.error(f"Could not save closeout: {e}")
+
+    # Show the cutoff variance vs the morning prediction, in either direction.
+    if cutoff_variance:
+        if cutoff_variance["direction"] == "AHEAD":
+            st.success(cutoff_variance["message"])
+        elif cutoff_variance["direction"] == "BEHIND":
+            st.warning(cutoff_variance["message"])
+        else:
+            st.info(cutoff_variance["message"])
 
 
 # ── End-of-Shift report (persists across reruns via session_state) ──────────
