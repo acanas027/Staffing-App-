@@ -840,6 +840,38 @@ def generate_recommendations(staff, needed):
         staff.at[swap_idx, "Recommended Task"] = old_task
         current_extra_idxs.remove(swap_idx)
 
+    # Final cleanup: if any function is still short and a Lead/Extra worker has
+    # that exact skill, use that worker before leaving them on Lead/Extra.
+    # This fixes cases like Receiving being full while a T/R worker is parked as
+    # Lead/Extra even though Tasking is still short.
+    final_skill_map = {
+        "Unloading": "U",
+        "Receiving": "R",
+        "Picking": "P",
+        "Tasking": "T",
+        "Loading": "L",
+    }
+    final_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
+
+    assigned = {task: 0 for task in needed}
+    for task_value in staff["Recommended Task"].astype(str).str.strip():
+        if task_value in assigned:
+            assigned[task_value] += 1
+
+    for task in final_priority:
+        required_skill = final_skill_map[task]
+        while assigned.get(task, 0) < int(needed.get(task, 0) or 0):
+            extra_idxs = [
+                idx for idx in present_indexes
+                if staff.at[idx, "Recommended Task"] == "Lead/Extra"
+                and has_skill(staff.loc[idx], required_skill)
+            ]
+            if not extra_idxs:
+                break
+            chosen_idx = extra_idxs[0]
+            staff.at[chosen_idx, "Recommended Task"] = task
+            assigned[task] += 1
+
     return staff
 
 
