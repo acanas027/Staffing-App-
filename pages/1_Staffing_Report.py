@@ -2859,6 +2859,8 @@ TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 
 BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff ( ALWAYS use actual appointment times from today's board) + the single biggest threat to meeting expectations. No data dump.
 Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have RTL all loads to 14:00. Move surplus labor to bottleneck."
+
+1. BOARD SUMMARY
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
 
 3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
@@ -2869,7 +2871,6 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 - Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
 - No vague verbs unless tied to a specific deadline and load. Don't repeat a 30-min action in the 2-hr block.
 - Don't invent actions and don't tell to move workers from extra to a function if there is no extra (bench).
-
 """
 
     try:
@@ -2877,13 +2878,14 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2500,
+            max_completion_tokens=3000,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
 
     except Exception as e:
         return f"Board analysis could not be completed: {str(e)}"
+
 
 def build_executive_summary_with_groq(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
@@ -3067,6 +3069,7 @@ FACTS:
         return response.choices[0].message.content
     except Exception as e:
         return f"Executive summary could not be generated: {e}"
+
 
 def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     sheet_name = "Board Analysis"
