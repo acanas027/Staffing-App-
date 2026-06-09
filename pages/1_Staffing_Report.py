@@ -2823,13 +2823,6 @@ SOURCE OF TRUTH:
 - Outbound and inbound counts are separate; never mix them.
 - Never invent load numbers, customers, doors, statuses, times, counts, goals, or problems.
 
-DAY / PACE LOGIC:
-- Use only the selected day for pacing.
-- Done = Completed or Loaded. Not done = Blank, Picking, Picking/Short. Loaded Short and R/S = waiting for product, not actionable.
-- Behind = appointment time already passed and load not done. Ahead = future loads already done. On track = no past-due unfinished loads and no major short/late risk.
-- A lower completed-vs-total count alone does NOT mean behind.
-- Use appointment cutoff times, never invented truck-count goals. Preferred goal format: "Have all 15:00 loads picked/staged before X."
-
 SHIFT GOAL: Use the PYTHON-COMPUTED SHIFT GOAL exactly as the source of truth. Do not invent a different appointment cutoff or target. You may explain why it matters, but the goal text and cutoff must match Python.
 
 TODAY SELECTED IN APP:
@@ -2883,7 +2876,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=3200,
+            max_completion_tokens=3090,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
