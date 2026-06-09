@@ -51,7 +51,7 @@ OUTCOMES_HEADER = [
 # OT hours removed. Shift goal + goal_met added.
 SUMMARY_HEADER = [
     "snapshot_id", "date", "shift", "loads_completed", "total_shorts",
-    "goal_met", "shift_goal",
+    "goal_met", "shift_goal", "actual_cutoff",
     "oc_total", "oc_signoff_met", "oc_photos_met",
     "cpu_total", "cpu_on_time", "notes", "closed_at",
 ]
@@ -266,6 +266,7 @@ def save_outcomes(operating_date, shift, outcome_rows, summary):
         summary.get("total_shorts", 0),
         str(summary.get("goal_met", "")),     # Y / N / NA
         str(summary.get("shift_goal", "")),
+        str(summary.get("actual_cutoff", "")),
         summary.get("oc_total", 0),
         summary.get("oc_signoff_met", 0),
         summary.get("oc_photos_met", 0),
