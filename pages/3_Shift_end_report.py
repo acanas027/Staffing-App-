@@ -145,46 +145,10 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     rows = [
         {
-            "area": "Shift Goal",
-            "expected": shift_goal or "Not recorded",
-            "actual": goal_actual,
-            "status": goal_status,
-        },
-        {
-            "area": "OC Sign-Off",
-            "expected": f"{oc_signoff_req} required" if oc_signoff_req else "None required",
-            "actual": f"{oc_signoff_met} collected",
-            "status": _status(oc_signoff_met >= oc_signoff_req, required=oc_signoff_req > 0),
-        },
-        {
-            "area": "OC Photos",
-            "expected": f"{oc_photos_req} required" if oc_photos_req else "None required",
-            "actual": f"{oc_photos_met} taken",
-            "status": _status(oc_photos_met >= oc_photos_req, required=oc_photos_req > 0),
-        },
-        {
-            "area": "OC On-Time",
-            "expected": f"{oc_total} load(s)" if oc_total else "No OC loads",
-            "actual": f"{oc_on_time} on time",
-            "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
-        },
-        {
-            "area": "CPU On-Time",
-            "expected": f"{cpu_total} appt(s)" if cpu_total else "No CPUs",
-            "actual": f"{cpu_on_time} on time",
-            "status": _status(cpu_on_time >= cpu_total, required=cpu_total > 0),
-        },
-        {
-            "area": "Shorts",
-            "expected": "Target 0",
-            "actual": f"{int(total_shorts)}",
-            "status": _status(int(total_shorts) == 0),
-        },
-        {
-            "area": "Loads Completed",
-            "expected": "—",
-            "actual": f"{int(loads_completed)}",
-            "status": "—",
+           "area": "Shorts",
+           "expected": "Target 0",
+           "actual": f"{int(total_shorts)}",
+           "status": _status(int(total_shorts) == 0),
         },
     ]
 
@@ -471,7 +435,12 @@ with st.form("closeout_form"):
     st.subheader("Shift totals")
     s1, s2 = st.columns(2)
     loads_completed = s1.number_input("Loads completed this shift", min_value=0, step=1, value=0)
-    total_shorts = s2.number_input("Total shorts on the shift", min_value=0, step=1, value=0)
+    total_shorts = s2.number_input(
+        "Loads shipped short this shift",
+        min_value=0, step=1, value=0,
+        help="Total number of loads that shipped short across the whole shift, "
+             "including any OC/CPU loads you already marked short above. Count loads, not cases.",
+    )
     notes = st.text_area("Operational notes")
 
     submitted = st.form_submit_button("Save Closeout & Build Report")
