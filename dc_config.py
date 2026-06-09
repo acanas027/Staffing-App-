@@ -5,10 +5,7 @@ Single source of truth for the distribution center's operational constants.
 
 WHY THIS FILE EXISTS
 --------------------
-These numbers were previously scattered across the staffing report and the shift
-closeout. When the same concept lived in two files, the two could drift apart (e.g.
-the shift-1 end time was 16:30 in one place and 16:00 in another). Holding them here
-means each value is defined once; every page imports it, so they can never disagree.
+Holding values here means each value is defined once; every page imports it, so they can never disagree.
 
 WHAT BELONGS HERE
 -----------------
