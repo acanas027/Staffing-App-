@@ -494,7 +494,7 @@ with st.form("closeout_form"):
 
     # ----- Shift goal result -----
      st.subheader("Shift goal")
-    actual_cutoff = ""
+     actual_cutoff = ""
     if shift_goal:
         st.caption(shift_goal)
         goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
