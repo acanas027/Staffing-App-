@@ -208,6 +208,18 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
         },
     ]
 
+    misses = []
+    for o in outcome_rows:
+        if (
+            str(o.get("shipped")).upper() == "N"
+            or str(o.get("on_time")).upper() == "N"
+            or str(o.get("signoff_done")).upper() == "N"
+            or str(o.get("photos_done")).upper() == "N"
+            or str(o.get("short")).upper() in ("Y", "YES")
+        ):
+            misses.append(o)
+
+    return rows, misses
 
 def build_report_pdf(operating_date, shift, report_rows, misses, notes):
     """Build the one-page End-of-Shift report PDF. Returns bytes, or None."""
