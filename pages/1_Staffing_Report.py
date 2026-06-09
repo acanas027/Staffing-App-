@@ -1872,6 +1872,12 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
         if done:
             done_count += 1
 
+        # Controlled for pacing = picking/pulling is finished.
+        # Completed/Loaded are done; RTL is staged on the door (picks/pulls done,
+        # only loading remains) -> NOT behind. Still Picking / Picking-Short /
+        # Blank with a passed appt time IS behind.
+        controlled_for_pacing = done or status_is_rtl(status)
+
         appt_minutes = board_minutes_for_pacing(row.get("time") or row.get("appt_time"))
         slim_row = {
             "load": row.get("load") or row.get("load_number", ""),
@@ -1884,11 +1890,11 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
         if current_minutes is not None and appt_minutes is not None:
             if appt_minutes <= current_minutes:
                 due_by_now += 1
-                if done:
+                if controlled_for_pacing:
                     due_done += 1
                 else:
                     due_not_done_rows.append(slim_row)
-            elif done:
+            elif controlled_for_pacing:
                 future_done += 1
                 future_done_rows.append(slim_row)
 
@@ -1897,7 +1903,7 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
 
     if due_not_done > 0:
         pacing = "BEHIND"
-        reason = f"{due_not_done} selected-day load(s) due by the estimated current time are not done."
+        reason = f"{due_not_done} selected-day load(s) due by now are still picking/pulling."
     elif future_done > 0:
         pacing = "AHEAD"
         reason = f"{future_done} future selected-day load(s) are already done."
