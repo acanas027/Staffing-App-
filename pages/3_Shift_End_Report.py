@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 import shift_log
+import dc_config
 
 try:
     from reportlab.lib import colors
@@ -92,18 +93,11 @@ def _appt_minutes(appt_time):
 def _in_shift_window(appt_time, shift):
     """
     Keep only loads whose appointment falls in this shift's window.
-    1st shift: 06:00-16:00 (inclusive of 06:00, up to 16:00).
-    2nd shift: 17:00-05:00 next day (wraps midnight).
-    Loads with no parseable appt time are kept (can't confidently exclude them).
+    Window boundaries come from dc_config (1st 06:00-16:30, 2nd 17:00-05:00),
+    so they stay in sync with the staffing report. Loads with no parseable appt
+    time are kept (can't confidently exclude them).
     """
-    mins = _appt_minutes(appt_time)
-    if mins is None:
-        return True  # don't drop a commitment just because the time is blank/odd
-
-    if str(shift).strip() == "1st":
-        return 6 * 60 <= mins <= 16 * 60          # 360..960
-    # 2nd shift wraps midnight: 17:00..23:59 OR 00:00..05:00
-    return mins >= 17 * 60 or mins <= 5 * 60      # >=1020 or <=300
+    return dc_config.in_shift_window(_appt_minutes(appt_time), str(shift).strip())
 
 
 def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
