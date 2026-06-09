@@ -36,7 +36,7 @@ except Exception:
 YES_NO = ["Yes", "No"]
 
 # Standardized miss/late reasons. "Other" reveals a free-text box so nothing is lost,
-# but every common cause is now countable across shifts.
+# but every common cause is now countable across shts.
 MISS_REASONS = [
     "(none)",
     "Late inbound / product not received",
@@ -56,70 +56,70 @@ MISS_REASONS = [
 def _norm_na(value):
     """Map a Yes/No/NA selection to Y / N / NA."""
     v = str(value).strip().upper()
-    if v in ("YES", "Y"):
+     v in ("YES", "Y"):
         return "Y"
-    if v in ("NO", "N"):
+     v in ("NO", "N"):
         return "N"
     return "NA"
 
 def _resolve_miss_reason(choice, other_text):
     """Turn the dropdown selection into the stored reason string."""
-    if choice in ("(none)", "", None):
+     choice in ("(none)", "", None):
         return ""
-    if choice == "Other (explain)":
-        return (other_text or "").strip() or "Other (unspecified)"
+     choice == "Other (explain)":
+        return (other_text or "").strip() or "Other (unspecied)"
     return choice
 
 def _yn_or_na(shipped, on_time):
-    """On-time only means something if the load shipped; otherwise NA."""
-    if str(shipped).strip().upper() not in ("YES", "Y"):
+    """On-time only means something  the load shipped; otherwise NA."""
+     str(shipped).strip().upper() not in ("YES", "Y"):
         return "NA"
     return _norm_na(on_time)
 
 def _appt_minutes(appt_time):
-    """Parse an appt like '18:00' or '6:00' into minutes since midnight. None if unparseable."""
+    """Parse an appt like '18:00' or '6:00' into minutes since midnight. None  unparseable."""
     import re
     text = str(appt_time or "").strip()
     m = re.match(r"^(\d{1,2}):(\d{2})", text)
-    if not m:
+     not m:
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
-def _in_shift_window(appt_time, shift):
+def _in_sht_window(appt_time, sht):
     """
-    Keep only loads whose appointment falls in this shift's window.
-    1st shift: 06:00–16:00 (inclusive of 06:00, up to 16:00).
-    2nd shift: 17:00–05:00 next day (wraps midnight).
+    Keep only loads whose appointment falls in this sht's window.
+    1st sht: 06:00–16:00 (inclusive of 06:00, up to 16:00).
+    2nd sht: 17:00–05:00 next day (wraps midnight).
     Loads with no parseable appt time are kept (can't confidently exclude them).
     """
     mins = _appt_minutes(appt_time)
-    if mins is None:
+     mins is None:
         return True  # don't drop a commitment just because the time is blank/odd
 
-    if str(shift).strip() == "1st":
+     str(sht).strip() == "1st":
         return 6 * 60 <= mins <= 16 * 60          # 360..960
-    # 2nd shift wraps midnight: 17:00..23:59 OR 00:00..05:00
+    # 2nd sht wraps midnight: 17:00..23:59 OR 00:00..05:00
     return mins >= 17 * 60 or mins <= 5 * 60      # >=1020 or <=300
 
 
-def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
+def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, sht_goal, notes,
                    actual_cutoff=""):
-    """Roll per-commitment outcomes into the one-row shift summary."""
-    oc = [o for o in outcome_rows if o.get("type") == "OC"]
-    cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
+    """Roll per-commitment outcomes into the one-row sht summary."""
+    oc = [o for o in outcome_rows  o.get("type") == "OC"]
+    cpu = [o for o in outcome_rows  o.get("type") == "CPU"]
 
     return {
         "loads_completed": loads_completed,
         "total_shorts": total_shorts,
         "goal_met": _norm_na(goal_met),
-        "shift_goal": shift_goal,
+        "sht_goal": sht_goal,
         "actual_cutoff": actual_cutoff,
         "oc_total": len(oc),
-        "oc_signoff_met": sum(1 for o in oc if o.get("signoff_done") == "Y"),
-        "oc_photos_met": sum(1 for o in oc if o.get("photos_done") == "Y"),
+        "oc_signoff_met": sum(1 for o in oc  o.get("signoff_done") == "Y"),
+        "oc_photos_met": sum(1 for o in oc  o.get("photos_done") == "Y"),
         "cpu_total": len(cpu),
-        "cpu_on_time": sum(1 for o in cpu if o.get("on_time") == "Y"),
+        "cpu_on_time": sum(1 for o in cpu  o.get("on_time") == "Y"),
         "notes": notes,
     }
 
@@ -129,7 +129,7 @@ def _metric(column, label, block, met_key, total_key):
     rate = block.get("rate")
     met = block.get(met_key, 0)
     total = block.get(total_key, 0)
-    if rate is None:
+     rate is None:
         column.metric(label, "—")
         column.caption("No data yet.")
     else:
@@ -139,60 +139,60 @@ def _metric(column, label, block, met_key, total_key):
 
 def _status(ok, required=True):
     """Return a status word for a comparison row."""
-    if not required:
+     not required:
         return "—"
-    return "On target" if ok else "Missed"
+    return "On target"  ok else "Missed"
 
 
-def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal):
+def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, sht_goal):
     """
     Build the expectations-vs-actual comparison rows.
     Each row: area, expected, actual, status.
     """
-    oc = [o for o in outcome_rows if o.get("type") == "OC"]
-    cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
+    oc = [o for o in outcome_rows  o.get("type") == "OC"]
+    cpu = [o for o in outcome_rows  o.get("type") == "CPU"]
 
-    oc_signoff_req = sum(1 for o in oc if o.get("signoff_done") in ("Y", "N"))
-    oc_signoff_met = sum(1 for o in oc if o.get("signoff_done") == "Y")
-    oc_photos_req = sum(1 for o in oc if o.get("photos_done") in ("Y", "N"))
-    oc_photos_met = sum(1 for o in oc if o.get("photos_done") == "Y")
+    oc_signoff_req = sum(1 for o in oc  o.get("signoff_done") in ("Y", "N"))
+    oc_signoff_met = sum(1 for o in oc  o.get("signoff_done") == "Y")
+    oc_photos_req = sum(1 for o in oc  o.get("photos_done") in ("Y", "N"))
+    oc_photos_met = sum(1 for o in oc  o.get("photos_done") == "Y")
     oc_total = len(oc)
-    oc_on_time = sum(1 for o in oc if o.get("on_time") == "Y")
+    oc_on_time = sum(1 for o in oc  o.get("on_time") == "Y")
     cpu_total = len(cpu)
-    cpu_on_time = sum(1 for o in cpu if o.get("on_time") == "Y")
+    cpu_on_time = sum(1 for o in cpu  o.get("on_time") == "Y")
 
     goal_norm = _norm_na(goal_met)
     goal_actual = {"Y": "Met", "N": "Not met"}.get(goal_norm, "Not recorded")
-    goal_status = "On target" if goal_norm == "Y" else ("Missed" if goal_norm == "N" else "—")
+    goal_status = "On target"  goal_norm == "Y" else ("Missed"  goal_norm == "N" else "—")
 
     rows = [
         {
-            "area": "Shift Goal",
-            "expected": shift_goal or "Not recorded",
+            "area": "Sht Goal",
+            "expected": sht_goal or "Not recorded",
             "actual": goal_actual,
             "status": goal_status,
         },
         {
             "area": "OC Sign-Off",
-            "expected": f"{oc_signoff_req} required" if oc_signoff_req else "None required",
+            "expected": f"{oc_signoff_req} required"  oc_signoff_req else "None required",
             "actual": f"{oc_signoff_met} collected",
             "status": _status(oc_signoff_met >= oc_signoff_req, required=oc_signoff_req > 0),
         },
         {
             "area": "OC Photos",
-            "expected": f"{oc_photos_req} required" if oc_photos_req else "None required",
+            "expected": f"{oc_photos_req} required"  oc_photos_req else "None required",
             "actual": f"{oc_photos_met} taken",
             "status": _status(oc_photos_met >= oc_photos_req, required=oc_photos_req > 0),
         },
         {
             "area": "OC On-Time",
-            "expected": f"{oc_total} load(s)" if oc_total else "No OC loads",
+            "expected": f"{oc_total} load(s)"  oc_total else "No OC loads",
             "actual": f"{oc_on_time} on time",
             "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
         },
         {
             "area": "CPU On-Time",
-            "expected": f"{cpu_total} appt(s)" if cpu_total else "No CPUs",
+            "expected": f"{cpu_total} appt(s)"  cpu_total else "No CPUs",
             "actual": f"{cpu_on_time} on time",
             "status": _status(cpu_on_time >= cpu_total, required=cpu_total > 0),
         },
@@ -212,7 +212,7 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     misses = []
     for o in outcome_rows:
-        if (
+         (
             str(o.get("shipped")).upper() == "N"
             or str(o.get("on_time")).upper() == "N"
             or str(o.get("signoff_done")).upper() == "N"
@@ -223,9 +223,9 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     return rows, misses
 
-def build_report_pdf(operating_date, shift, report_rows, misses, notes):
-    """Build the one-page End-of-Shift report PDF. Returns bytes, or None."""
-    if not REPORTLAB_AVAILABLE:
+def build_report_pdf(operating_date, sht, report_rows, misses, notes):
+    """Build the one-page End-of-Sht report PDF. Returns bytes, or None."""
+     not REPORTLAB_AVAILABLE:
         return None
 
     buffer = io.BytesIO()
@@ -250,8 +250,8 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes):
     body = ParagraphStyle("B", parent=base["Normal"], fontSize=9, leading=12)
 
     story = [
-        Paragraph("End-of-Shift Report", title_style),
-        Paragraph(f"{operating_date} &nbsp;|&nbsp; {shift} shift &nbsp;|&nbsp; Expectations vs Actual", sub_style),
+        Paragraph("End-of-Sht Report", title_style),
+        Paragraph(f"{operating_date} &nbsp;|&nbsp; {sht} sht &nbsp;|&nbsp; Expectations vs Actual", sub_style),
     ]
 
     # Comparison table
@@ -279,9 +279,9 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes):
     # Color the Result cell per row.
     for i, r in enumerate(report_rows, start=1):
         s = r["status"]
-        if s in ("On target", "Met"):
+         s in ("On target", "Met"):
             style.append(("BACKGROUND", (3, i), (3, i), colors.HexColor("#C6EFCE")))
-        elif s in ("Missed", "Not met"):
+        el s in ("Missed", "Not met"):
             style.append(("BACKGROUND", (3, i), (3, i), colors.HexColor("#FFC7CE")))
         else:
             style.append(("BACKGROUND", (3, i), (3, i), colors.HexColor("#ECECEC")))
@@ -289,8 +289,8 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes):
     story.append(table)
 
     # Misses
-    story.append(Paragraph("Misses this shift", h_style))
-    if misses:
+    story.append(Paragraph("Misses this sht", h_style))
+     misses:
         miss_data = [["Type", "Load", "Customer", "Appt", "Reason"]]
         for m in misses:
             miss_data.append([
@@ -313,7 +313,7 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes):
         ]))
         story.append(miss_table)
     else:
-        story.append(Paragraph("No misses recorded this shift.", body))
+        story.append(Paragraph("No misses recorded this sht.", body))
 
     # Notes
     story.append(Paragraph("Operational notes", h_style))
@@ -337,36 +337,36 @@ def render_report_table(report_rows):
 #  PAGE
 # ============================================================
 
-st.set_page_config(page_title="Shift Closeout", layout="wide")
-st.title("Shift Closeout")
+st.set_page_config(page_title="Sht Closeout", layout="wide")
+st.title("Sht Closeout")
 st.write(
     "Confirm how today's commitments closed out. This records the proof of how we "
-    "did against the shift goal, OC, and CPU expectations."
+    "did against the sht goal, OC, and CPU expectations."
 )
 
-if not shift_log.is_configured():
+ not sht_log.is_configured():
     st.error(
-        "The shift log isn't connected yet, so closeouts can't be saved. "
-        f"Reason: {shift_log.setup_hint()}"
+        "The sht log isn't connected yet, so closeouts can't be saved. "
+        f"Reason: {sht_log.setup_hint()}"
     )
     st.info(
-        "See the setup steps at the top of shift_log.py: create a Google Sheet, "
+        "See the setup steps at the top of sht_log.py: create a Google Sheet, "
         "add a service account, and put the credentials + sheet ID in Streamlit secrets."
     )
     st.stop()
 
 col_a, col_b = st.columns(2)
 operating_date = col_a.date_input("Operating date", value=datetime.date.today())
-shift = col_b.selectbox("Shift", ["1st", "2nd"])
+sht = col_b.selectbox("Sht", ["1st", "2nd"])
 operating_date_str = operating_date.strftime("%m/%d/%Y")
 
 try:
-    commitments = shift_log.load_commitments(operating_date_str, shift)
+    commitments = sht_log.load_commitments(operating_date_str, sht)
 except Exception as e:
     st.error(f"Could not load commitments: {e}")
     st.stop()
 
-if not commitments:
+ not commitments:
     st.warning(
         f"No commitments were snapshotted for {operating_date_str} {shift} shift. "
         "Run the morning staffing report for this day first — it captures the shift "
@@ -495,7 +495,7 @@ with st.form("closeout_form"):
     # ----- Shift goal result -----
      st.subheader("Shift goal")
      actual_cutoff = ""
-    if shift_goal:
+     if shift_goal:
         st.caption(shift_goal)
         goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
         actual_cutoff = st.text_input(
