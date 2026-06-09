@@ -3362,7 +3362,6 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
 
 # ============================================================
 #  EMAIL DRAFT
-#  When an AI executive summary exists, it IS the email body and the full
 #  workbook stays as the attachment. Otherwise fall back to the detailed body.
 # ============================================================
 def build_email_draft(
@@ -3408,6 +3407,41 @@ def build_email_draft(
 
     goal = shift_goal_preview.get("goal", "") if shift_goal_preview else ""
 
+    # Per-function assigned count + gap, from the summary table.
+    def _assigned(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Assigned"])
+        except Exception:
+            pass
+        return 0
+
+    def _gap(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Difference"])
+        except Exception:
+            pass
+        return 0
+
+    # Where the gap is: list short and over functions explicitly.
+    short_bits = [f"{t} {_gap(t)}" for t in ["Picking", "Tasking", "Loading", "Unloading", "Receiving"] if _gap(t) < 0]
+    over_bits  = [f"{t} +{_gap(t)}" for t in ["Picking", "Tasking", "Loading", "Unloading", "Receiving"] if _gap(t) > 0]
+    if short_bits:
+        gap_where = "Short: " + ", ".join(short_bits) + ("; Over: " + ", ".join(over_bits) if over_bits else "")
+    elif over_bits:
+        gap_where = "Over: " + ", ".join(over_bits)
+    else:
+        gap_where = "balanced across all functions"
+
+    # Coverage % per stream from the same controlled-through logic the PDF uses.
+    controlled = appointment_controlled_by_allocation(
+        board_text, day, shift, hours_remaining, summary_table
+    ) if board_text else {}
+    pick_pct = int(float(controlled.get("pick_frac", 0) or 0) * 100)
+    pull_pct = int(float(controlled.get("pull_frac", 0) or 0) * 100)
+    load_pct = int(float(controlled.get("load_frac", 0) or 0) * 100)
+
     lines = [f"{day} {shift} shift — first-page summary."]
     lines.append(f"Shift health: {health}.")
     if goal:
@@ -3420,7 +3454,13 @@ def build_email_draft(
         f"Pacing {pacing.get('pacing', 'n/a')}."
     )
     lines.append(f"Picks left {picks_left:,} | Pulls left {pulls_left:,} | Hours left {hours_remaining}.")
-    lines.append(f"Staffing: {total_present} present | net gap {net_gap:+d}.")
+    lines.append(f"Staffing: {total_present} present | net gap {net_gap:+d} | {gap_where}.")
+    lines.append(
+        f"Allocation: Pickers {_assigned('Picking')} (can do {pick_pct}% of loads) | "
+        f"Taskers {_assigned('Tasking')} (can do {pull_pct}% of day) | "
+        f"Loaders {_assigned('Loading')} (can do {load_pct}% of loads) | "
+        f"Unloaders {_assigned('Unloading')} | Receivers {_assigned('Receiving')}."
+    )
     lines.append(f"Inbound: {py_in.get('loads_read_from_inbound', 0)} loads | {onlot_atdoor} on lot/at door.")
     if oc_matches:
         oc_names = ", ".join(m["customer"]["name"].upper() for m in oc_matches)
