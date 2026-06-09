@@ -664,17 +664,17 @@ def calculate_needed(
     if msb_open == "YES":
         inbound_pallets += 640
     raw_needed = {
-        "Unloading":     (inbound_pallets / 4) / (44 * hours_remaining),
-        "Receiving":     (inbound_pallets / 4) / (44 * hours_remaining),
-        "Putaway":       (inbound_pallets / 2) / (25 * hours_remaining),
-        "Picking":       cases_to_pick / (185 * hours_remaining),
-        "Replenishment": (cases_to_pick / 70) / (25 * 8.5),
-        "Full Pallets":  full_pallets / (25 * hours_remaining),
+        "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * hours_remaining),
+        "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * hours_remaining),
+        "Putaway":       (inbound_pallets / 2) / (PULL_RATE * hours_remaining),
+        "Picking":       cases_to_pick / (PICK_RATE * hours_remaining),
+        "Replenishment": (cases_to_pick / 70) / (PULL_RATE * 8.5),
+        "Full Pallets":  full_pallets / (PULL_RATE * hours_remaining),
         "Loading":       total_outbound_loads_actual / hours_remaining,
     }
     needed = {
-        "Unloading": max(2, whole_workers(raw_needed["Unloading"])),
-        "Receiving":  max(2, whole_workers(raw_needed["Receiving"])),
+        "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
+        "Receiving":  max(MIN_RECEIVERS, whole_workers(raw_needed["Receiving"])),
         "Picking":    whole_workers(raw_needed["Picking"]),
         "Tasking":    whole_workers(
             raw_needed["Putaway"] + raw_needed["Replenishment"] + raw_needed["Full Pallets"]
