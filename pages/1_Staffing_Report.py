@@ -13,6 +13,8 @@ import json
 import datetime
 from openai import OpenAI
 
+import dc_config
+
 try:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
@@ -1947,11 +1949,18 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
 #  taskers are added, and Loading must keep up or staged loads pile up.
 # ============================================================
 
-PICK_RATE = 185.0   # cases/hr/person
-PULL_RATE = 25.0    # full pallets/hr/person
-LOAD_RATE = 1.0     # trailers/hr/person
-TASK_FLOOR = 4      # always-on replenishment + putaway, before full-pallet pulls
-LOAD_TARGET_SHARE = 0.52  # 1st-shift loading target = 52% of selected-day outbound loads
+# Operating constants now come from dc_config so the staffing report, the shift
+# closeout, and the README standard can never drift apart. Aliased to module-level
+# names here so every existing reference below keeps working unchanged.
+
+PICK_RATE = dc_config.PICK_RATE              # cases/hr/person
+PULL_RATE = dc_config.PULL_RATE              # full pallets/hr/person
+LOAD_RATE = dc_config.LOAD_RATE              # trailers/hr/person
+UNLOAD_RATE = dc_config.UNLOAD_RATE          # inbound pallets/hr/person
+TASK_FLOOR = dc_config.TASK_FLOOR            # always-on replenishment + putaway, before full-pallet pulls
+MIN_UNLOADERS = dc_config.MIN_UNLOADERS      # reserved inbound crew before the split
+MIN_RECEIVERS = dc_config.MIN_RECEIVERS      # reserved inbound crew before the split
+LOAD_TARGET_SHARE = dc_config.LOAD_TARGET_SHARE  # 1st-shift loading target = share of selected-day outbound loads
 
 
 def status_is_completed_or_loaded(status):
