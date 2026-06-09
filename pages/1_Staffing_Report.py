@@ -2885,7 +2885,188 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
     except Exception as e:
         return f"Board analysis could not be completed: {str(e)}"
 
+def build_executive_summary_with_groq(
+    day, shift, total_cases, hours_remaining, total_outbound_loads_day,
+    board_text, summary_table, present_recommendations, availability,
+    oc_matches, notes, board_analysis_text=None,
+    recommended_allocation=None, deviation_reason=None,
+    python_shift_goal_preview=None,
+):
+    """
+    Second, lightweight Groq call on llama-3.3-70b-versatile.
+    Runs on a DIFFERENT model than the gpt-oss-120b board analysis, so it never
+    shares that model's per-minute token bucket. Fed Python-verified facts only,
+    so every number is exact and nothing is recomputed by the model.
+    """
+    client = get_groq_client()
+    if client is None:
+        return None  # caller falls back to the detailed body
 
+    try:
+        payload = json.loads(board_text)
+    except Exception:
+        payload = {}
+
+    py_out   = payload.get("python_verified_outbound_summary", {})
+    py_in    = payload.get("python_verified_inbound_summary", {})
+    py_today = payload.get("python_verified_today_totals", {})
+    all_rows = payload.get("all_outbound_rows", [])
+
+    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining)
+
+    picks_left = py_today.get("picks_left_today")
+    pulls_left = py_today.get("pulls_left_today")
+
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    net_gap        = total_assigned - total_needed
+    labor_hours_gap = net_gap * hours_remaining
+
+    staffing_lines = []
+    for task, row in summary_table.iterrows():
+        staffing_lines.append(
+            f"{task}: need {int(row['Needed'])}, assigned {int(row['Assigned'])}, "
+            f"gap {int(row['Difference'])} ({row['Status']})"
+        )
+    staffing_block = "\n".join(staffing_lines)
+
+    # Labor availability stated as a hard fact so the model can't invent a free body.
+    if availability["has_available_labor"]:
+        bench = []
+        if availability["surplus_tasks"]:
+            bench.append(", ".join(f"{t} +{n}" for t, n in availability["surplus_tasks"].items()))
+        if availability["lead_extra_count"] > 0:
+            bench.append(f"Lead/Extra {availability['lead_extra_count']}")
+        availability_fact = f"Surplus labor available: YES ({'; '.join(bench)}). A safe internal move exists."
+    else:
+        availability_fact = (
+            "Surplus labor available: NO. Every present worker is assigned and no area is overstaffed. "
+            "Any move into one function reopens a gap in another. Closing gaps requires overtime, an "
+            "early 2nd-shift start, or borrowing labor. Do NOT suggest moving a worker as if one is free."
+        )
+
+    if oc_matches:
+        oc_str = "; ".join(
+            f"{m['customer']['name'].upper()} [{m['customer']['priority']}]"
+            + (" — sign-off required" if m['customer'].get('sign_off') else "")
+            + (" — photos required" if m['customer'].get('pictures') else "")
+            for m in oc_matches
+        )
+    else:
+        oc_str = "none on today's board"
+
+    onlot_atdoor = (py_in.get("on_lot", 0) or 0) + (py_in.get("at_door", 0) or 0)
+    inbound_fact = (
+        f"Total inbound loads: {py_in.get('loads_read_from_inbound', 'not provided')}; "
+        f"Live: {py_in.get('live_loads', 'not provided')}; "
+        f"Drop: {py_in.get('drop_loads', 'not provided')}; "
+        f"On lot/at door: {onlot_atdoor}"
+    )
+
+    board_fact = (
+        f"Outbound loads today: {pacing.get('selected_day_total_loads', 'not provided')}; "
+        f"Completed: {pacing.get('completed_count', 0)}; Loaded: {pacing.get('loaded_count', 0)}; "
+        f"RTL: {py_out.get('rtl_loads', 0)}; R/S: {py_out.get('rs_loads', 0)}; "
+        f"Picking/Short: {py_out.get('picking_short_loads', 0)}; Picking: {py_out.get('picking_loads', 0)}; "
+        f"Blank/Not started: {py_out.get('blank_or_not_started_loads', 0)}; "
+        f"Pacing: {pacing.get('pacing', 'not provided')}; "
+        f"Due by now: {pacing.get('due_by_now', 0)}; Due not done: {pacing.get('due_not_done', 0)}; "
+        f"Estimated current time: {pacing.get('estimated_current_time', 'not provided')}"
+    )
+
+    facts = f"""DAY/SHIFT: {day} {shift} | Total cases: {total_cases:,} | Hours remaining: {hours_remaining}
+
+STATUS / PACING (Python-verified — use exactly as given):
+{board_fact}
+
+LABOR (Python-verified):
+Present: {total_present} | Needed: {total_needed} | Assigned: {total_assigned} | Net gap: {net_gap:+d} people = {labor_hours_gap:+.1f} labor-hours
+Per function:
+{staffing_block}
+{availability_fact}
+
+WORKLOAD / CAPACITY (Python-verified):
+Picks left: {picks_left if picks_left is not None else 'not provided'} | Pulls left: {pulls_left if pulls_left is not None else 'not provided'} | Hours left: {hours_remaining}
+
+INBOUND (Python-verified):
+{inbound_fact}
+
+OPPORTUNITY CUSTOMERS: {oc_str}
+
+PYTHON-COMPUTED SHIFT GOAL (source of truth):
+{python_shift_goal_preview.get('goal', 'not provided') if python_shift_goal_preview else 'not provided'}
+Confidence: {python_shift_goal_preview.get('confidence', 'not provided') if python_shift_goal_preview else 'not provided'}
+Main constraint: {python_shift_goal_preview.get('main_constraint', 'not provided') if python_shift_goal_preview else 'not provided'}
+
+OPERATIONS NOTES: {notes.strip() or 'none'}
+"""
+
+    if recommended_allocation:
+        label_map = {
+            "Picking": "Pickers",
+            "Tasking": "Taskers",
+            "Loading": "Loaders",
+            "Unloading": "Unloaders",
+            "Receiving": "Receivers",
+        }
+        rec_line = ", ".join(
+            f"{label_map.get(t, t)} {int(n)}" for t, n in recommended_allocation.items()
+        )
+        facts += (
+            "\nALLOCATION MODE: Supervisor is running a DIFFERENT allocation than recommended. "
+            "The per-function 'assigned' numbers above are the ACTUAL crew, not the recommendation.\n"
+            f"Recommended placement (comparison only): {rec_line}\n"
+        )
+        if deviation_reason and deviation_reason.strip():
+            facts += f"Supervisor's reason for the deviation: {deviation_reason.strip()}\n"
+
+    if board_analysis_text:
+        facts += (
+            "\nDETAILED BOARD ANALYSIS (narrative context only — prioritization and threats; "
+            "if any number here conflicts with the verified facts above, the facts above win):\n"
+            f"{board_analysis_text}\n"
+        )
+
+    prompt = f"""You are summarizing a warehouse staffing and board analysis for an experienced DC Manager.
+Create a concise executive email summary.
+
+Rules:
+- Do not repeat the full report.
+- Do not explain basic warehouse terms.
+- Focus on status, constraint, labor gap, board risk, recommendation, and decision needed.
+- Keep it professional and direct.
+- Keep it under one page.
+- Do not invent numbers. Use only the facts provided below.
+- Use the PYTHON-COMPUTED SHIFT GOAL exactly; do not create a different appointment target.
+- If a number is missing from the facts, write "not provided".
+- If "Surplus labor available" is NO, do NOT suggest moving a worker as if one is free. State plainly that no safe internal move exists and that closing the gap requires overtime, an early 2nd-shift start, or borrowing labor.
+- If an allocation override and a reason are provided, treat the supervisor's reason as valid context: do not flag an intentionally-covered gap as a failure, but still note any genuine risk it creates.
+- Include exactly these sections, in this order:
+  1. Bottom Line
+  2. Labor: How many workers x area and staffing status
+  3. Workload / Capacity. Always state capacity. Capacity = 185 x hours remaining x workers picking. State Key risks here based on workload,capacity and staffing.
+  4. Board / Outbound : Summarize board by status. Mention how many inbounds for the day. 
+  5. Current Actions/Recomendations
+
+  FORMAT: Write every section as short, scannable bullet points starting with "- ".
+  Do NOT write paragraphs. One fact per bullet. Keep each bullet to a single short
+  sentence or fragment. No long prose blocks.
+
+FACTS:
+{facts}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_completion_tokens=1200,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Executive summary could not be generated: {e}"
 
 def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
     sheet_name = "Board Analysis"
