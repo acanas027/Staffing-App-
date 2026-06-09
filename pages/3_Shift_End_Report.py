@@ -90,6 +90,16 @@ def _appt_minutes(appt_time):
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
+def _in_shift_window(appt_time, shift):
+    """
+    Keep only loads whose appointment falls in this shift's window.
+    Window boundaries come from dc_config (1st 06:00-16:30, 2nd 17:00-05:00),
+    so they stay in sync with the staffing report. Loads with no parseable appt
+    time are kept (can't confidently exclude them).
+    """
+    return dc_config.in_shift_window(_appt_minutes(appt_time), str(shift).strip())
+
+
 def _fmt_minutes(mins):
     """Minutes since midnight -> 'HH:MM'."""
     mins = int(mins) % (24 * 60)
