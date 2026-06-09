@@ -802,48 +802,10 @@ def generate_recommendations(staff, needed):
             if not found_worker:
                 break
 
-    for idx in present_indexes:
-        if staff.at[idx, "Recommended Task"] == "":
-            row = staff.loc[idx]
-            if assigned["Tasking"] < needed["Tasking"] and has_skill(row, "T"):
-                staff.at[idx, "Recommended Task"] = "Tasking"
-                assigned["Tasking"] += 1
-            else:
-                staff.at[idx, "Recommended Task"] = "Lead/Extra"
-
-    preferred_extra_names = ["will", "antonio"]
-    preferred_idxs = [
-        idx for idx in present_indexes
-        if any(name in str(staff.at[idx, "Name"]).lower() for name in preferred_extra_names)
-    ]
-    current_extra_idxs = [
-        idx for idx in present_indexes
-        if staff.at[idx, "Recommended Task"] == "Lead/Extra"
-    ]
-    for preferred_idx in preferred_idxs:
-        if not current_extra_idxs:
-            break
-        if staff.at[preferred_idx, "Recommended Task"] == "Lead/Extra":
-            continue
-        swap_idx = None
-        for extra_idx in current_extra_idxs:
-            if not any(name in str(staff.at[extra_idx, "Name"]).lower() for name in preferred_extra_names):
-                swap_idx = extra_idx
-                break
-        if swap_idx is None:
-            break
-        old_task = staff.at[preferred_idx, "Recommended Task"]
-        required_skill = {"Unloading": "U", "Receiving": "R", "Loading": "L", "Picking": "P", "Tasking": "T"}.get(old_task)
-        if required_skill and not has_skill(staff.loc[swap_idx], required_skill):
-            continue
-        staff.at[preferred_idx, "Recommended Task"] = "Lead/Extra"
-        staff.at[swap_idx, "Recommended Task"] = old_task
-        current_extra_idxs.remove(swap_idx)
-
-    # Final cleanup: if any function is still short and a Lead/Extra worker has
-    # that exact skill, use that worker before leaving them on Lead/Extra.
-    # This fixes cases like Receiving being full while a T/R worker is parked as
-    # Lead/Extra even though Tasking is still short.
+    # Final assignment pass: do not park anyone in Lead/Extra.
+    # Any remaining present worker is assigned to a function they are actually skilled for.
+    # First priority is to fill short functions; if all their skilled functions are full,
+    # assign them to their best-fit skilled function as extra capacity.
     final_skill_map = {
         "Unloading": "U",
         "Receiving": "R",
@@ -851,26 +813,49 @@ def generate_recommendations(staff, needed):
         "Tasking": "T",
         "Loading": "L",
     }
-    final_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
+    shortage_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
+    fallback_priority = ["Tasking", "Picking", "Loading", "Receiving", "Unloading"]
 
-    assigned = {task: 0 for task in needed}
-    for task_value in staff["Recommended Task"].astype(str).str.strip():
-        if task_value in assigned:
-            assigned[task_value] += 1
+    def choose_task_for_unassigned(row):
+        skilled_tasks = [
+            task for task, skill in final_skill_map.items()
+            if has_skill(row, skill)
+        ]
+        if not skilled_tasks:
+            return "Support"
 
-    for task in final_priority:
-        required_skill = final_skill_map[task]
-        while assigned.get(task, 0) < int(needed.get(task, 0) or 0):
-            extra_idxs = [
-                idx for idx in present_indexes
-                if staff.at[idx, "Recommended Task"] == "Lead/Extra"
-                and has_skill(staff.loc[idx], required_skill)
-            ]
-            if not extra_idxs:
-                break
-            chosen_idx = extra_idxs[0]
-            staff.at[chosen_idx, "Recommended Task"] = task
-            assigned[task] += 1
+        # Fill shortages first. This fixes cases like a T/R worker whose best fit is
+        # Receiving but Receiving is full while Tasking is still short.
+        for task in shortage_priority:
+            if task in skilled_tasks and assigned.get(task, 0) < int(needed.get(task, 0) or 0):
+                return task
+
+        # If no shortage exists for that worker's skill set, honor best fit when possible.
+        best_fit_map = {
+            "Unloading": "Unload",
+            "Receiving": "Receiv",
+            "Picking": "Pick",
+            "Tasking": "Task",
+            "Loading": "Load",
+        }
+        for task, fit_text in best_fit_map.items():
+            if task in skilled_tasks and best_fit(row, fit_text):
+                return task
+
+        # Last resort: assign extra capacity to a real skilled function, never Lead/Extra.
+        for task in fallback_priority:
+            if task in skilled_tasks:
+                return task
+
+        return skilled_tasks[0]
+
+    for idx in present_indexes:
+        if staff.at[idx, "Recommended Task"] == "":
+            row = staff.loc[idx]
+            chosen_task = choose_task_for_unassigned(row)
+            staff.at[idx, "Recommended Task"] = chosen_task
+            if chosen_task in assigned:
+                assigned[chosen_task] += 1
 
     return staff
 
