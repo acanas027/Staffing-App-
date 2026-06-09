@@ -606,7 +606,13 @@ def is_present(row):
 
 
 def has_skill(row, code):
-    return code in str(row["Skills"])
+    """Return True only when the exact skill code is listed in the Skills cell.
+    Examples: P/T/L counts as P, T, and L. A random letter inside another word does not count.
+    """
+    code = str(code or "").strip().upper()
+    skills_text = str(row.get("Skills", "") if hasattr(row, "get") else row["Skills"]).upper()
+    skills = [s for s in re.split(r"[^A-Z]+", skills_text) if s]
+    return code in skills
 
 
 def best_fit(row, text):
@@ -827,6 +833,9 @@ def generate_recommendations(staff, needed):
         if swap_idx is None:
             break
         old_task = staff.at[preferred_idx, "Recommended Task"]
+        required_skill = {"Unloading": "U", "Receiving": "R", "Loading": "L", "Picking": "P", "Tasking": "T"}.get(old_task)
+        if required_skill and not has_skill(staff.loc[swap_idx], required_skill):
+            continue
         staff.at[preferred_idx, "Recommended Task"] = "Lead/Extra"
         staff.at[swap_idx, "Recommended Task"] = old_task
         current_extra_idxs.remove(swap_idx)
@@ -4368,12 +4377,12 @@ def compute_recommended_allocation(
                 completed_or_loaded_now=completed_or_loaded_now,
             )
 
-            # Cap the optimized counts by actual present skill capacity, then assign names
-            # against those capped targets. The high-level Recommended Allocation must
-            # match the named Recommended Staffing Board below it.
-            optimal = cap_allocation_to_available_skills(optimal, staff)
-            staff = generate_recommendations(staff, optimal)
-            present_recommendations, summary_table = build_summary(staff, optimal)
+            # The optimized model can estimate the best flow, but named recommendations must
+            # be grounded in who is actually present and what skills they actually have.
+            # Keep the true Needed column from calculate_needed(), assign only skill-qualified
+            # workers, and then set the Recommended Allocation from the actual named assignments.
+            staff = generate_recommendations(staff, needed)
+            present_recommendations, summary_table = build_summary(staff, needed)
             recommended_counts = assigned_counts_from_summary(summary_table)
 
             python_shift_goal_preview = compute_python_shift_goal_preview(
