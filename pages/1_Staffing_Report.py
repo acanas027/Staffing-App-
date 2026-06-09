@@ -2861,14 +2861,14 @@ BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the s
 Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have RTL all loads to 14:00. Move surplus labor to bottleneck."
 - Start: "SHIFT HEALTH: GREEN / YELLOW / RED." + one reason.
 
-1. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
+3. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
+- No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
+- If we are running behind and we have loads that are DROPS (specify that only drops) from a reser's customer (priority 4) State that if have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
+
+4. TOP ACTION ITEMS — Next 30 minutes: exactly 3. Next 2 hours: exactly 3.
 - Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
 - No vague verbs unless tied to a specific deadline and load. Don't repeat a 30-min action in the 2-hr block.
 - Don't invent actions and don't tell to move workers from extra to a function if there is no extra (bench).
-
-5. PRIORITIZATION — group as A) Past due / immediate risk  B) Next 2 hours  C) Later today high risk.
-- No other-day loads as today's work. Never prioritize any load with Reser's in the customer column.
-- If we are running behind and we have loads that are DROPS (specify that only drops) from a reser's customer (priority 4) State that if have not been started yet and are picking heavy, recommend to not start those and make sure to be on time for every CPU, OC and lives. 
 
 """
 
