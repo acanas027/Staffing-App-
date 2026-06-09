@@ -857,6 +857,64 @@ def generate_recommendations(staff, needed):
             if chosen_task in assigned:
                 assigned[chosen_task] += 1
 
+    # Final balance pass: if one skilled area is overstaffed while another is short,
+    # move a worker who has the short area's skill. This prevents cases like a T/R
+    # worker staying in Receiving when Receiving is full and Tasking is short.
+    rebalance_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
+    task_to_skill = {
+        "Unloading": "U",
+        "Receiving": "R",
+        "Picking": "P",
+        "Tasking": "T",
+        "Loading": "L",
+    }
+
+    def _gap(task):
+        return int(assigned.get(task, 0)) - int(needed.get(task, 0) or 0)
+
+    moved = True
+    while moved:
+        moved = False
+        short_tasks = [t for t in rebalance_priority if _gap(t) < 0]
+        over_tasks = [t for t in rebalance_priority if _gap(t) > 0]
+        if not short_tasks or not over_tasks:
+            break
+
+        for short_task in short_tasks:
+            required_skill = task_to_skill[short_task]
+            for over_task in over_tasks:
+                if _gap(short_task) >= 0 or _gap(over_task) <= 0:
+                    continue
+
+                candidates = []
+                for idx in present_indexes:
+                    if staff.at[idx, "Recommended Task"] != over_task:
+                        continue
+                    row = staff.loc[idx]
+                    if has_skill(row, required_skill):
+                        candidates.append(idx)
+
+                if not candidates:
+                    continue
+
+                # Prefer moving someone whose best fit is NOT the overstaffed task.
+                # If tied, prefer someone whose best fit matches the short task.
+                def _candidate_score(idx):
+                    row = staff.loc[idx]
+                    over_fit = best_fit(row, over_task[:5])
+                    short_fit = best_fit(row, short_task[:5])
+                    return (1 if over_fit else 0, 0 if short_fit else 1)
+
+                move_idx = sorted(candidates, key=_candidate_score)[0]
+                staff.at[move_idx, "Recommended Task"] = short_task
+                assigned[over_task] -= 1
+                assigned[short_task] += 1
+                moved = True
+                break
+
+            if moved:
+                break
+
     return staff
 
 
