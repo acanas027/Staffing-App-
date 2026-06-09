@@ -13,6 +13,13 @@ your boss wants: OC sign-off %, OC photo %, CPU on-time %, shift-goal-met %, wit
 every miss itemized.
 
 The tabs (commitments / outcomes / shift_summary) are created automatically.
+
+READ CACHING
+------------
+All tab reads go through _read_tab_records(), which is cached for 120 seconds. This
+keeps repeated Streamlit reruns (every widget click) from hitting the Google Sheets
+per-minute read quota. The cache is cleared right after every write so closeouts and
+snapshots show fresh data immediately.
 """
 
 import datetime
@@ -48,7 +55,7 @@ OUTCOMES_HEADER = [
     "miss_reason", "closed_at",
 ]
 
-# OT hours removed. Shift goal + goal_met added.
+# OT hours removed. Shift goal + goal_met + actual_cutoff added.
 SUMMARY_HEADER = [
     "snapshot_id", "date", "shift", "loads_completed", "total_shorts",
     "goal_met", "shift_goal", "actual_cutoff",
@@ -112,6 +119,20 @@ def _get_tab(name, header):
     if not first_row:
         ws.append_row(header, value_input_option="USER_ENTERED")
     return ws
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _read_tab_records(name, header_tuple):
+    """
+    Cached read of an entire tab's records. TTL 120s means repeated reruns within
+    two minutes serve from memory instead of hitting Google — this is what keeps
+    the app under the Sheets per-minute read quota. The cache is cleared on write
+    (see save_outcomes / snapshot_commitments) so data is never stale after a save.
+
+    header_tuple is a tuple (not a list) because cache-key arguments must be hashable.
+    """
+    ws = _get_tab(name, list(header_tuple))
+    return ws.get_all_records(expected_headers=list(header_tuple))
 
 
 def _yn(value):
@@ -180,6 +201,7 @@ def snapshot_commitments(operating_date, shift, oc_load_matches, cpu_commitments
     ws = _get_tab(COMMITMENTS_TAB, COMMITMENTS_HEADER)
     _replace_rows_for_snapshot(ws, COMMITMENTS_HEADER, snapshot_id, rows)
 
+    _read_tab_records.clear()  # invalidate cached reads so the new snapshot shows immediately
     return {
         "snapshot_id": snapshot_id,
         "oc_count": len(oc_load_matches or []),
@@ -199,8 +221,7 @@ def load_commitments(operating_date, shift):
         raise RuntimeError(f"Shift log not configured: {setup_hint()}")
 
     snapshot_id = make_snapshot_id(operating_date, shift)
-    ws = _get_tab(COMMITMENTS_TAB, COMMITMENTS_HEADER)
-    records = ws.get_all_records(expected_headers=COMMITMENTS_HEADER)
+    records = _read_tab_records(COMMITMENTS_TAB, tuple(COMMITMENTS_HEADER))
     return [r for r in records if str(r.get("snapshot_id")) == snapshot_id]
 
 
@@ -217,8 +238,7 @@ def outcomes_exist(operating_date, shift):
     if not is_configured():
         return False
     snapshot_id = make_snapshot_id(operating_date, shift)
-    ws = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
-    records = ws.get_all_records(expected_headers=OUTCOMES_HEADER)
+    records = _read_tab_records(OUTCOMES_TAB, tuple(OUTCOMES_HEADER))
     return any(str(r.get("snapshot_id")) == snapshot_id for r in records)
 
 
@@ -232,7 +252,8 @@ def save_outcomes(operating_date, shift, outcome_rows, summary):
     (date, shift) so a corrected re-submit overwrites rather than duplicates.
 
     summary : dict with keys loads_completed, total_shorts, goal_met, shift_goal,
-        oc_total, oc_signoff_met, oc_photos_met, cpu_total, cpu_on_time, notes.
+        actual_cutoff, oc_total, oc_signoff_met, oc_photos_met, cpu_total,
+        cpu_on_time, notes.
     """
     if not is_configured():
         raise RuntimeError(f"Shift log not configured: {setup_hint()}")
@@ -278,6 +299,7 @@ def save_outcomes(operating_date, shift, outcome_rows, summary):
     ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
     _replace_rows_for_snapshot(ws_sum, SUMMARY_HEADER, snapshot_id, [summary_row])
 
+    _read_tab_records.clear()  # invalidate cached reads so the new data shows immediately
     return {"snapshot_id": snapshot_id, "outcomes_written": len(rows)}
 
 
@@ -293,8 +315,7 @@ def get_recent_scorecard(days=30):
     if not is_configured():
         raise RuntimeError(f"Shift log not configured: {setup_hint()}")
 
-    ws = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
-    records = ws.get_all_records(expected_headers=OUTCOMES_HEADER)
+    records = _read_tab_records(OUTCOMES_TAB, tuple(OUTCOMES_HEADER))
 
     cutoff = datetime.date.today() - datetime.timedelta(days=days)
     recent = []
@@ -320,8 +341,7 @@ def get_recent_scorecard(days=30):
     # Shift-goal-met from the summary tab.
     goal_rate, goal_met, goal_total = None, 0, 0
     try:
-        ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
-        sum_records = ws_sum.get_all_records(expected_headers=SUMMARY_HEADER)
+        sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         recent_sum = [
             r for r in sum_records
             if (_parse_date(r.get("date")) is not None and _parse_date(r.get("date")) >= cutoff)
@@ -368,8 +388,7 @@ def get_monthly_scorecard(year, month):
         d = _parse_date(record.get("date"))
         return d is not None and d.year == int(year) and d.month == int(month)
 
-    ws = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
-    records = ws.get_all_records(expected_headers=OUTCOMES_HEADER)
+    records = _read_tab_records(OUTCOMES_TAB, tuple(OUTCOMES_HEADER))
     month_rows = [r for r in records if _in_month(r)]
 
     oc = [r for r in month_rows if str(r.get("type")) == "OC"]
@@ -392,8 +411,7 @@ def get_monthly_scorecard(year, month):
     shorts_total = 0
     per_shift = []
     try:
-        ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
-        sum_records = ws_sum.get_all_records(expected_headers=SUMMARY_HEADER)
+        sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         month_sum = [r for r in sum_records if _in_month(r)]
         for r in month_sum:
             gm = str(r.get("goal_met")).upper()
@@ -449,6 +467,8 @@ def get_monthly_scorecard(year, month):
         "per_shift": per_shift,
         "misses": misses,
     }
+
+
 def get_weekly_scorecard(end_date):
     """
     Goal performance for the 7-day window ending on end_date (inclusive).
@@ -468,8 +488,7 @@ def get_weekly_scorecard(end_date):
         d = _parse_date(record.get("date"))
         return d is not None and start <= d <= end
 
-    ws = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
-    records = ws.get_all_records(expected_headers=OUTCOMES_HEADER)
+    records = _read_tab_records(OUTCOMES_TAB, tuple(OUTCOMES_HEADER))
     week_rows = [r for r in records if _in_week(r)]
 
     oc = [r for r in week_rows if str(r.get("type")) == "OC"]
@@ -491,8 +510,7 @@ def get_weekly_scorecard(end_date):
     shorts_total = 0
     per_shift = []
     try:
-        ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
-        sum_records = ws_sum.get_all_records(expected_headers=SUMMARY_HEADER)
+        sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         week_sum = [r for r in sum_records if _in_week(r)]
         for r in week_sum:
             gm = str(r.get("goal_met")).upper()
@@ -549,6 +567,7 @@ def get_weekly_scorecard(end_date):
         "misses": misses,
     }
 
+
 # ============================================================
 #  PRIVATE HELPERS
 # ============================================================
@@ -558,6 +577,7 @@ def _to_int(value):
         return int(float(str(value).strip()))
     except Exception:
         return 0
+
 
 def _replace_rows_for_snapshot(ws, header, snapshot_id, new_rows):
     """
