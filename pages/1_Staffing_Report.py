@@ -1998,7 +1998,7 @@ def status_is_excluded_from_new_control(status):
 
 def compute_throughput_optimal_allocation(
     picks_left, pulls_left, total_loads, hours_remaining, present_total,
-    min_unload=2, min_receive=2, task_floor=TASK_FLOOR,
+    min_unload=MIN_UNLOADERS, min_receive=MIN_RECEIVERS, task_floor=TASK_FLOOR,
     completed_or_loaded_now=0,
 ):
     """
