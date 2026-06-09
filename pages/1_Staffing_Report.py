@@ -4796,6 +4796,7 @@ if reco:
             "Yes - generate the report on these numbers",
             "No - I'm running a different allocation",
         ],
+        index=0
         key="allocation_choice",
     )
 
