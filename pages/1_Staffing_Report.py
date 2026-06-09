@@ -3369,14 +3369,13 @@ def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
     board_analysis_text=None, oc_matches=None, executive_summary_text=None,
+    board_text="", shift_goal_preview=None,
 ):
     subject = f"{day} {shift} Shift – Staffing & Board Summary"
 
-    # New path: the AI executive summary is the email body.
+    # If an AI exec summary is ever passed in, use it. Normally None now.
     if executive_summary_text and executive_summary_text.strip() \
             and not executive_summary_text.strip().lower().startswith("executive summary could not"):
-        # Strip leading markdown header hashes (### etc.) from the summary so the
-        # email body reads as plain text instead of showing "### 4. ...".
         clean_summary = re.sub(
             r"^#{1,6}\s*", "", executive_summary_text.strip(), flags=re.MULTILINE
         )
@@ -3388,66 +3387,54 @@ def build_email_draft(
         )
         return subject, body
 
-    # Fallback: original detailed body (e.g. if Groq is unavailable).
-    total_present  = len(present_recommendations)
-    total_needed   = int(summary_table["Needed"].sum())
-    total_assigned = int(summary_table["Assigned"].sum())
-    overall_gap    = total_assigned - total_needed
+    # ---- Python-only concise recap of the PDF first page ----
+    try:
+        payload = json.loads(board_text or "{}")
+    except Exception:
+        payload = {}
+    py_out = payload.get("python_verified_outbound_summary", {})
+    py_in = payload.get("python_verified_inbound_summary", {})
+    py_today = payload.get("python_verified_today_totals", {})
+    all_rows = payload.get("all_outbound_rows", [])
 
-    staffing_lines = []
-    for task, row in summary_table.iterrows():
-        staffing_lines.append(
-            f"- {task}: Need {int(row['Needed'])}, Assigned {int(row['Assigned'])}, "
-            f"Gap {int(row['Difference'])} ({row['Status']})"
-        )
-    top_recommendations = "\n".join([f"- {rec}" for rec in recommendations[:8]])
+    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
+    health = derive_shift_health(summary_table, pacing, py_out)
 
-    oc_email_block = ""
+    net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
+    total_present = len(present_recommendations)
+    picks_left = py_today.get("picks_left_today", 0)
+    pulls_left = py_today.get("pulls_left_today", 0)
+    onlot_atdoor = (py_in.get("on_lot", 0) or 0) + (py_in.get("at_door", 0) or 0)
+
+    goal = shift_goal_preview.get("goal", "") if shift_goal_preview else ""
+
+    lines = [f"{day} {shift} shift — first-page summary."]
+    lines.append(f"Shift health: {health}.")
+    if goal:
+        lines.append(f"Goal: {goal}")
+    lines.append(
+        f"Loads: {pacing.get('selected_day_total_loads', 0)} today | "
+        f"Completed {pacing.get('completed_count', 0)} | "
+        f"Due now {pacing.get('due_by_now', 0)} | "
+        f"Due not done {pacing.get('due_not_done', 0)} | "
+        f"Pacing {pacing.get('pacing', 'n/a')}."
+    )
+    lines.append(f"Picks left {picks_left:,} | Pulls left {pulls_left:,} | Hours left {hours_remaining}.")
+    lines.append(f"Staffing: {total_present} present | net gap {net_gap:+d}.")
+    lines.append(f"Inbound: {py_in.get('loads_read_from_inbound', 0)} loads | {onlot_atdoor} on lot/at door.")
     if oc_matches:
-        oc_names = ", ".join(
-            f"{m['customer']['name'].upper()} [{m['customer']['priority']}]"
-            for m in oc_matches
-        )
-        oc_email_block = (
-            f"\nOPPORTUNITY CUSTOMER ALERT:\n"
-            f"The following OC customers have loads on today's board: {oc_names}.\n"
-            f"See the attached staffing report (Board Analysis tab) for full handling requirements.\n"
-        )
+        oc_names = ", ".join(m["customer"]["name"].upper() for m in oc_matches)
+        lines.append(f"OC alert: {oc_names} — see report for handling.")
 
-    body = f"""
-Good morning,
+    recap = "\n".join(f"- {ln}" for ln in lines)
 
-Here is the staffing report for {day} {shift} shift.
-
-Daily Inputs:
-- Total cases: {total_cases:,}
-- Total outbound loads: {total_outbound_loads_day}
-- Hours remaining: {hours_remaining}
-- Total present: {total_present}
-- Total needed: {total_needed}
-- Total assigned: {total_assigned}
-- Overall labor gap: {overall_gap}
-
-Staffing Summary:
-{chr(10).join(staffing_lines)}
-{oc_email_block}
-Key Recommendations / What-Ifs:
-{top_recommendations}
-"""
-
-    if board_analysis_text:
-        body += f"""
-
-Board Analysis:
-{board_analysis_text}
-"""
-    body += """
-
-The full staffing report is attached.
-
-Thanks,
-"""
-    return subject, body.strip()
+    body = (
+        "Good morning,\n\n"
+        f"{recap}\n\n"
+        "Full prioritization, action items, and load alerts are in the attached report.\n\n"
+        "Thanks,"
+    )
+    return subject, body
 
 
 
@@ -4488,14 +4475,7 @@ def run_full_generation(
             st.warning(f"Commitment snapshot skipped: {e}")
         
 
-        executive_summary_text = build_executive_summary_with_groq(
-            day=day, shift=shift, total_cases=total_cases, hours_remaining=hours_remaining,
-            total_outbound_loads_day=total_outbound_loads_day, board_text=board_text,
-            summary_table=summary_table, present_recommendations=present_recommendations,
-            availability=availability, oc_matches=oc_matches, notes=notes,
-            board_analysis_text=board_analysis_text,
-            recommended_allocation=ai_recommended, deviation_reason=ai_reason,
-            python_shift_goal_preview=python_shift_goal_preview,
+        executive_summary_text = None
         )
     else:
         board_text = ""
@@ -4520,6 +4500,7 @@ def run_full_generation(
         present_recommendations=present_recommendations, recommendations=recommendations,
         board_analysis_text=board_analysis_text, oc_matches=oc_matches,
         executive_summary_text=executive_summary_text,
+        board_text=board_text, shift_goal_preview=python_shift_goal_preview,
     )
 
     pdf_output_bytes = build_pdf_report(
