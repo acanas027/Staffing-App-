@@ -35,6 +35,19 @@ except Exception:
 
 YES_NO = ["Yes", "No"]
 
+# Standardized miss/late reasons. "Other" reveals a free-text box so nothing is lost,
+# but every common cause is now countable across shifts.
+MISS_REASONS = [
+    "(none)",
+    "Late inbound / product not received",
+    "Short product / inventory shortage",
+    "No driver / carrier no-show",
+    "Labor gap / short-staffed",
+    "Equipment / dock issue",
+    "Dock congestion / staging",
+    "Other (explain)",
+]
+
 
 # ============================================================
 #  HELPERS
@@ -49,6 +62,13 @@ def _norm_na(value):
         return "N"
     return "NA"
 
+def _resolve_miss_reason(choice, other_text):
+    """Turn the dropdown selection into the stored reason string."""
+    if choice in ("(none)", "", None):
+        return ""
+    if choice == "Other (explain)":
+        return (other_text or "").strip() or "Other (unspecified)"
+    return choice
 
 def _yn_or_na(shipped, on_time):
     """On-time only means something if the load shipped; otherwise NA."""
@@ -388,7 +408,14 @@ with st.form("closeout_form"):
 
                 row3 = st.columns(2)
                 short = row3[0].selectbox("Loaded short?", YES_NO, index=1, key=f"oc_short_{load}")
-                miss_reason = row3[1].text_input("Miss reason (if something went wrong)", key=f"oc_miss_{load}")
+                miss_reason_choice = row3[1].selectbox(
+                    "Miss reason (if something went wrong)",
+                    MISS_REASONS, index=0, key=f"oc_miss_{load}",
+                )
+                miss_reason_other = ""
+                if miss_reason_choice == "Other (explain)":
+                    miss_reason_other = row3[1].text_input("Describe", key=f"oc_miss_other_{load}")
+                miss_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
 
                 outcome_rows.append({
                     "type": "OC", "load": load, "customer": cust, "appt_time": appt,
@@ -412,7 +439,13 @@ with st.form("closeout_form"):
                 on_time = row1[1].selectbox("Customer left on time?", YES_NO, key=f"cpu_ot_{load}")
                 row2 = st.columns(2)
                 short = row2[0].selectbox("Loaded short?", YES_NO, index=1, key=f"cpu_short_{load}")
-                miss_reason = row2[1].text_input("Miss reason", key=f"cpu_miss_{load}")
+                 miss_reason_choice = row2[1].selectbox(
+                    "Miss reason", MISS_REASONS, index=0, key=f"cpu_miss_{load}",
+                )
+                miss_reason_other = ""
+                if miss_reason_choice == "Other (explain)":
+                    miss_reason_other = row2[1].text_input("Describe", key=f"cpu_miss_other_{load}")
+                miss_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
 
                 outcome_rows.append({
                     "type": "CPU", "load": load, "customer": cust, "appt_time": appt,
