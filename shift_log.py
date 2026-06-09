@@ -12,37 +12,6 @@ closeout screen record what actually happened. The gap between the two is the pr
 your boss wants: OC sign-off %, OC photo %, CPU on-time %, shift-goal-met %, with
 every miss itemized.
 
-WHY GOOGLE SHEETS
------------------
-Streamlit Cloud's filesystem is ephemeral, so a local file is wiped on redeploy. A
-Google Sheet persists, is free, and the DC manager can open it directly. The storage
-interface below is small, so moving to Postgres/Supabase later means rewriting only
-the private helpers.
-
-ONE-TIME SETUP
---------------
-1. Create a Google Sheet. Copy its ID from the URL
-   (https://docs.google.com/spreadsheets/d/<THIS_PART>/edit).
-2. Google Cloud Console -> create a Service Account -> create a JSON key.
-3. Enable the Google Sheets API and Google Drive API for that project.
-4. Share the Sheet with the service account's client_email (Editor).
-5. In Streamlit secrets, add:
-
-     shift_log_sheet_id = "the-sheet-id-from-step-1"
-
-     [gcp_service_account]
-     type = "service_account"
-     project_id = "..."
-     private_key_id = "..."
-     private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-     client_email = "...@...iam.gserviceaccount.com"
-     client_id = "..."
-     token_uri = "https://oauth2.googleapis.com/token"
-
-6. Add to requirements.txt:
-     gspread
-     google-auth
-
 The tabs (commitments / outcomes / shift_summary) are created automatically.
 """
 
@@ -479,7 +448,105 @@ def get_monthly_scorecard(year, month):
         "per_shift": per_shift,
         "misses": misses,
     }
+def get_weekly_scorecard(end_date):
+    """
+    Goal performance for the 7-day window ending on end_date (inclusive).
+    Same shape as get_monthly_scorecard so one page renders both.
+    end_date may be a datetime.date or an mm/dd/YYYY string.
+    """
+    if not is_configured():
+        raise RuntimeError(f"Shift log not configured: {setup_hint()}")
 
+    if isinstance(end_date, str):
+        end = _parse_date(end_date) or datetime.date.today()
+    else:
+        end = end_date
+    start = end - datetime.timedelta(days=6)
+
+    def _in_week(record):
+        d = _parse_date(record.get("date"))
+        return d is not None and start <= d <= end
+
+    ws = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
+    records = ws.get_all_records(expected_headers=OUTCOMES_HEADER)
+    week_rows = [r for r in records if _in_week(r)]
+
+    oc = [r for r in week_rows if str(r.get("type")) == "OC"]
+    cpu = [r for r in week_rows if str(r.get("type")) == "CPU"]
+
+    def _rate(items, key):
+        relevant = [r for r in items if str(r.get(key)).upper() in ("Y", "N")]
+        if not relevant:
+            return None, 0, 0
+        met = sum(1 for r in relevant if str(r.get(key)).upper() == "Y")
+        return round(100 * met / len(relevant)), met, len(relevant)
+
+    signoff_rate, signoff_met, signoff_req = _rate(oc, "signoff_done")
+    photos_rate, photos_met, photos_req = _rate(oc, "photos_done")
+    cpu_rate, cpu_met, cpu_total = _rate(cpu, "on_time")
+
+    goal_rate, goal_met, goal_total = None, 0, 0
+    loads_completed_total = 0
+    shorts_total = 0
+    per_shift = []
+    try:
+        ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
+        sum_records = ws_sum.get_all_records(expected_headers=SUMMARY_HEADER)
+        week_sum = [r for r in sum_records if _in_week(r)]
+        for r in week_sum:
+            gm = str(r.get("goal_met")).upper()
+            if gm in ("Y", "N"):
+                goal_total += 1
+                if gm == "Y":
+                    goal_met += 1
+            loads_completed_total += _to_int(r.get("loads_completed"))
+            shorts_total += _to_int(r.get("total_shorts"))
+            per_shift.append({
+                "date": r.get("date"),
+                "shift": r.get("shift"),
+                "goal_met": r.get("goal_met"),
+                "shift_goal": r.get("shift_goal"),
+                "loads_completed": _to_int(r.get("loads_completed")),
+                "total_shorts": _to_int(r.get("total_shorts")),
+                "oc_total": _to_int(r.get("oc_total")),
+                "oc_signoff_met": _to_int(r.get("oc_signoff_met")),
+                "oc_photos_met": _to_int(r.get("oc_photos_met")),
+                "cpu_total": _to_int(r.get("cpu_total")),
+                "cpu_on_time": _to_int(r.get("cpu_on_time")),
+                "notes": r.get("notes", ""),
+            })
+        if goal_total:
+            goal_rate = round(100 * goal_met / goal_total)
+    except Exception:
+        pass
+
+    per_shift.sort(key=lambda r: (str(r.get("date")), str(r.get("shift"))))
+
+    misses = []
+    for r in week_rows:
+        if (
+            str(r.get("on_time")).upper() == "N"
+            or str(r.get("signoff_done")).upper() == "N"
+            or str(r.get("photos_done")).upper() == "N"
+            or str(r.get("short")).upper() == "Y"
+        ):
+            misses.append(r)
+
+    shifts_logged = len(per_shift) or len({r.get("snapshot_id") for r in week_rows})
+
+    return {
+        "start": start.strftime("%m/%d/%Y"),
+        "end": end.strftime("%m/%d/%Y"),
+        "shifts_logged": shifts_logged,
+        "loads_completed_total": loads_completed_total,
+        "shorts_total": shorts_total,
+        "oc_signoff": {"rate": signoff_rate, "met": signoff_met, "required": signoff_req},
+        "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
+        "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
+        "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "per_shift": per_shift,
+        "misses": misses,
+    }
 
 # ============================================================
 #  PRIVATE HELPERS
