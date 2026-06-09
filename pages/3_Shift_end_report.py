@@ -448,6 +448,17 @@ with st.form("closeout_form"):
 
 # ── Handle submission ───────────────────────────────────────────────────────
 if submitted:
+    shorts_marked_above = sum(
+        1 for o in outcome_rows if str(o.get("short")).strip().upper() in ("Y", "YES")
+    )
+    if int(total_shorts) < shorts_marked_above:
+        st.error(
+            f"You marked {shorts_marked_above} load(s) short above, but entered "
+            f"{int(total_shorts)} for total shorts. The shift total can't be less than "
+            f"the loads you already marked short. Fix the total (or the per-load answers) "
+            f"and submit again."
+        )
+        st.stop()
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes
     )
