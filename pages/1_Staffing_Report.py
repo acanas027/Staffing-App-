@@ -1657,6 +1657,12 @@ def slim_summary_for_ai(board_summary):
     detail_keys = {k for k in board_summary if k.endswith("_details")}
     return {k: v for k, v in board_summary.items() if k not in detail_keys}
 
+def slim_pacing_for_ai(selected_day_pacing):
+    """Drop the row-list arrays from pacing — they duplicate the actionable table.
+    Keep all counts and the pacing verdict."""
+    drop_keys = {"due_not_done_loads_first_10", "future_done_loads_first_10"}
+    return {k: v for k, v in (selected_day_pacing or {}).items() if k not in drop_keys}
+
 
 def actionable_rows_for_ai(board_rows):
     """
@@ -2760,7 +2766,7 @@ def analyze_board_with_groq(
         if is_done_for_pacing(r.get("status"))
     ]
 
-    day_pacing_text = json.dumps(selected_day_pacing, ensure_ascii=False)
+    day_pacing_text = json.dumps(slim_pacing_for_ai(selected_day_pacing), ensure_ascii=False)
 
     python_goal_text = ""
     if python_shift_goal_preview:
@@ -2776,12 +2782,12 @@ def analyze_board_with_groq(
 
     actionable_table = _rows_to_table(
         today_actionable_rows,
-        ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
+        ["day","load","customer","time","door","status","type","flags","comments"]
     )
-    other_day_actionable_table = _rows_to_table(
-        other_day_actionable_rows,
-        ["day","load","customer","time","door","status","type","loader","pulls","picks","flags","comments"]
-    )
+    
+   other_day_actionable_count = len(other_day_actionable_rows)
+    other_day_actionable_table = f"{other_day_actionable_count} other-day actionable load(s) on the board (context only — not today's work)."
+
     completed_table = _rows_to_table(
         today_done_rows,
         ["day","load","customer","time","status"]
@@ -2854,7 +2860,7 @@ TODAY COMPLETED LOADS — SELECTED DAY {day} (for pacing):
 {completed_table}
 
 ===== OUTPUT =====
--Don't include any output i dont ask for. 
+ - OUTPUT ONLY Bottom Line, Shift Health, Prioritization, and Top Action Items. Do NOT add an OC Actions section, OC table, owner/deadline table, or any markdown table (no pipe `|` tables). You may annotate an OC load inline within Prioritization or Action Items, but never as a separate table or section.
 
 BOTTOM LINE (one sentence, max 30 words, before everything): pace status + the shift appointment-time cutoff ( ALWAYS use actual appointment times from today's board) + the single biggest threat to meeting expectations. No data dump.
 Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have RTL all loads to 14:00. Move surplus labor to bottleneck."
@@ -2868,6 +2874,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
 - Give specific actionable actions to keep the operations on time, put us back on track or get us ahead.
 - No vague verbs unless tied to a specific deadline and load. Don't repeat a 30-min action in the 2-hr block.
 - Don't invent actions and don't tell to move workers from extra to a function if there is no extra (bench).
+
 
 """
 
@@ -3690,7 +3697,21 @@ def extract_ai_shift_goal(board_analysis_text):
                 if nxt_clean and not re.search(r"shift\s*goal", nxt_clean, flags=re.IGNORECASE):
                     return nxt_clean
     return ""
-
+    
+def _is_markdown_table_line(text):
+    """True for markdown-table rows/separators (e.g. '| Load | Customer |' or '|---|---|')
+    so stray table fragments never print as garbled pipe rows in the PDF.
+    Action lines use '->' not '|', so pipes are safe to treat as table markers."""
+    t = str(text or "").strip()
+    if not t:
+        return False
+    if t.startswith("|") or t.endswith("|"):
+        return True
+    if re.fullmatch(r"[\s|:\-]+", t):
+        return True
+    if t.count("|") >= 2:
+        return True
+    return False
 
 def extract_ai_prioritization_lines(board_analysis_text):
     """Return only the AI prioritization section. No Python-generated priority list."""
@@ -3718,7 +3739,7 @@ def extract_ai_prioritization_lines(board_analysis_text):
                 or "BOARD SUMMARY" in upper
             ):
                 break
-            if raw:
+            if raw and not _is_markdown_table_line(raw) :
                 clean = clean_pdf_text(raw)
                 clean = re.sub(r"^\d+\.\s*", "", clean).strip()
                 if clean:
@@ -3746,10 +3767,13 @@ def extract_ai_top_action_items_lines(board_analysis_text):
             in_actions = True
 
         if in_actions:
-            # Stop only if another major numbered section starts after top actions.
-            if output and re.match(r"^#{0,6}\s*[5-9]\.\s", raw):
+            # Stop at OC Actions, an owner/deadline table, or the next major numbered section.
+            if output and (
+                re.match(r"^#{0,6}\s*[5-9]\.\s", raw)
+                or "OC ACTION" in upper
+            ):
                 break
-            if raw:
+            if raw and not _is_markdown_table_line(raw):
                 clean = clean_pdf_text(raw)
                 clean = re.sub(r"^\d+\.\s*", "", clean).strip()
                 if clean:
