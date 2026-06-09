@@ -4227,7 +4227,7 @@ def compute_recommended_allocation(
     crossroads_open, deer_creek_open, msb_open, present_workers, board_file=None,
 ):
     """Phase 1: compute the recommended placement only. No file writes, no AI."""
-    total_outbound_loads_actual = total_outbound_loads_day * 0.52
+    total_outbound_loads_actual = total_outbound_loads_day * LOAD_TARGET_SHARE
 
     cases_to_pick_override = None
     full_pallets_override = None
@@ -4343,7 +4343,7 @@ def run_full_generation(
     wb = load_workbook(working_file)
     ws = wb["Inputs"]
 
-    total_outbound_loads_actual = total_outbound_loads_day * 0.52
+    total_outbound_loads_actual = total_outbound_loads_day * LOAD_TARGET_SHARE
 
     ws["B1"] = day
     ws["B2"] = shift
