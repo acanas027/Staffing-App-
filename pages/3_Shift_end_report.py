@@ -165,25 +165,48 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     rows = [
         {
-           "area": "Shorts",
-           "expected": "Target 0",
-           "actual": f"{int(total_shorts)}",
-           "status": _status(int(total_shorts) == 0),
+            "area": "Shift Goal",
+            "expected": shift_goal or "Not recorded",
+            "actual": goal_actual,
+            "status": goal_status,
+        },
+        {
+            "area": "OC Sign-Off",
+            "expected": f"{oc_signoff_req} required" if oc_signoff_req else "None required",
+            "actual": f"{oc_signoff_met} collected",
+            "status": _status(oc_signoff_met >= oc_signoff_req, required=oc_signoff_req > 0),
+        },
+        {
+            "area": "OC Photos",
+            "expected": f"{oc_photos_req} required" if oc_photos_req else "None required",
+            "actual": f"{oc_photos_met} taken",
+            "status": _status(oc_photos_met >= oc_photos_req, required=oc_photos_req > 0),
+        },
+        {
+            "area": "OC On-Time",
+            "expected": f"{oc_total} load(s)" if oc_total else "No OC loads",
+            "actual": f"{oc_on_time} on time",
+            "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
+        },
+        {
+            "area": "CPU On-Time",
+            "expected": f"{cpu_total} appt(s)" if cpu_total else "No CPUs",
+            "actual": f"{cpu_on_time} on time",
+            "status": _status(cpu_on_time >= cpu_total, required=cpu_total > 0),
+        },
+        {
+            "area": "Shorts",
+            "expected": "Target 0",
+            "actual": f"{int(total_shorts)}",
+            "status": _status(int(total_shorts) == 0),
+        },
+        {
+            "area": "Loads Completed",
+            "expected": "—",
+            "actual": f"{int(loads_completed)}",
+            "status": "—",
         },
     ]
-
-    misses = []
-    for o in outcome_rows:
-        if (
-            str(o.get("shipped")).upper() == "N"
-            or str(o.get("on_time")).upper() == "N"
-            or str(o.get("signoff_done")).upper() == "N"
-            or str(o.get("photos_done")).upper() == "N"
-            or str(o.get("short")).upper() in ("Y", "YES")
-        ):
-            misses.append(o)
-
-    return rows, misses
 
 
 def build_report_pdf(operating_date, shift, report_rows, misses, notes):
@@ -439,7 +462,7 @@ with st.form("closeout_form"):
                 on_time = row1[1].selectbox("Customer left on time?", YES_NO, key=f"cpu_ot_{load}")
                 row2 = st.columns(2)
                 short = row2[0].selectbox("Loaded short?", YES_NO, index=1, key=f"cpu_short_{load}")
-                 miss_reason_choice = row2[1].selectbox(
+                miss_reason_choice = row2[1].selectbox(
                     "Miss reason", MISS_REASONS, index=0, key=f"cpu_miss_{load}",
                 )
                 miss_reason_other = ""
