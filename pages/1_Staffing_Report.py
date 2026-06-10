@@ -202,7 +202,8 @@ TT4_SHEET = "TT4 Customers"
 
 @st.cache_data
 def load_tt4_device_list():
-    """Return list of {tt4_number, keyword} from the TT4 device Excel.
+    """Return list of {tt4_number, keyword, caution} from the TT4 device Excel.
+    Col A: TT4 #   Col B: Customer keyword   Col D: RELEVANT INFO (caution sentence).
     Rows with a blank customer keyword are skipped (nothing to match on)."""
     if not os.path.exists(TT4_FILE):
         return []
@@ -211,16 +212,22 @@ def load_tt4_device_list():
         ws = wb[TT4_SHEET] if TT4_SHEET in wb.sheetnames else wb[wb.sheetnames[0]]
         devices = []
         for row_idx in range(2, ws.max_row + 1):
-            raw_num = ws.cell(row_idx, 1).value
-            raw_kw = ws.cell(row_idx, 2).value
+            raw_num = ws.cell(row_idx, 1).value      # col A
+            raw_kw = ws.cell(row_idx, 2).value       # col B
+            raw_caution = ws.cell(row_idx, 4).value  # col D (RELEVANT INFO)
             if raw_num is None or raw_kw is None:
                 continue
             keyword = str(raw_kw).strip().lower()
             number = str(raw_num).strip()
+            caution = str(raw_caution).strip() if raw_caution is not None else ""
             if not keyword or not number:
                 continue
-            devices.append({"tt4_number": number, "keyword": keyword})
-        # Longest keyword first so the most specific match wins (WALMART CANADA before WALMART).
+            devices.append({
+                "tt4_number": number,
+                "keyword": keyword,
+                "caution": caution,
+            })
+        # Longest keyword first so the most specific match wins (WALMART CORNWALL before WALMART).
         devices.sort(key=lambda d: len(d["keyword"]), reverse=True)
         return devices
     except Exception:
@@ -329,25 +336,16 @@ def tt4_keyword_matches_customer(keyword, customer_name):
 
 def match_tt4_device_for_customer(customer_name, tt4_devices=None):
     """
-    Return the TT4 # whose keyword best matches the board customer name.
-    This is stronger than basic substring matching and handles punctuation,
-    suffixes, board codes, and customer-name noise.
+    Return (tt4_number, caution) for the keyword that best matches the board customer name,
+    or (None, "") if nothing matches. Longest/most-specific keyword wins, so
+    "WALMART CORNWALL" beats "WALMART" and Canadian Walmarts route to their own TT4.
     """
     if tt4_devices is None:
         tt4_devices = load_tt4_device_list()
 
     customer_norm = normalize_tt4_match_text(customer_name)
     if not customer_norm:
-        return None
-
-    # Walmart special case stays protected.
-    if "walmart" in customer_norm:
-        canada_keywords_norm = {
-            normalize_tt4_match_text(kw) for kw in WALMART_CANADA_KEYWORDS
-        }
-        if any(kw and kw in customer_norm for kw in canada_keywords_norm):
-            return WALMART_CANADA_TT4
-        return WALMART_US_TT4
+        return None, ""
 
     best_device = None
     best_score = None
@@ -361,18 +359,16 @@ def match_tt4_device_for_customer(customer_name, tt4_devices=None):
         keyword_norm = normalize_tt4_match_text(keyword)
         keyword_tokens = tt4_match_tokens(keyword)
 
-        # Prefer the most specific match.
-        # Example: "sysco dallas" beats plain "sysco".
-        score = (
-            len(keyword_tokens),
-            len(keyword_norm),
-        )
+        # Prefer the most specific match. Example: "walmart cornwall" beats "walmart".
+        score = (len(keyword_tokens), len(keyword_norm))
 
         if best_score is None or score > best_score:
             best_score = score
             best_device = device
 
-    return best_device.get("tt4_number") if best_device else None
+    if best_device:
+        return best_device.get("tt4_number"), best_device.get("caution", "")
+    return None, ""
     
 
 def get_groq_client():
@@ -4635,12 +4631,14 @@ def build_pdf_report(
         data = [["Load", "Customer", "Time / Status", "Required Action"]]
         for m in tt4_matches:
             action = f"Verify TT4 requirement is completed for load {m.get('load', '')} before this load ships."
-            device_number = match_tt4_device_for_customer(m.get("customer", ""), tt4_devices)
+            device_number, caution = match_tt4_device_for_customer(m.get("customer", ""), tt4_devices)
             if device_number:
                 action = (
                     f"Use TT4 {device_number} for this customer. "
                     f"Verify it is on load {m.get('load', '')} before this load ships."
                 )
+                if caution:
+                    action += f" Caution: {caution}"
             data.append([
                 pdf_safe(m.get("load", "")),
                 pdf_safe(m.get("customer", "")),
