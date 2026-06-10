@@ -2535,14 +2535,24 @@ def appointment_controlled_by_allocation(
     else:
         binding_name = min(support_map, key=support_map.get)
 
-    # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
+   # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
     timed = []
     for r in selected_rows:
         m = board_minutes_for_pacing(r.get("time") or r.get("appt_time"))
         if m is not None:
             timed.append(m)
     timed.sort()
-    if not timed:
+
+    # When the allocation controls every selected-day load, report the LATEST
+    # appointment time of the day and label it as fully controlled.
+    all_today_controlled = total_loads > 0 and loads_controlled >= total_loads
+
+    if all_today_controlled:
+        if timed:
+            cutoff = f"{format_minutes_for_pacing(timed[-1])} (all loads for today controlled)"
+        else:
+            cutoff = "all loads for today controlled"
+    elif not timed:
         cutoff = "no appt times on board"
     elif loads_controlled <= 0:
         cutoff = "none — before first appt"
