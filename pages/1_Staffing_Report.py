@@ -237,30 +237,143 @@ WALMART_CANADA_TT4 = "28077"
 WALMART_US_TT4 = "28040"
 
 
-def match_tt4_device_for_customer(customer_name, tt4_devices=None):
-    """Return the TT4 # whose keyword is the longest match inside the board customer name,
-    or None if nothing matches. Case-insensitive substring match, longest keyword wins.
+def normalize_tt4_match_text(value):
+    """
+    Normalize customer text for TT4 matching.
+    Makes matching stronger against board names like:
+    - SYSCO WEST COAST FLORIDA TK
+    - SAFEWAY DENVER DELI TK (009137)
+    - JEWEL OSCO DELI NEW - 5433
+    """
+    text = str(value or "").strip().lower()
+    text = text.replace("&", " and ")
 
-    Walmart is special-cased: a Walmart whose name contains any Canadian location keyword
-    uses the Canada TT4; any other Walmart uses the US TT4. This prevents a Canadian
-    Walmart from silently falling through to the US device."""
+    # Remove customer/store codes in parentheses.
+    text = re.sub(r"\([^)]*\)", " ", text)
+
+    # Convert punctuation to spaces.
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+
+    tokens = [t for t in text.split() if t]
+
+    # Words that are common board noise and should not control the match.
+    noise_words = {
+        "tk", "truck", "load", "loads",
+        "new", "fresh", "deli", "dc",
+        "inc", "llc", "corp", "corporation",
+        "company", "foods", "food",
+        "the",
+    }
+
+    tokens = [t for t in tokens if t not in noise_words]
+    return " ".join(tokens)
+
+
+def tt4_match_tokens(value):
+    return set(normalize_tt4_match_text(value).split())
+
+
+def tt4_keyword_matches_customer(keyword, customer_name):
+    """
+    Stronger match:
+    1. Normalized substring match.
+    2. All keyword tokens appear in customer name.
+    3. Common brand match for Sysco/Safeway/Jewel/etc.
+    """
+    keyword_norm = normalize_tt4_match_text(keyword)
+    customer_norm = normalize_tt4_match_text(customer_name)
+
+    if not keyword_norm or not customer_norm:
+        return False
+
+    # Example: "safeway denver" in "safeway denver 009137"
+    if keyword_norm in customer_norm:
+        return True
+
+    keyword_tokens = tt4_match_tokens(keyword)
+    customer_tokens = tt4_match_tokens(customer_name)
+
+    if not keyword_tokens or not customer_tokens:
+        return False
+
+    # Example: keyword "safeway denver" matches board "SAFEWAY DENVER DELI TK (009137)"
+    if keyword_tokens.issubset(customer_tokens):
+        return True
+
+    # Brand-family backup match.
+    # Example: TT4 keyword "sysco foods" still matches board "SYSCO OKLAHOMA".
+    brand_tokens = {
+        "sysco",
+        "safeway",
+        "jewel",
+        "jewels",
+        "osco",
+        "walmart",
+        "target",
+        "sobeys",
+        "sobey",
+        "metro",
+        "awg",
+        "pfs",
+        "kroger",
+        "costco",
+        "heb",
+        "aldi",
+    }
+
+    if keyword_tokens & customer_tokens & brand_tokens:
+        return True
+
+    return False
+
+
+def match_tt4_device_for_customer(customer_name, tt4_devices=None):
+    """
+    Return the TT4 # whose keyword best matches the board customer name.
+    This is stronger than basic substring matching and handles punctuation,
+    suffixes, board codes, and customer-name noise.
+    """
     if tt4_devices is None:
         tt4_devices = load_tt4_device_list()
-    name = str(customer_name or "").strip().lower()
-    if not name:
+
+    customer_norm = normalize_tt4_match_text(customer_name)
+    if not customer_norm:
         return None
 
-    # Walmart routing decided here, before the generic keyword match, so a Canadian
-    # Walmart never resolves to the US TT4 just because "walmart" matched first.
-    if "walmart" in name:
-        if any(kw in name for kw in WALMART_CANADA_KEYWORDS):
+    # Walmart special case stays protected.
+    if "walmart" in customer_norm:
+        canada_keywords_norm = {
+            normalize_tt4_match_text(kw) for kw in WALMART_CANADA_KEYWORDS
+        }
+        if any(kw and kw in customer_norm for kw in canada_keywords_norm):
             return WALMART_CANADA_TT4
         return WALMART_US_TT4
 
-    for device in tt4_devices:  # already sorted longest-first
-        if device["keyword"] in name:
-            return device["tt4_number"]
-    return None
+    best_device = None
+    best_score = None
+
+    for device in tt4_devices:
+        keyword = device.get("keyword", "")
+
+        if not tt4_keyword_matches_customer(keyword, customer_name):
+            continue
+
+        keyword_norm = normalize_tt4_match_text(keyword)
+        keyword_tokens = tt4_match_tokens(keyword)
+
+        # Prefer the most specific match.
+        # Example: "sysco dallas" beats plain "sysco".
+        score = (
+            len(keyword_tokens),
+            len(keyword_norm),
+        )
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_device = device
+
+    return best_device.get("tt4_number") if best_device else None
+    
 
 def get_groq_client():
     if "GROQ_API_KEY" not in st.secrets:
