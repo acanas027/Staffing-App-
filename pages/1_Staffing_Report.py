@@ -2738,7 +2738,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     confidence = "YES" if loads_controlled > 0 else "NO"
 
     goal = (
-        f"Pick & stage every load controlled by this allocation through appointment {cutoff} "
+        f"Pick & stage every load through appointment {cutoff} "
         f"({loads_controlled} of {total_loads} selected-day loads) by shift end {shift_end_label(shift)}."
     )
 
@@ -4147,9 +4147,9 @@ def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, cr
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     alert_count = len(oc_load_matches or []) + len(crossdock_matches or []) + len(tt4_matches or [])
 
-    if due_not_done > 0 or loaded_short > 0 or net_gap <= -3:
+    if due_not_done > 2 or loaded_short > 0 or net_gap <= -3:
         return "HIGH", "Past-due/short exposure or a major actual staffing gap is present."
-    if picking_short > 0 or net_gap < 0 or alert_count > 0:
+    if picking_short > 2 or net_gap < 0 or alert_count > 0:
         return "MEDIUM", "Execution is controllable, but staffing gaps or customer/load alerts require follow-up."
     return "LOW", "No major service risk detected from current pacing, staffing, or direct alerts."
 
