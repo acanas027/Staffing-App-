@@ -691,6 +691,8 @@ def calculate_needed(
 
 
 def generate_recommendations(staff, needed):
+    needed = dict(needed)          # don't mutate the caller's dict
+    needed["Receiving"] = 2        # Receiving is a hard cap of 2, every time
     assigned = {task: 0 for task in needed}
     staff["Recommended Task"] = ""
     present_indexes = staff[staff.apply(is_present, axis=1)].index.tolist()
@@ -709,19 +711,19 @@ def generate_recommendations(staff, needed):
         assigned[task] += 1
         locked.add(idx)
 
+    DALE_RECEIVERS = {"dale ferguson", "dale hrenchir"}
     for idx in present_indexes:
         row = staff.loc[idx]
-        if name_contains(row, "Dale") and has_skill(row, "R"):
+        name_key = str(row["Name"]).strip().lower()
+        if name_key in DALE_RECEIVERS and has_skill(row, "R"):
             assign_locked("Receiving", idx)
-        elif name_contains(row, "Alex") and has_skill(row, "U"):
-            assign_if_needed("Unloading", idx)
 
     for idx in present_indexes:
-        if staff.at[idx, "Recommended Task"] != "":
+        if idx in locked:
             continue
         row = staff.loc[idx]
-        if str(row["Skills"]).strip() == "P":
-            assign_if_needed("Picking", idx)
+        if name_contains(row, "Alex") and has_skill(row, "U"):
+            assign_if_needed("Unloading", idx)
 
     # Fill Loading early with L-skilled workers before L-skilled taskers can be absorbed into Tasking.
     for idx in present_indexes:
@@ -827,6 +829,7 @@ def generate_recommendations(staff, needed):
         skilled_tasks = [
             task for task, skill in final_skill_map.items()
             if has_skill(row, skill)
+            and not (task == "Receiving" and assigned.get("Receiving", 0) >= needed.get("Receiving", 0))
         ]
         if not skilled_tasks:
             return "Support"
