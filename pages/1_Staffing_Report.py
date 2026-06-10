@@ -694,6 +694,7 @@ def generate_recommendations(staff, needed):
     assigned = {task: 0 for task in needed}
     staff["Recommended Task"] = ""
     present_indexes = staff[staff.apply(is_present, axis=1)].index.tolist()
+    locked = set()  # indexes that no later pass may move
 
     def assign_if_needed(task, idx):
         if assigned[task] < needed[task]:
@@ -702,10 +703,16 @@ def generate_recommendations(staff, needed):
             return True
         return False
 
+    def assign_locked(task, idx):
+        """Hard pin: assign regardless of need, protect from every later move."""
+        staff.at[idx, "Recommended Task"] = task
+        assigned[task] += 1
+        locked.add(idx)
+
     for idx in present_indexes:
         row = staff.loc[idx]
         if name_contains(row, "Dale") and has_skill(row, "R"):
-            assign_if_needed("Receiving", idx)
+            assign_locked("Receiving", idx)
         elif name_contains(row, "Alex") and has_skill(row, "U"):
             assign_if_needed("Unloading", idx)
 
@@ -911,6 +918,8 @@ def generate_recommendations(staff, needed):
 
                 candidates = []
                 for idx in present_indexes:
+                    if idx in locked:
+                        continue
                     if staff.at[idx, "Recommended Task"] != over_task:
                         continue
                     row = staff.loc[idx]
@@ -957,6 +966,8 @@ def generate_recommendations(staff, needed):
 
                     over_candidates = []
                     for idx_a in present_indexes:
+                        if idx_a in locked:
+                            continue
                         if staff.at[idx_a, "Recommended Task"] != over_task:
                             continue
                         row_a = staff.loc[idx_a]
@@ -968,6 +979,8 @@ def generate_recommendations(staff, needed):
 
                     middle_candidates = []
                     for idx_b in present_indexes:
+                        if idx_b in locked:
+                            continue
                         if staff.at[idx_b, "Recommended Task"] != middle_task:
                             continue
                         row_b = staff.loc[idx_b]
