@@ -334,11 +334,22 @@ def tt4_keyword_matches_customer(keyword, customer_name):
     return False
 
 
+# Canadian Walmart locations. A board customer containing "WALMART" AND one of
+# these words is a Canadian Walmart -> Canada TT4. Any other Walmart -> US TT4.
+WALMART_CANADA_KEYWORDS = {"cornwall", "moncton", "brampton", "miss", "mississauga"}
+WALMART_CANADA_TT4 = "28077"
+WALMART_US_TT4 = "28040/28075"
+WALMART_WEBSITE_CAUTION = "Make sure TT4 is logged into their website"
+
+
 def match_tt4_device_for_customer(customer_name, tt4_devices=None):
     """
     Return (tt4_number, caution) for the keyword that best matches the board customer name,
-    or (None, "") if nothing matches. Longest/most-specific keyword wins, so
-    "WALMART CORNWALL" beats "WALMART" and Canadian Walmarts route to their own TT4.
+    or (None, "") if nothing matches. Longest/most-specific keyword wins.
+
+    Walmart is decided explicitly: any Walmart whose name contains a Canadian city keyword
+    uses the Canada TT4; every other Walmart uses the US TT4. This prevents the sheet's
+    longest-keyword match from sending a US (or unlisted Canadian) Walmart to the wrong device.
     """
     if tt4_devices is None:
         tt4_devices = load_tt4_device_list()
@@ -347,19 +358,27 @@ def match_tt4_device_for_customer(customer_name, tt4_devices=None):
     if not customer_norm:
         return None, ""
 
+    # Walmart routing decided here, before the generic keyword loop.
+    if "walmart" in customer_norm:
+        if any(kw in customer_norm for kw in WALMART_CANADA_KEYWORDS):
+            return WALMART_CANADA_TT4, WALMART_WEBSITE_CAUTION
+        return WALMART_US_TT4, WALMART_WEBSITE_CAUTION
+
     best_device = None
     best_score = None
 
     for device in tt4_devices:
         keyword = device.get("keyword", "")
 
+        # Skip the sheet's Walmart rows entirely — Walmart is handled above.
+        if "walmart" in keyword:
+            continue
+
         if not tt4_keyword_matches_customer(keyword, customer_name):
             continue
 
         keyword_norm = normalize_tt4_match_text(keyword)
         keyword_tokens = tt4_match_tokens(keyword)
-
-        # Prefer the most specific match. Example: "walmart cornwall" beats "walmart".
         score = (len(keyword_tokens), len(keyword_norm))
 
         if best_score is None or score > best_score:
