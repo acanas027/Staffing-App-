@@ -190,7 +190,77 @@ def build_oc_alert_text(oc_matches):
         "=== END OC ALERT ===",
     ]
     return "\n".join(lines)
+# ============================================================
+#  TT4 DEVICE LIST (loaded from Excel)
+#  File: TT4_CUSTOMERS.xlsx, sheet "TT4 Customers"
+#  Col A: TT4 #   Col B: Customer keyword (substring match against board customer)
+#  Longest keyword wins so "WALMART CANADA" beats "WALMART".
+# ============================================================
+TT4_FILE = "TT4_CUSTOMERS.xlsx"
+TT4_SHEET = "TT4 Customers"
 
+
+@st.cache_data
+def load_tt4_device_list():
+    """Return list of {tt4_number, keyword} from the TT4 device Excel.
+    Rows with a blank customer keyword are skipped (nothing to match on)."""
+    if not os.path.exists(TT4_FILE):
+        return []
+    try:
+        wb = load_workbook(TT4_FILE, data_only=True)
+        ws = wb[TT4_SHEET] if TT4_SHEET in wb.sheetnames else wb[wb.sheetnames[0]]
+        devices = []
+        for row_idx in range(2, ws.max_row + 1):
+            raw_num = ws.cell(row_idx, 1).value
+            raw_kw = ws.cell(row_idx, 2).value
+            if raw_num is None or raw_kw is None:
+                continue
+            keyword = str(raw_kw).strip().lower()
+            number = str(raw_num).strip()
+            if not keyword or not number:
+                continue
+            devices.append({"tt4_number": number, "keyword": keyword})
+        # Longest keyword first so the most specific match wins (WALMART CANADA before WALMART).
+        devices.sort(key=lambda d: len(d["keyword"]), reverse=True)
+        return devices
+    except Exception:
+        return []
+
+
+# Canadian Walmart cities/locations. Any board customer containing "WALMART"
+# AND one of these is a Canadian Walmart and must use the Canada TT4.
+WALMART_CANADA_KEYWORDS = {
+    "canada", "cornwall", "moncton", "mississauga", "miss", "brampton",
+    "ontario", "quebec",
+}
+WALMART_CANADA_TT4 = "28077"
+WALMART_US_TT4 = "28040"
+
+
+def match_tt4_device_for_customer(customer_name, tt4_devices=None):
+    """Return the TT4 # whose keyword is the longest match inside the board customer name,
+    or None if nothing matches. Case-insensitive substring match, longest keyword wins.
+
+    Walmart is special-cased: a Walmart whose name contains any Canadian location keyword
+    uses the Canada TT4; any other Walmart uses the US TT4. This prevents a Canadian
+    Walmart from silently falling through to the US device."""
+    if tt4_devices is None:
+        tt4_devices = load_tt4_device_list()
+    name = str(customer_name or "").strip().lower()
+    if not name:
+        return None
+
+    # Walmart routing decided here, before the generic keyword match, so a Canadian
+    # Walmart never resolves to the US TT4 just because "walmart" matched first.
+    if "walmart" in name:
+        if any(kw in name for kw in WALMART_CANADA_KEYWORDS):
+            return WALMART_CANADA_TT4
+        return WALMART_US_TT4
+
+    for device in tt4_devices:  # already sorted longest-first
+        if device["keyword"] in name:
+            return device["tt4_number"]
+    return None
 
 def get_groq_client():
     if "GROQ_API_KEY" not in st.secrets:
@@ -4448,9 +4518,16 @@ def build_pdf_report(
     # 4. TT4 — own page
     story.append(Paragraph("4. Loads with TT4", styles["Section"]))
     if tt4_matches:
+        tt4_devices = load_tt4_device_list()
         data = [["Load", "Customer", "Time / Status", "Required Action"]]
         for m in tt4_matches:
             action = f"Verify TT4 requirement is completed for load {m.get('load', '')} before this load ships."
+            device_number = match_tt4_device_for_customer(m.get("customer", ""), tt4_devices)
+            if device_number:
+                action = (
+                    f"Use TT4 {device_number} for this customer. "
+                    f"Verify it is on load {m.get('load', '')} before this load ships."
+                )
             data.append([
                 pdf_safe(m.get("load", "")),
                 pdf_safe(m.get("customer", "")),
