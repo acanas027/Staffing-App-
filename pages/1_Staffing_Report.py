@@ -857,9 +857,11 @@ def generate_recommendations(staff, needed):
             if chosen_task in assigned:
                 assigned[chosen_task] += 1
 
-    # Final balance pass: if one skilled area is overstaffed while another is short,
-    # move a worker who has the short area's skill. This prevents cases like a T/R
-    # worker staying in Receiving when Receiving is full and Tasking is short.
+    # Final smart balance pass: never leave a position overstaffed while another
+    # position is understaffed if the present crew's skills can cover the shortage.
+    # This includes two-step swaps. Example: Receiving is +1, Picking is -1,
+    # Tasking is balanced. A T/R receiver can move to Tasking while a P/T tasker
+    # moves to Picking, so Receiving becomes balanced and Picking is covered.
     rebalance_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
     task_to_skill = {
         "Unloading": "U",
@@ -868,9 +870,28 @@ def generate_recommendations(staff, needed):
         "Tasking": "T",
         "Loading": "L",
     }
+    fit_text_map = {
+        "Unloading": "Unload",
+        "Receiving": "Receiv",
+        "Picking": "Pick",
+        "Tasking": "Task",
+        "Loading": "Load",
+    }
 
     def _gap(task):
         return int(assigned.get(task, 0)) - int(needed.get(task, 0) or 0)
+
+    def _has_task_skill(row, task):
+        return has_skill(row, task_to_skill[task])
+
+    def _move_score(idx, from_task, to_task):
+        row = staff.loc[idx]
+        # Prefer moving people who are not best-fit in the source and are best-fit in the destination.
+        source_fit = best_fit(row, fit_text_map.get(from_task, from_task))
+        dest_fit = best_fit(row, fit_text_map.get(to_task, to_task))
+        # Then prefer multi-skilled workers for flexibility.
+        skill_count = sum(1 for skill in task_to_skill.values() if has_skill(row, skill))
+        return (1 if source_fit else 0, 0 if dest_fit else 1, -skill_count)
 
     moved = True
     while moved:
@@ -880,8 +901,10 @@ def generate_recommendations(staff, needed):
         if not short_tasks or not over_tasks:
             break
 
+        # 1) Direct move: overstaffed task -> understaffed task.
         for short_task in short_tasks:
-            required_skill = task_to_skill[short_task]
+            if moved:
+                break
             for over_task in over_tasks:
                 if _gap(short_task) >= 0 or _gap(over_task) <= 0:
                     continue
@@ -891,29 +914,95 @@ def generate_recommendations(staff, needed):
                     if staff.at[idx, "Recommended Task"] != over_task:
                         continue
                     row = staff.loc[idx]
-                    if has_skill(row, required_skill):
+                    if _has_task_skill(row, short_task):
                         candidates.append(idx)
 
                 if not candidates:
                     continue
 
-                # Prefer moving someone whose best fit is NOT the overstaffed task.
-                # If tied, prefer someone whose best fit matches the short task.
-                def _candidate_score(idx):
-                    row = staff.loc[idx]
-                    over_fit = best_fit(row, over_task[:5])
-                    short_fit = best_fit(row, short_task[:5])
-                    return (1 if over_fit else 0, 0 if short_fit else 1)
-
-                move_idx = sorted(candidates, key=_candidate_score)[0]
+                move_idx = sorted(candidates, key=lambda i: _move_score(i, over_task, short_task))[0]
                 staff.at[move_idx, "Recommended Task"] = short_task
                 assigned[over_task] -= 1
                 assigned[short_task] += 1
                 moved = True
                 break
 
+        if moved:
+            continue
+
+        # 2) Two-step chain move:
+        # over worker A can cover a middle task, and middle worker B can cover the short task.
+        # Move B middle -> short, then A over -> middle. Middle stays balanced.
+        short_tasks = [t for t in rebalance_priority if _gap(t) < 0]
+        over_tasks = [t for t in rebalance_priority if _gap(t) > 0]
+        for short_task in short_tasks:
             if moved:
                 break
+            for over_task in over_tasks:
+                if moved:
+                    break
+                if _gap(short_task) >= 0 or _gap(over_task) <= 0:
+                    continue
+
+                for middle_task in rebalance_priority:
+                    if moved:
+                        break
+                    if middle_task in (short_task, over_task):
+                        continue
+
+                    # The middle task must not be overstaffed already. It can be balanced or short;
+                    # since A replaces B, the middle count does not change.
+                    if _gap(middle_task) > 0:
+                        continue
+
+                    over_candidates = []
+                    for idx_a in present_indexes:
+                        if staff.at[idx_a, "Recommended Task"] != over_task:
+                            continue
+                        row_a = staff.loc[idx_a]
+                        if _has_task_skill(row_a, middle_task):
+                            over_candidates.append(idx_a)
+
+                    if not over_candidates:
+                        continue
+
+                    middle_candidates = []
+                    for idx_b in present_indexes:
+                        if staff.at[idx_b, "Recommended Task"] != middle_task:
+                            continue
+                        row_b = staff.loc[idx_b]
+                        if _has_task_skill(row_b, short_task):
+                            middle_candidates.append(idx_b)
+
+                    if not middle_candidates:
+                        continue
+
+                    # Pick the least disruptive pair.
+                    best_pair = None
+                    best_score = None
+                    for idx_a in over_candidates:
+                        for idx_b in middle_candidates:
+                            if idx_a == idx_b:
+                                continue
+                            score = (
+                                _move_score(idx_a, over_task, middle_task),
+                                _move_score(idx_b, middle_task, short_task),
+                            )
+                            if best_score is None or score < best_score:
+                                best_score = score
+                                best_pair = (idx_a, idx_b)
+
+                    if best_pair is None:
+                        continue
+
+                    idx_a, idx_b = best_pair
+                    staff.at[idx_b, "Recommended Task"] = short_task
+                    staff.at[idx_a, "Recommended Task"] = middle_task
+                    assigned[over_task] -= 1
+                    assigned[short_task] += 1
+                    # middle_task count is unchanged: one leaves and one enters.
+                    moved = True
+                    break
 
     return staff
 
