@@ -3836,9 +3836,9 @@ def derive_shift_health(summary_table, pacing, py_out):
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
 
-    if due_not_done > 0 or loaded_short > 0 or net_gap <= -3:
+    if due_not_done > 3 or net_gap <= -3:
         return "RED"
-    if net_gap < 0 or picking_short > 0 or str(pacing.get("pacing", "")).upper() == "BEHIND":
+    if net_gap < 2 or picking_short > 1 or str(pacing.get("pacing", "")).upper() == "BEHIND":
         return "YELLOW"
     return "GREEN"
 
