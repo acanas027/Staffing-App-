@@ -357,10 +357,13 @@ def _opendock_counts(service_rows):
         rt = r.get("result_type")
         if rt in counts:
             counts[rt] += 1
-    counts["issues"] = (
-        counts["delayed"] + counts["no_show"] +
-        counts["no_departure"] + counts["missing_service_time"]
-    )
+    # Only true service failures count as misses.
+    # Customer no-shows and no-departure records are flagged in the report,
+    # but they do not count against the service target because they are not
+    # controllable service-time failures.
+    counts["flags"] = counts["no_show"] + counts["no_departure"] + counts["cancelled"]
+    counts["scorable"] = counts["target_met"] + counts["delayed"] + counts["missing_service_time"]
+    counts["issues"] = counts["delayed"] + counts["missing_service_time"]
     return counts
 
 
@@ -385,7 +388,12 @@ def _commitment_auto_fields(commitment, service_by_load):
         return {"shipped": "Yes", "on_time": "Y", "auto_reason": ""}
     if rt == "delayed":
         return {"shipped": "Yes", "on_time": "N", "auto_reason": service.get("service_result", "")}
-    if rt in ("no_show", "no_departure", "missing_service_time", "cancelled"):
+    if rt == "missing_service_time":
+        return {"shipped": "Yes", "on_time": "N", "auto_reason": service.get("service_result", "")}
+    if rt in ("no_show", "no_departure", "cancelled"):
+        # These are flags, not misses. They stay visible in the report, but they
+        # are excluded from service-target scoring because the load was not a
+        # completed, controllable service-time event.
         return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "")}
     return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "Review OpenDock status")}
 
@@ -445,6 +453,9 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
 
     oc_service_met = sum(1 for o in oc if o.get("on_time") == "Y")
+    oc_service_total = sum(1 for o in oc if str(o.get("on_time")).strip().upper() in ("Y", "N"))
+    oc_shorts_count = sum(1 for o in oc if str(o.get("short")).strip().upper() in ("Y", "YES"))
+    oc_shorts_met = max(oc_service_total - oc_shorts_count, 0)
 
     return {
         "loads_completed": loads_completed,
@@ -454,7 +465,10 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
         "actual_cutoff": "",
         "oc_total": len(oc),
         "oc_service_target_met": oc_service_met,
-        "oc_service_target_total": len(oc),
+        "oc_service_target_total": oc_service_total,
+        "oc_shorts_target_met": oc_shorts_met,
+        "oc_shorts_target_total": oc_service_total,
+        "oc_shorts_count": oc_shorts_count,
         # Compatibility: shift_log.get_recent_scorecard already knows how to total
         # OC sign-off. We reuse that old saved field as the new OC Service Target
         # so the rolling scorecard is connected to the actual OpenDock result.
@@ -480,8 +494,17 @@ def _metric(column, label, block, met_key, total_key):
 
 
 def _service_target_flag(auto_fields):
-    """For KPI scoring, every OC commitment must be either service-target met or missed."""
-    return "Y" if str(auto_fields.get("on_time", "")).strip().upper() == "Y" else "N"
+    """
+    For KPI scoring, completed/scorable loads are Y or N.
+    Customer no-show and no-departure records remain NA so they are flagged
+    in the report but excluded from the service-target denominator.
+    """
+    value = str(auto_fields.get("on_time", "")).strip().upper()
+    if value == "Y":
+        return "Y"
+    if value == "N":
+        return "N"
+    return "NA"
 
 
 def _score_block_has_data(block):
@@ -526,6 +549,61 @@ def _score_block_from_report_rows(report_rows, area_name):
     return None
 
 
+def _oc_shorts_block_from_report_rows(report_rows):
+    """Build current-report OC Shorts Target metric: no-short OC loads / scorable OC loads."""
+    for row in report_rows or []:
+        if str(row.get("area", "")).strip().lower() != "oc shorts":
+            continue
+        expected_nums = re.findall(r"\d+", str(row.get("expected", "")))
+        actual_nums = re.findall(r"\d+", str(row.get("actual", "")))
+        if not expected_nums or not actual_nums:
+            return None
+        # Expected text is like: "0 short across 7 scorable OC load(s)".
+        total = int(expected_nums[-1])
+        shorts = int(actual_nums[0])
+        met = max(total - shorts, 0)
+        rate = None if total <= 0 else round((met / total) * 100)
+        return {"rate": rate, "met": met, "total": total}
+    return None
+
+
+def _oc_shorts_block_from_scorecard(score):
+    """
+    Build a rolling OC Shorts Target KPI from saved outcome rows.
+    Uses the same OC denominator as the OC Service Target, then subtracts OC rows
+    flagged short in the rolling misses list.
+    """
+    if not isinstance(score, dict):
+        return None
+
+    # Prefer a future/native score block if shift_log ever adds one.
+    for key in ("oc_shorts_target", "oc_shorts"):
+        normalized = _normalize_score_block(score.get(key))
+        if _score_block_has_data(normalized):
+            return normalized
+
+    total = None
+    for key in ("oc_service_target", "oc_on_time", "oc_signoff"):
+        normalized = _normalize_score_block(score.get(key))
+        if _score_block_has_data(normalized):
+            total = normalized["total"]
+            break
+
+    if not total:
+        return None
+
+    shorts = 0
+    for row in score.get("misses", []):
+        if str(row.get("type", "")).strip().upper() != "OC":
+            continue
+        if str(row.get("short", "")).strip().upper() in ("Y", "YES"):
+            shorts += 1
+
+    met = max(int(total) - shorts, 0)
+    rate = round((met / int(total)) * 100) if int(total) > 0 else None
+    return {"rate": rate, "met": met, "total": int(total)}
+
+
 def _render_service_metric(column, label, *candidate_blocks):
     """Render a service KPI using the first scorecard block with data."""
     for block in candidate_blocks:
@@ -555,9 +633,13 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
 
     oc_total = len(oc)
+    oc_service_total = sum(1 for o in oc if str(o.get("on_time")).strip().upper() in ("Y", "N"))
+    oc_flagged = max(oc_total - oc_service_total, 0)
     oc_on_time = sum(1 for o in oc if o.get("on_time") == "Y")
     oc_shorts = sum(1 for o in oc if str(o.get("short")).strip().upper() in ("Y", "YES"))
     cpu_total = len(cpu)
+    cpu_service_total = sum(1 for o in cpu if str(o.get("on_time")).strip().upper() in ("Y", "N"))
+    cpu_flagged = max(cpu_total - cpu_service_total, 0)
     cpu_on_time = sum(1 for o in cpu if o.get("on_time") == "Y")
 
     service_counts = _opendock_counts(service_rows)
@@ -568,10 +650,10 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     if service_counts["total"]:
         service_actual = (
-            f"{service_counts['target_met']} met / {service_counts['total']} load(s); "
+            f"{service_counts['target_met']} met / {service_counts['scorable']} scorable load(s); "
             f"{service_counts['delayed']} delayed; "
-            f"{service_counts['no_show']} no-show; "
-            f"{service_counts['no_departure']} no departure"
+            f"{service_counts['no_show']} no-show flag; "
+            f"{service_counts['no_departure']} no-departure flag"
         )
         service_status = "On target" if service_counts["issues"] == 0 else "Missed"
     else:
@@ -593,21 +675,21 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
         },
         {
             "area": "OC Service Target",
-            "expected": f"{oc_total} OC load(s) at <= {SERVICE_TARGET_MINUTES} min" if oc_total else "No OC loads",
-            "actual": f"{oc_on_time} met service target",
-            "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
+            "expected": f"{oc_service_total} scorable OC load(s) at <= {SERVICE_TARGET_MINUTES} min" if oc_total else "No OC loads",
+            "actual": f"{oc_on_time} met service target; {oc_flagged} flagged/not scored",
+            "status": _status(oc_on_time >= oc_service_total, required=oc_service_total > 0),
         },
         {
             "area": "OC Shorts",
-            "expected": f"0 short across {oc_total} OC load(s)" if oc_total else "No OC loads",
+            "expected": f"0 short across {oc_service_total} scorable OC load(s)" if oc_total else "No OC loads",
             "actual": f"{oc_shorts} short",
-            "status": _status(oc_shorts == 0, required=oc_total > 0),
+            "status": _status(oc_shorts == 0, required=oc_service_total > 0),
         },
         {
             "area": "CPU Service Target",
-            "expected": f"{cpu_total} CPU appointment(s) auto-scored from OpenDock" if cpu_total else "No CPUs",
-            "actual": f"{cpu_on_time} met service target",
-            "status": _status(cpu_on_time >= cpu_total, required=cpu_total > 0),
+            "expected": f"{cpu_service_total} scorable CPU appointment(s) from OpenDock" if cpu_total else "No CPUs",
+            "actual": f"{cpu_on_time} met service target; {cpu_flagged} flagged/not scored",
+            "status": _status(cpu_on_time >= cpu_service_total, required=cpu_service_total > 0),
         },
         {
             "area": "Shorts",
@@ -625,12 +707,13 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
 
     misses = []
     for o in outcome_rows:
+        # Do not count customer no-shows or no-departure records as misses.
+        # They have on_time = NA and remain visible as flags in the OpenDock detail.
         if (
-            str(o.get("shipped")).upper() == "N"
-            or str(o.get("on_time")).upper() == "N"
-            or str(o.get("signoff_done")).upper() == "N"
-            or str(o.get("photos_done")).upper() == "N"
-            or str(o.get("short")).upper() in ("Y", "YES")
+            str(o.get("on_time")).strip().upper() == "N"
+            or str(o.get("signoff_done")).strip().upper() == "N"
+            or str(o.get("photos_done")).strip().upper() == "N"
+            or str(o.get("short")).strip().upper() in ("Y", "YES")
         ):
             misses.append(o)
 
@@ -762,8 +845,10 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
         for i, r in enumerate(service_rows, start=1):
             if r.get("result_type") == "target_met":
                 service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#C6EFCE")))
-            elif r.get("result_type") in ("delayed", "no_show", "no_departure", "missing_service_time"):
+            elif r.get("result_type") in ("delayed", "missing_service_time"):
                 service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#FFC7CE")))
+            elif r.get("result_type") in ("no_show", "no_departure"):
+                service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#FFEB9C")))
             else:
                 service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#ECECEC")))
         service_table.setStyle(TableStyle(service_style))
@@ -1090,13 +1175,17 @@ except Exception as e:
 
 if score:
     st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 30 days.")
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
 
     current_report_oc_service = None
+    current_report_oc_shorts = None
     current_report = st.session_state.get("closeout_report")
     if current_report and current_report.get("date") == operating_date_str and current_report.get("shift") == shift:
         current_report_oc_service = _score_block_from_report_rows(
             current_report.get("rows", []), "OC Service Target"
+        )
+        current_report_oc_shorts = _oc_shorts_block_from_report_rows(
+            current_report.get("rows", [])
         )
 
     _render_service_metric(
@@ -1106,8 +1195,16 @@ if score:
         score.get("oc_signoff"),  # reused by this page for backwards-compatible storage
         current_report_oc_service,
     )
-    _metric(m2, "CPU Service Target", score["cpu_on_time"], "met", "total")
-    _metric(m3, "Shift Goal Met", score["shift_goal"], "met", "total")
+
+    oc_shorts_block = _oc_shorts_block_from_scorecard(score) or current_report_oc_shorts
+    if oc_shorts_block:
+        _metric(m2, "OC Shorts Target", oc_shorts_block, "met", "total")
+    else:
+        m2.metric("OC Shorts Target", "—")
+        m2.caption("No data yet.")
+
+    _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
+    _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
 
     if score["misses"]:
         st.markdown("**Itemized misses (last 30 days)**")
