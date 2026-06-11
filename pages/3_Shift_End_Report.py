@@ -250,7 +250,7 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
         "result_type": "delayed",
         "service_minutes": service_min,
         "delay_minutes": delay,
-        "service_result": f"Delayed service by {delay} minutes",
+        "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES})",
     }
 
 
@@ -444,15 +444,21 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
     oc = [o for o in outcome_rows if o.get("type") == "OC"]
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
 
+    oc_service_met = sum(1 for o in oc if o.get("on_time") == "Y")
+
     return {
         "loads_completed": loads_completed,
         "total_shorts": total_shorts,
         "goal_met": _norm_na(goal_met),
         "shift_goal": shift_goal,
-        "actual_cutoff": actual_cutoff,
+        "actual_cutoff": "",
         "oc_total": len(oc),
-        "oc_signoff_met": sum(1 for o in oc if o.get("signoff_done") == "Y"),
-        "oc_photos_met": sum(1 for o in oc if o.get("photos_done") == "Y"),
+        "oc_service_target_met": oc_service_met,
+        "oc_service_target_total": len(oc),
+        # Keep the old keys so existing shift_log / Google Sheet setups do not break.
+        # They are no longer used as supervisor KPIs on this page.
+        "oc_signoff_met": 0,
+        "oc_photos_met": 0,
         "cpu_total": len(cpu),
         "cpu_on_time": sum(1 for o in cpu if o.get("on_time") == "Y"),
         "notes": notes,
@@ -489,6 +495,7 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
 
     oc_total = len(oc)
+    oc_on_time = sum(1 for o in oc if o.get("on_time") == "Y")
     oc_shorts = sum(1 for o in oc if str(o.get("short")).strip().upper() in ("Y", "YES"))
     cpu_total = len(cpu)
     cpu_on_time = sum(1 for o in cpu if o.get("on_time") == "Y")
@@ -523,6 +530,12 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
             "expected": f"Target <= {SERVICE_TARGET_MINUTES} min for all outbound loads",
             "actual": service_actual,
             "status": service_status,
+        },
+        {
+            "area": "OC Service Target",
+            "expected": f"{oc_total} OC load(s) at <= {SERVICE_TARGET_MINUTES} min" if oc_total else "No OC loads",
+            "actual": f"{oc_on_time} met service target",
+            "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
         },
         {
             "area": "OC Shorts",
@@ -723,8 +736,8 @@ def render_report_table(report_rows):
 st.set_page_config(page_title="Shift Closeout", layout="wide")
 st.title("Shift Closeout")
 st.write(
-    "Confirm how today's commitments closed out. This records the proof of how we "
-    "did against the shift goal, OC, and CPU expectations."
+    "Confirm how today's commitments closed out. OpenDock auto-scores service time "
+    "for all loads, while the supervisor confirms OC shorts and the shift goal."
 )
 
 if not shift_log.is_configured():
@@ -855,11 +868,9 @@ with st.form("closeout_form"):
                     "miss_reason": miss_reason,
                 })
 
+    # CPU outcomes are auto-scored from OpenDock and saved in the background.
+    # Nothing is shown to the supervisor because there is no manual CPU input needed.
     if cpu_commitments:
-        st.subheader("CPU appointments")
-        st.caption(
-            "CPU service outcomes are auto-scored from OpenDock. No manual CPU closeout is needed here."
-        )
         for c in cpu_commitments:
             load = str(c.get("load", ""))
             cust = str(c.get("customer", ""))
@@ -876,19 +887,9 @@ with st.form("closeout_form"):
 
     # ----- Shift goal result -----
     st.subheader("Shift goal")
-    actual_cutoff = ""
     if shift_goal:
         st.caption(shift_goal)
         goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
-        actual_cutoff = st.text_input(
-            "Actual appointment cutoff we controlled to (HH:MM)",
-            key="actual_cutoff",
-            placeholder="e.g. 15:30",
-            help="Enter the real appointment time we controlled loads through if it "
-                 "differed from the morning prediction — in EITHER direction. Earlier "
-                 "than predicted (we fell short) or later (we beat the plan) are both "
-                 "worth recording. Leave blank only if we landed exactly on the predicted cutoff.",
-        )
     else:
         goal_met = "NA"
         st.caption("No shift goal was recorded, so there's nothing to mark here.")
@@ -935,23 +936,8 @@ if submitted:
         )
         st.stop()
 
-    # Actual cutoff is required only when the goal was missed.
-    goal_norm = _norm_na(goal_met)
-    if goal_norm == "N" and not str(actual_cutoff).strip():
-        st.error(
-            "You marked the shift goal as missed. Enter the actual appointment cutoff "
-            "you controlled to (HH:MM) so the variance from the prediction gets recorded."
-        )
-        st.stop()
-
-    # Keep whatever cutoff was entered, in either direction. A met goal that also beat
-    # the predicted cutoff is a positive variance worth recording — no longer cleared.
-    actual_cutoff = str(actual_cutoff or "").strip()
-    cutoff_variance = _cutoff_variance(shift_goal, actual_cutoff) if actual_cutoff else None
-
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
-        actual_cutoff=actual_cutoff,
     )
     report_rows, misses = build_report_rows(
         outcome_rows, loads_completed, total_shorts, goal_met, shift_goal,
@@ -979,14 +965,6 @@ if submitted:
     except Exception as e:
         st.error(f"Could not save closeout: {e}")
 
-    # Show the cutoff variance vs the morning prediction, in either direction.
-    if cutoff_variance:
-        if cutoff_variance["direction"] == "AHEAD":
-            st.success(cutoff_variance["message"])
-        elif cutoff_variance["direction"] == "BEHIND":
-            st.warning(cutoff_variance["message"])
-        else:
-            st.info(cutoff_variance["message"])
 
 
 # ── End-of-Shift report (persists across reruns via session_state) ──────────
@@ -1050,11 +1028,15 @@ except Exception as e:
 
 if score:
     st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 30 days.")
-    m1, m2, m3, m4 = st.columns(4)
-    _metric(m1, "OC Sign-Off", score["oc_signoff"], "met", "required")
-    _metric(m2, "OC Photos", score["oc_photos"], "met", "required")
-    _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
-    _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
+    m1, m2, m3 = st.columns(3)
+    oc_service_block = score.get("oc_service_target") or score.get("oc_on_time")
+    if oc_service_block:
+        _metric(m1, "OC Service Target", oc_service_block, "met", "total")
+    else:
+        m1.metric("OC Service Target", "—")
+        m1.caption("Saved from this version forward.")
+    _metric(m2, "CPU Service Target", score["cpu_on_time"], "met", "total")
+    _metric(m3, "Shift Goal Met", score["shift_goal"], "met", "total")
 
     if score["misses"]:
         st.markdown("**Itemized misses (last 30 days)**")
@@ -1064,8 +1046,8 @@ if score:
                     "Date": r.get("date"), "Shift": r.get("shift"),
                     "Type": r.get("type"), "Load": r.get("load"),
                     "Customer": r.get("customer"), "Appt": r.get("appt_time"),
-                    "On time": r.get("on_time"), "Sign-off": r.get("signoff_done"),
-                    "Photos": r.get("photos_done"), "Short": r.get("short"),
+                    "Service target": r.get("on_time"),
+                    "Short": r.get("short"),
                     "Reason": r.get("miss_reason"),
                 }
                 for r in score["misses"]
