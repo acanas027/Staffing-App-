@@ -172,6 +172,95 @@ def _load_daily_commitments(operating_date_str):
     return _dedupe_commitments(all_commitments), errors
 
 
+
+def _parse_positive_int(value):
+    """Return a positive integer from a saved staffing-report value, or None."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+
+    # Prefer clean numeric values like 76 or 76.0.
+    num = pd.to_numeric(text, errors="coerce")
+    if not pd.isna(num):
+        val = int(round(float(num)))
+        return val if val > 0 else None
+
+    return None
+
+
+def _daily_goal_from_staffing_report(commitments):
+    """
+    Pull the daily outbound goal from the morning staffing-report snapshot.
+
+    This is intentionally flexible because the exact field name depends on how the
+    staffing page saved the supervisor's input. It checks common saved column names
+    first, then scans goal/notes text for labels like 'Total outbound loads today'.
+    Returns: (goal_value, source_label) or (None, "") when not found.
+    """
+    field_candidates = {
+        _norm_header(name) for name in [
+            "daily_outbound_goal",
+            "daily_outbound_loads",
+            "daily_total_outbounds",
+            "total_outbound_loads",
+            "total_outbound_loads_today",
+            "total_outbounds_today",
+            "total_outbounds",
+            "outbound_loads_today",
+            "today_outbound_loads",
+            "todays_outbound_loads",
+            "daily_load_goal",
+            "daily_loads",
+            "loads_today",
+            "today_loads",
+            "todays_loads",
+            "total_loads_today",
+            "total_loads",
+        ]
+    }
+
+    for row in commitments or []:
+        for key, value in dict(row).items():
+            if _norm_header(key) not in field_candidates:
+                continue
+            val = _parse_positive_int(value)
+            if val is not None:
+                return val, str(key)
+
+    text_field_candidates = {
+        _norm_header(name) for name in [
+            "shift_goal", "goal", "daily_goal", "summary", "notes", "shift_summary",
+            "ai_summary", "expectation", "shift_expectation",
+        ]
+    }
+    patterns = [
+        r"(?:daily\s+outbound\s+goal|total\s+outbound\s+loads\s+today|total\s+outbounds\s+today|outbound\s+loads\s+today|today'?s\s+outbound\s+loads|today'?s\s+loads|total\s+loads\s+today)\D{0,30}(\d+)",
+        r"(\d+)\s+(?:total\s+outbound\s+loads|outbound\s+loads\s+today|loads\s+today|outbounds\s+today)",
+    ]
+
+    for row in commitments or []:
+        for key, value in dict(row).items():
+            if _norm_header(key) not in text_field_candidates:
+                continue
+            text = str(value or "")
+            for pattern in patterns:
+                m = re.search(pattern, text, flags=re.IGNORECASE)
+                if m:
+                    val = _parse_positive_int(m.group(1))
+                    if val is not None:
+                        return val, str(key)
+
+    return None, ""
+
+
 # ============================================================
 #  OPENDOCK HELPERS
 # ============================================================
@@ -1205,15 +1294,25 @@ with st.form("closeout_form"):
     # ----- Daily goal + totals -----
     st.subheader("Daily goal and totals")
     completed_from_opendock = _completed_outbound_count(opendock_service_rows)
-    default_goal = len(opendock_service_rows) if opendock_service_rows else 0
+    staffing_daily_goal, staffing_goal_source = _daily_goal_from_staffing_report(commitments)
+
     g1, g2 = st.columns(2)
-    daily_outbound_goal = g1.number_input(
-        "Total outbound loads today / daily goal",
-        min_value=0,
-        step=1,
-        value=int(default_goal),
-        help="This number becomes the daily outbound goal in the report.",
-    )
+    if staffing_daily_goal is not None:
+        daily_outbound_goal = int(staffing_daily_goal)
+        g1.metric("Daily outbound goal", daily_outbound_goal)
+        g1.caption(f"Pulled from staffing report input: {staffing_goal_source}")
+    else:
+        g1.warning("Daily outbound goal was not found in the staffing-report snapshot.")
+        daily_outbound_goal = g1.number_input(
+            "Daily outbound goal fallback",
+            min_value=0,
+            step=1,
+            value=0,
+            help=(
+                "Use this only if the staffing report has not started saving the supervisor's "
+                "total outbound input yet. Once that field is saved, this box will disappear."
+            ),
+        )
     g2.metric("Completed in OpenDock", completed_from_opendock)
 
     s1, s2 = st.columns(2)
