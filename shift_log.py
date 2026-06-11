@@ -478,7 +478,101 @@ def get_monthly_scorecard(year, month):
         "per_shift": per_shift,
         "misses": misses,
     }
+def get_daily_scorecard(operating_date):
+    """
+    Goal performance for a single operating date. Same shape as the weekly/monthly
+    scorecards so one page renders all three. operating_date may be a datetime.date
+    or an mm/dd/YYYY string.
+    """
+    if not is_configured():
+        raise RuntimeError(f"Shift log not configured: {setup_hint()}")
 
+    if isinstance(operating_date, str):
+        day = _parse_date(operating_date) or datetime.date.today()
+    else:
+        day = operating_date
+
+    def _on_day(record):
+        d = _parse_date(record.get("date"))
+        return d is not None and d == day
+
+    records = _read_tab_records(OUTCOMES_TAB, tuple(OUTCOMES_HEADER))
+    day_rows = [r for r in records if _on_day(r)]
+
+    oc = [r for r in day_rows if str(r.get("type")) == "OC"]
+    cpu = [r for r in day_rows if str(r.get("type")) == "CPU"]
+
+    def _rate(items, key):
+        relevant = [r for r in items if str(r.get(key)).upper() in ("Y", "N")]
+        if not relevant:
+            return None, 0, 0
+        met = sum(1 for r in relevant if str(r.get(key)).upper() == "Y")
+        return round(100 * met / len(relevant)), met, len(relevant)
+
+    signoff_rate, signoff_met, signoff_req = _rate(oc, "signoff_done")
+    photos_rate, photos_met, photos_req = _rate(oc, "photos_done")
+    cpu_rate, cpu_met, cpu_total = _rate(cpu, "on_time")
+
+    goal_rate, goal_met, goal_total = None, 0, 0
+    loads_completed_total = 0
+    shorts_total = 0
+    per_shift = []
+    try:
+        sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
+        day_sum = [r for r in sum_records if _on_day(r)]
+        for r in day_sum:
+            gm = str(r.get("goal_met")).upper()
+            if gm in ("Y", "N"):
+                goal_total += 1
+                if gm == "Y":
+                    goal_met += 1
+            loads_completed_total += _to_int(r.get("loads_completed"))
+            shorts_total += _to_int(r.get("total_shorts"))
+            per_shift.append({
+                "date": r.get("date"),
+                "shift": r.get("shift"),
+                "goal_met": r.get("goal_met"),
+                "shift_goal": r.get("shift_goal"),
+                "loads_completed": _to_int(r.get("loads_completed")),
+                "total_shorts": _to_int(r.get("total_shorts")),
+                "oc_total": _to_int(r.get("oc_total")),
+                "oc_signoff_met": _to_int(r.get("oc_signoff_met")),
+                "oc_photos_met": _to_int(r.get("oc_photos_met")),
+                "cpu_total": _to_int(r.get("cpu_total")),
+                "cpu_on_time": _to_int(r.get("cpu_on_time")),
+                "notes": r.get("notes", ""),
+            })
+        if goal_total:
+            goal_rate = round(100 * goal_met / goal_total)
+    except Exception:
+        pass
+
+    per_shift.sort(key=lambda r: (str(r.get("date")), str(r.get("shift"))))
+
+    misses = []
+    for r in day_rows:
+        if (
+            str(r.get("on_time")).upper() == "N"
+            or str(r.get("signoff_done")).upper() == "N"
+            or str(r.get("photos_done")).upper() == "N"
+            or str(r.get("short")).upper() == "Y"
+        ):
+            misses.append(r)
+
+    shifts_logged = len(per_shift) or len({r.get("snapshot_id") for r in day_rows})
+
+    return {
+        "date": day.strftime("%m/%d/%Y"),
+        "shifts_logged": shifts_logged,
+        "loads_completed_total": loads_completed_total,
+        "shorts_total": shorts_total,
+        "oc_signoff": {"rate": signoff_rate, "met": signoff_met, "required": signoff_req},
+        "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
+        "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
+        "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "per_shift": per_shift,
+        "misses": misses,
+    }
 
 def get_weekly_scorecard(end_date):
     """
