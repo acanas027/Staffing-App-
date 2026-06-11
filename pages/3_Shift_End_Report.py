@@ -16,6 +16,7 @@ OC shorts/reasons, shift goal, totals, and notes.
 import datetime
 import io
 import re
+import urllib.parse
 
 import pandas as pd
 import streamlit as st
@@ -109,6 +110,15 @@ def _fmt_minutes(mins):
     """Minutes since midnight -> 'HH:MM'."""
     mins = int(mins) % (24 * 60)
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _build_mailto(to_addr, subject, body):
+    """Build a mailto: link that prefills recipient, subject, and body."""
+    params = urllib.parse.urlencode(
+        {"subject": subject, "body": body},
+        quote_via=urllib.parse.quote,
+    )
+    return f"mailto:{to_addr.strip()}?{params}"
 
 
 def _shift_label_for_appt(appt_time):
@@ -1487,6 +1497,41 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
         )
     elif not REPORTLAB_AVAILABLE:
         st.caption("PDF download unavailable — add reportlab to requirements.txt to enable it.")
+
+    # ── Email the report to your boss (mailto draft) ─────────────────────────
+    # mailto can prefill recipient + subject + body, but CANNOT attach the PDF.
+    # Download the PDF above, then attach it by hand in your mail app before sending.
+    st.markdown("**Email this report**")
+    boss_email = "brianM@reser.com"
+
+    email_subject = f"End-of-Day Report — {report['date']}"
+    goal_line = ""
+    completed_line = ""
+    for r in report["rows"]:
+        if r["area"] in ("Daily Goal", "Daily Outbound Goal"):
+            goal_line = f"Daily goal: {r['actual']} (target {r['expected']})."
+        if r["area"] == "Loads Completed":
+            completed_line = f"Loads completed: {r['actual']}."
+
+    miss_count = len(report["misses"])
+    email_body = (
+        "Hi,\n\n"
+        f"End-of-day report for {report['date']} is ready.\n\n"
+        f"{goal_line}\n"
+        f"{completed_line}\n"
+        f"Controllable misses: {miss_count}.\n\n"
+        "The full PDF is attached.\n\n"  # reminder to you — attach it before sending
+        "Thanks,"
+    )
+
+    st.link_button(
+        "Open email to boss",
+        _build_mailto(boss_email, email_subject, email_body),
+    )
+    st.caption(
+        "Opens your mail app with the message prefilled to "
+        f"{boss_email}. Attach the PDF you just downloaded, then send."
+    )
 
 
 # ── Rolling scorecard ───────────────────────────────────────────────────────
