@@ -250,7 +250,7 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
         "result_type": "delayed",
         "service_minutes": service_min,
         "delay_minutes": delay,
-        "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES})",
+        "service_result": f"Delayed service by {delay} minutes over {SERVICE_TARGET_MINUTES}",
     }
 
 
@@ -455,9 +455,10 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
         "oc_total": len(oc),
         "oc_service_target_met": oc_service_met,
         "oc_service_target_total": len(oc),
-        # Keep the old keys so existing shift_log / Google Sheet setups do not break.
-        # They are no longer used as supervisor KPIs on this page.
-        "oc_signoff_met": 0,
+        # Compatibility: shift_log.get_recent_scorecard already knows how to total
+        # OC sign-off. We reuse that old saved field as the new OC Service Target
+        # so the rolling scorecard is connected to the actual OpenDock result.
+        "oc_signoff_met": oc_service_met,
         "oc_photos_met": 0,
         "cpu_total": len(cpu),
         "cpu_on_time": sum(1 for o in cpu if o.get("on_time") == "Y"),
@@ -476,6 +477,65 @@ def _metric(column, label, block, met_key, total_key):
     else:
         column.metric(label, f"{rate}%")
         column.caption(f"{met} of {total}")
+
+
+def _service_target_flag(auto_fields):
+    """For KPI scoring, every OC commitment must be either service-target met or missed."""
+    return "Y" if str(auto_fields.get("on_time", "")).strip().upper() == "Y" else "N"
+
+
+def _score_block_has_data(block):
+    """Return True when a scorecard block has a usable denominator."""
+    if not isinstance(block, dict):
+        return False
+    total = block.get("total", block.get("required", 0))
+    try:
+        return int(total) > 0
+    except Exception:
+        return False
+
+
+def _normalize_score_block(block):
+    """Normalize different scorecard block shapes into met/total/rate."""
+    if not isinstance(block, dict):
+        return None
+    met = block.get("met", 0)
+    total = block.get("total", block.get("required", 0))
+    try:
+        met_int = int(met)
+        total_int = int(total)
+    except Exception:
+        return None
+    rate = None if total_int <= 0 else round((met_int / total_int) * 100)
+    return {"rate": rate, "met": met_int, "total": total_int}
+
+
+def _score_block_from_report_rows(report_rows, area_name):
+    """Fallback: build a metric block from the current on-screen report rows."""
+    for row in report_rows or []:
+        if str(row.get("area", "")).strip().lower() != str(area_name).strip().lower():
+            continue
+        expected_nums = re.findall(r"\d+", str(row.get("expected", "")))
+        actual_nums = re.findall(r"\d+", str(row.get("actual", "")))
+        if not expected_nums or not actual_nums:
+            return None
+        total = int(expected_nums[0])
+        met = int(actual_nums[0])
+        rate = None if total <= 0 else round((met / total) * 100)
+        return {"rate": rate, "met": met, "total": total}
+    return None
+
+
+def _render_service_metric(column, label, *candidate_blocks):
+    """Render a service KPI using the first scorecard block with data."""
+    for block in candidate_blocks:
+        normalized = _normalize_score_block(block)
+        if _score_block_has_data(normalized):
+            _metric(column, label, normalized, "met", "total")
+            return True
+    column.metric(label, "—")
+    column.caption("No data yet.")
+    return False
 
 
 def _status(ok, required=True):
@@ -862,7 +922,9 @@ with st.form("closeout_form"):
                     "type": "OC", "load": load, "customer": cust, "appt_time": appt,
                     "shipped": auto.get("shipped", "No"),
                     "on_time": auto.get("on_time", "NA"),
-                    "signoff_done": "NA",
+                    # Compatibility: this old field now carries OC Service Target Y/N
+                    # into the existing rolling scorecard calculation.
+                    "signoff_done": _service_target_flag(auto),
                     "photos_done": "NA",
                     "short": short,
                     "miss_reason": miss_reason,
@@ -1029,12 +1091,21 @@ except Exception as e:
 if score:
     st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 30 days.")
     m1, m2, m3 = st.columns(3)
-    oc_service_block = score.get("oc_service_target") or score.get("oc_on_time")
-    if oc_service_block:
-        _metric(m1, "OC Service Target", oc_service_block, "met", "total")
-    else:
-        m1.metric("OC Service Target", "—")
-        m1.caption("Saved from this version forward.")
+
+    current_report_oc_service = None
+    current_report = st.session_state.get("closeout_report")
+    if current_report and current_report.get("date") == operating_date_str and current_report.get("shift") == shift:
+        current_report_oc_service = _score_block_from_report_rows(
+            current_report.get("rows", []), "OC Service Target"
+        )
+
+    _render_service_metric(
+        m1, "OC Service Target",
+        score.get("oc_service_target"),
+        score.get("oc_on_time"),
+        score.get("oc_signoff"),  # reused by this page for backwards-compatible storage
+        current_report_oc_service,
+    )
     _metric(m2, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m3, "Shift Goal Met", score["shift_goal"], "met", "total")
 
