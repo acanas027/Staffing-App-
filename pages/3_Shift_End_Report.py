@@ -39,6 +39,7 @@ except Exception:
 
 YES_NO = ["Yes", "No"]
 SERVICE_TARGET_MINUTES = 120
+DAILY_SHIFT_KEY = "Daily"
 
 # Standardized miss/late reasons. "Other" reveals a free-text box so nothing is lost,
 # but every common cause is now countable across shifts.
@@ -108,6 +109,67 @@ def _fmt_minutes(mins):
     """Minutes since midnight -> 'HH:MM'."""
     mins = int(mins) % (24 * 60)
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+def _shift_label_for_appt(appt_time):
+    """Assign an appointment time to the internal 1st/2nd shift grouping for the daily report."""
+    if _in_shift_window(appt_time, "1st"):
+        return "1st"
+    if _in_shift_window(appt_time, "2nd"):
+        return "2nd"
+    return "Unassigned"
+
+
+def _is_completed_status(status):
+    """Return True when an OpenDock status represents a completed appointment."""
+    key = re.sub(r"[^a-z0-9]+", "", str(status or "").strip().lower())
+    return key in ("completed", "complete")
+
+
+def _completed_outbound_count(service_rows):
+    """Count completed outbound appointments from the already-cleaned OpenDock service rows."""
+    return sum(1 for r in service_rows or [] if _is_completed_status(r.get("status")))
+
+
+def _service_rows_by_shift(service_rows, shift_label):
+    """Return service rows for one internal shift grouping."""
+    return [r for r in service_rows or [] if str(r.get("shift_group", "")).strip() == shift_label]
+
+
+def _dedupe_commitments(commitments):
+    """Remove duplicate commitments when combining 1st and 2nd shift snapshots."""
+    seen = set()
+    clean = []
+    for c in commitments or []:
+        key = (
+            str(c.get("type", "")).strip().upper(),
+            _norm_load_id(c.get("load", "")),
+            str(c.get("appt_time", "")).strip(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(c)
+    return clean
+
+
+def _load_daily_commitments(operating_date_str):
+    """
+    Load both 1st and 2nd shift commitment snapshots so the closeout can be one
+    daily report while still preserving OC/CPU commitments captured earlier.
+    """
+    all_commitments = []
+    errors = []
+    for source_shift in ("1st", "2nd"):
+        try:
+            rows = shift_log.load_commitments(operating_date_str, source_shift)
+            for row in rows or []:
+                item = dict(row)
+                item["source_shift"] = source_shift
+                all_commitments.append(item)
+        except Exception as e:
+            errors.append(f"{source_shift}: {e}")
+    return _dedupe_commitments(all_commitments), errors
 
 
 # ============================================================
@@ -324,10 +386,11 @@ def _dedupe_opendock_loads_prefer_completed(work, status_col):
 
     return pd.concat([with_load, without_load], axis=0).sort_index()
 
-def build_opendock_service_report(uploaded_file, operating_date, shift):
+def build_opendock_service_report(uploaded_file, operating_date):
     """
     Read the uploaded OpenDock Excel export and build service-time report rows for all
-    outbound loads on the selected operating date and shift.
+    outbound loads on the selected operating date. The report stays daily, but each
+    row is tagged internally as 1st or 2nd shift based on appointment time.
     Returns: (service_rows, service_by_load)
     """
     if uploaded_file is None:
@@ -402,7 +465,6 @@ def build_opendock_service_report(uploaded_file, operating_date, shift):
     work = work[~work[cols["status"]].astype(str).str.strip().str.upper().eq("CANCELLED")]
 
     work = work[work["_appt_date_parsed"].eq(operating_date)]
-    work = work[work["_appt_time_text"].apply(lambda x: _in_shift_window(x, shift))]
 
     # If the raw OpenDock export has duplicate rows for the same load, keep the
     # Completed appointment when one exists and drop the not-completed duplicate.
@@ -418,12 +480,14 @@ def build_opendock_service_report(uploaded_file, operating_date, shift):
         )
         load = _clean_text(row.get(cols["load_reference"]))
         appt = _fmt_opendock_time(row.get(cols["appt_time"]))
+        shift_group = _shift_label_for_appt(appt)
         service_rows.append({
             "load": load,
             "load_norm": _norm_load_id(load),
             "customer": _clean_text(row.get(cols["carrier"])) if cols.get("carrier") else "",
             "appt_date": operating_date.strftime("%m/%d/%Y"),
             "appt_time": appt,
+            "shift_group": shift_group,
             "status": _clean_text(row.get(cols["status"])),
             "service_minutes": score["service_minutes"],
             "delay_minutes": score["delay_minutes"],
@@ -551,7 +615,7 @@ def _cutoff_variance(shift_goal, actual_cutoff):
             "delta_min": delta, "direction": direction, "message": message}
 
 
-def _build_summary(outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, notes,
+def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
                    actual_cutoff=""):
     """Roll per-commitment outcomes into the one-row shift summary."""
     oc = [o for o in outcome_rows if o.get("type") == "OC"]
@@ -563,7 +627,7 @@ def _build_summary(outcome_rows, loads_controlled, total_shorts, goal_met, shift
     oc_shorts_met = max(oc_service_total - oc_shorts_count, 0)
 
     return {
-        "loads_controlled": loads_controlled,
+        "loads_completed": loads_completed,
         "total_shorts": total_shorts,
         "goal_met": _norm_na(goal_met),
         "shift_goal": shift_goal,
@@ -728,9 +792,9 @@ def _status(ok, required=True):
     return "On target" if ok else "Missed"
 
 
-def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, service_rows=None):
+def build_report_rows(outcome_rows, daily_outbound_goal, loads_completed, total_shorts, service_rows=None):
     """
-    Build the expectations-vs-actual comparison rows.
+    Build the daily expectations-vs-actual comparison rows.
     Each row: area, expected, actual, status.
     """
     service_rows = service_rows or []
@@ -749,9 +813,10 @@ def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, sh
 
     service_counts = _opendock_counts(service_rows)
 
-    goal_norm = _norm_na(goal_met)
-    goal_actual = {"Y": "Met", "N": "Not met"}.get(goal_norm, "Not recorded")
-    goal_status = "On target" if goal_norm == "Y" else ("Missed" if goal_norm == "N" else "—")
+    daily_goal = int(daily_outbound_goal or 0)
+    completed = int(loads_completed or 0)
+    goal_required = daily_goal > 0
+    goal_status = _status(completed >= daily_goal, required=goal_required)
 
     if service_counts["total"]:
         service_actual = (
@@ -762,14 +827,14 @@ def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, sh
         )
         service_status = "On target" if service_counts["issues"] == 0 else "Missed"
     else:
-        service_actual = "No OpenDock rows found for this date/shift"
+        service_actual = "No OpenDock rows found for this operating date"
         service_status = "—"
 
     rows = [
         {
-            "area": "Shift Goal",
-            "expected": shift_goal or "Not recorded",
-            "actual": goal_actual,
+            "area": "Daily Outbound Goal",
+            "expected": f"Complete {daily_goal} total outbound load(s) today" if goal_required else "Daily goal not entered",
+            "actual": f"{completed} completed in OpenDock",
             "status": goal_status,
         },
         {
@@ -803,9 +868,9 @@ def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, sh
             "status": _status(int(total_shorts) == 0),
         },
         {
-            "area": "Loads Controlled",
-            "expected": "—",
-            "actual": f"{int(loads_controlled)}",
+            "area": "Loads Completed",
+            "expected": "Pulled from OpenDock Completed status",
+            "actual": f"{completed}",
             "status": "—",
         },
     ]
@@ -824,9 +889,8 @@ def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, sh
 
     return rows, misses
 
-
-def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_rows=None):
-    """Build the End-of-Shift report PDF. Returns bytes, or None."""
+def build_report_pdf(operating_date, report_rows, misses, notes, service_rows=None):
+    """Build the End-of-Day report PDF. Returns bytes, or None."""
     service_rows = service_rows or []
     if not REPORTLAB_AVAILABLE:
         return None
@@ -853,8 +917,8 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
     body = ParagraphStyle("B", parent=base["Normal"], fontSize=9, leading=12)
 
     story = [
-        Paragraph("End-of-Shift Report", title_style),
-        Paragraph(f"{operating_date} &nbsp;|&nbsp; {shift} shift &nbsp;|&nbsp; Expectations vs Actual", sub_style),
+        Paragraph("End-of-Day Report", title_style),
+        Paragraph(f"{operating_date} &nbsp;|&nbsp; Daily closeout &nbsp;|&nbsp; 1st/2nd shift detail included", sub_style),
     ]
 
     # Comparison table
@@ -879,7 +943,6 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]
-    # Color the Result cell per row.
     for i, r in enumerate(report_rows, start=1):
         s = r["status"]
         if s in ("On target", "Met"):
@@ -892,7 +955,7 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
     story.append(table)
 
     # Misses
-    story.append(Paragraph("Misses this shift", h_style))
+    story.append(Paragraph("Misses this day", h_style))
     if misses:
         miss_data = [["Type", "Load", "Customer", "Appt", "Reason"]]
         for m in misses:
@@ -916,13 +979,15 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
         ]))
         story.append(miss_table)
     else:
-        story.append(Paragraph("No misses recorded this shift.", body))
+        story.append(Paragraph("No controllable misses recorded this day.", body))
 
-    # OpenDock service report
-    story.append(Paragraph("OpenDock service-time report", h_style))
-    if service_rows:
+    def _add_service_table(title, rows):
+        story.append(Paragraph(title, h_style))
+        if not rows:
+            story.append(Paragraph("No OpenDock service rows in this section.", body))
+            return
         service_data = [["Load", "Customer/Carrier", "Appt", "Status", "Svc Min", "Result"]]
-        for r in service_rows:
+        for r in rows:
             service_min = "—" if r.get("service_minutes") is None else str(r.get("service_minutes"))
             service_data.append([
                 Paragraph(str(r.get("load", "")), body),
@@ -947,7 +1012,7 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
             ("TOPPADDING", (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ]
-        for i, r in enumerate(service_rows, start=1):
+        for i, r in enumerate(rows, start=1):
             if r.get("result_type") == "target_met":
                 service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#C6EFCE")))
             elif r.get("result_type") in ("delayed", "missing_service_time"):
@@ -958,8 +1023,13 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
                 service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#ECECEC")))
         service_table.setStyle(TableStyle(service_style))
         story.append(service_table)
-    else:
-        story.append(Paragraph("No OpenDock service rows were included.", body))
+
+    # OpenDock service report separated inside the daily report.
+    _add_service_table("OpenDock service-time report — 1st shift", _service_rows_by_shift(service_rows, "1st"))
+    _add_service_table("OpenDock service-time report — 2nd shift", _service_rows_by_shift(service_rows, "2nd"))
+    unassigned_rows = _service_rows_by_shift(service_rows, "Unassigned")
+    if unassigned_rows:
+        _add_service_table("OpenDock service-time report — unassigned appointment times", unassigned_rows)
 
     # Notes
     story.append(Paragraph("Operational notes", h_style))
@@ -968,7 +1038,6 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
-
 
 def render_report_table(report_rows):
     """On-screen version of the comparison table."""
@@ -983,11 +1052,12 @@ def render_report_table(report_rows):
 #  PAGE
 # ============================================================
 
-st.set_page_config(page_title="Shift Closeout", layout="wide")
-st.title("Shift Closeout")
+st.set_page_config(page_title="Daily Closeout", layout="wide")
+st.title("Daily Closeout")
 st.write(
-    "Confirm how today's commitments closed out. OpenDock auto-scores service time "
-    "for all loads, while the supervisor confirms OC shorts and the shift goal."
+    "Upload the raw OpenDock export once for the day. The app auto-scores service "
+    "time for all outbound loads, keeps no-shows/no-departure records as flags, "
+    "and separates 1st/2nd shift details inside the report."
 )
 
 if not shift_log.is_configured():
@@ -1001,63 +1071,48 @@ if not shift_log.is_configured():
     )
     st.stop()
 
-col_a, col_b = st.columns(2)
-operating_date = col_a.date_input("Operating date", value=datetime.date.today())
-shift = col_b.selectbox("Shift", ["1st", "2nd"])
+operating_date = st.date_input("Operating date", value=datetime.date.today())
 operating_date_str = operating_date.strftime("%m/%d/%Y")
 
-try:
-    commitments = shift_log.load_commitments(operating_date_str, shift)
-except Exception as e:
-    st.error(f"Could not load commitments: {e}")
-    st.stop()
-
+commitments, commitment_load_errors = _load_daily_commitments(operating_date_str)
 if not commitments:
-    st.warning(
-        f"No commitments were snapshotted for {operating_date_str} {shift} shift. "
-        "Run the morning staffing report for this day first — it captures the shift "
-        "goal and the OC/CPU commitments that this screen closes out."
+    msg = (
+        f"No OC/CPU commitments were snapshotted for {operating_date_str}. "
+        "Run the morning staffing report for this day first — it captures the OC/CPU "
+        "commitments that this daily closeout uses."
     )
+    if commitment_load_errors:
+        msg += " Load errors: " + " | ".join(commitment_load_errors)
+    st.warning(msg)
     st.stop()
 
-oc_commitments = [
-    c for c in commitments
-    if str(c.get("type")) == "OC" and _in_shift_window(c.get("appt_time"), shift)
-]
-cpu_commitments = [
-    c for c in commitments
-    if str(c.get("type")) == "CPU" and _in_shift_window(c.get("appt_time"), shift)
-]
-shift_goal = shift_log.get_shift_goal(commitments)
+oc_commitments = [c for c in commitments if str(c.get("type")) == "OC"]
+cpu_commitments = [c for c in commitments if str(c.get("type")) == "CPU"]
 
-already_closed = shift_log.outcomes_exist(operating_date_str, shift)
+already_closed = shift_log.outcomes_exist(operating_date_str, DAILY_SHIFT_KEY)
 if already_closed:
     st.warning(
-        "This shift has already been closed out. Submitting again will overwrite "
-        "the earlier record."
+        "This day has already been closed out. Submitting again will overwrite "
+        "the earlier daily record."
     )
 
 st.caption(
     f"Loaded {len(oc_commitments)} OC commitment(s) and {len(cpu_commitments)} "
-    f"CPU commitment(s) from the morning run."
+    f"CPU commitment(s) from the 1st/2nd shift morning snapshots."
 )
-
-if shift_goal:
-    st.info(f"**Shift goal (from this morning):** {shift_goal}")
-else:
-    st.caption("No shift goal was recorded for this day.")
 
 
 # ── OpenDock upload + automatic service report ───────────────────────────────
 st.subheader("OpenDock service report")
 opendock_file = st.file_uploader(
-    "Upload today's OpenDock appointment export",
+    "Upload today's raw OpenDock appointment export",
     type=["xlsx", "xls"],
     key="opendock_file",
     help=(
         "Upload the raw OpenDock export. The app filters to outbound loads, removes "
-        "cancelled appointments, calculates Service Time from Dwell Time and On-Time "
-        "when needed, and scores against the 120-minute service target."
+        "cancelled appointments, removes duplicate load rows by keeping Completed first, "
+        "calculates Service Time from Dwell Time and On-Time when needed, and scores "
+        "against the 120-minute service target."
     ),
 )
 
@@ -1067,11 +1122,15 @@ opendock_upload_error = ""
 if opendock_file is not None:
     try:
         opendock_service_rows, opendock_by_load = build_opendock_service_report(
-            opendock_file, operating_date, shift
+            opendock_file, operating_date
         )
+        first_count = len(_service_rows_by_shift(opendock_service_rows, "1st"))
+        second_count = len(_service_rows_by_shift(opendock_service_rows, "2nd"))
+        completed_count = _completed_outbound_count(opendock_service_rows)
         st.caption(
             f"OpenDock loaded: {len(opendock_service_rows)} outbound load(s) found for "
-            f"{operating_date_str} {shift} shift. Details will appear in the PDF report."
+            f"{operating_date_str}. Completed: {completed_count}. "
+            f"1st shift: {first_count}; 2nd shift: {second_count}. Details will appear in the PDF report."
         )
     except Exception as e:
         opendock_upload_error = str(e)
@@ -1087,34 +1146,36 @@ with st.form("closeout_form"):
     if oc_commitments:
         st.subheader("Opportunity Customer loads — short confirmation")
         st.caption(
-            "OpenDock now auto-scores service time in the background. For OC loads, "
+            "OpenDock auto-scores service time in the background. For OC loads, "
             "the supervisor only confirms whether anything shipped short and why."
         )
         for c in oc_commitments:
             load = str(c.get("load", ""))
             cust = str(c.get("customer", ""))
             appt = str(c.get("appt_time", ""))
+            source_shift = str(c.get("source_shift", ""))
             auto = _commitment_auto_fields(c, opendock_by_load)
 
-            with st.expander(f"OC  •  Load {load}  •  {cust}  •  appt {appt}", expanded=True):
+            label_shift = f"  •  {source_shift}" if source_shift else ""
+            with st.expander(f"OC{label_shift}  •  Load {load}  •  {cust}  •  appt {appt}", expanded=True):
                 if c.get("requirement"):
                     st.caption(f"Requirement: {c.get('requirement')}")
 
                 row = st.columns(2)
-                short = row[0].selectbox("Loaded short?", YES_NO, index=1, key=f"oc_short_{load}")
+                short = row[0].selectbox("Loaded short?", YES_NO, index=1, key=f"oc_short_{load}_{source_shift}")
                 miss_reason_choice = row[1].selectbox(
                     "Short reason / miss reason",
-                    MISS_REASONS, index=0, key=f"oc_miss_{load}",
+                    MISS_REASONS, index=0, key=f"oc_miss_{load}_{source_shift}",
                 )
                 miss_reason_other = ""
                 if miss_reason_choice == "Other (explain)":
-                    miss_reason_other = row[1].text_input("Describe", key=f"oc_miss_other_{load}")
+                    miss_reason_other = row[1].text_input("Describe", key=f"oc_miss_other_{load}_{source_shift}")
                 manual_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
                 miss_reason = _combine_reasons(manual_reason, auto.get("auto_reason"))
 
                 outcome_rows.append({
                     "type": "OC", "load": load, "customer": cust, "appt_time": appt,
-                    "shipped": auto.get("shipped", "No"),
+                    "shipped": auto.get("shipped", "NA"),
                     "on_time": auto.get("on_time", "NA"),
                     # Compatibility: this old field now carries OC Service Target Y/N
                     # into the existing rolling scorecard calculation.
@@ -1134,35 +1195,37 @@ with st.form("closeout_form"):
             auto = _commitment_auto_fields(c, opendock_by_load)
             outcome_rows.append({
                 "type": "CPU", "load": load, "customer": cust, "appt_time": appt,
-                "shipped": auto.get("shipped", "No"),
+                "shipped": auto.get("shipped", "NA"),
                 "on_time": auto.get("on_time", "NA"),
                 "signoff_done": "NA", "photos_done": "NA",
                 "short": "No",
                 "miss_reason": auto.get("auto_reason", ""),
             })
 
-    # ----- Shift goal result -----
-    st.subheader("Shift goal")
-    if shift_goal:
-        st.caption(shift_goal)
-        goal_met = st.selectbox("Did we meet the shift goal?", YES_NO, key="goal_met")
-    else:
-        goal_met = "NA"
-        st.caption("No shift goal was recorded, so there's nothing to mark here.")
+    # ----- Daily goal + totals -----
+    st.subheader("Daily goal and totals")
+    completed_from_opendock = _completed_outbound_count(opendock_service_rows)
+    default_goal = len(opendock_service_rows) if opendock_service_rows else 0
+    g1, g2 = st.columns(2)
+    daily_outbound_goal = g1.number_input(
+        "Total outbound loads today / daily goal",
+        min_value=0,
+        step=1,
+        value=int(default_goal),
+        help="This number becomes the daily outbound goal in the report.",
+    )
+    g2.metric("Completed in OpenDock", completed_from_opendock)
 
-    # ----- Shift totals -----
-    st.subheader("Shift totals")
     s1, s2 = st.columns(2)
-    loads_controlled = s1.number_input("Loads controlled this shift", min_value=0, step=1, value=0)
-    total_shorts = s2.number_input(
-        "Loads shipped short this shift",
+    total_shorts = s1.number_input(
+        "Loads shipped short today",
         min_value=0, step=1, value=0,
-        help="Total number of loads that shipped short across the whole shift, "
+        help="Total number of loads that shipped short across the whole day, "
              "including any OC loads you already marked short above. Count loads, not cases.",
     )
-    notes = st.text_area("Operational notes")
+    notes = s2.text_area("Operational notes")
 
-    submitted = st.form_submit_button("Save Closeout & Build Report")
+    submitted = st.form_submit_button("Save Daily Closeout & Build Report")
 
 
 # ── Handle submission ───────────────────────────────────────────────────────
@@ -1175,8 +1238,8 @@ if submitted:
         st.stop()
     if not opendock_service_rows:
         st.error(
-            "OpenDock loaded, but no outbound loads were found for this operating date and shift. "
-            "Check the Operating date, Shift, and the Appt Date/Appt Time columns in the upload."
+            "OpenDock loaded, but no outbound loads were found for this operating date. "
+            "Check the Operating date and the Appt Date column in the upload."
         )
         st.stop()
 
@@ -1185,29 +1248,35 @@ if submitted:
     )
     if int(total_shorts) < shorts_marked_above:
         st.error(
-            f"You marked {shorts_marked_above} load(s) short above, but entered "
-            f"{int(total_shorts)} for total shorts. The shift total can't be less than "
+            f"You marked {shorts_marked_above} OC load(s) short above, but entered "
+            f"{int(total_shorts)} for total shorts. The daily total can't be less than "
             f"the loads you already marked short. Fix the total (or the per-load answers) "
             f"and submit again."
         )
         st.stop()
 
+    loads_completed = _completed_outbound_count(opendock_service_rows)
+    daily_goal_text = f"Daily outbound goal: complete {int(daily_outbound_goal)} outbound load(s)."
+    goal_met = "Yes" if int(daily_outbound_goal) > 0 and loads_completed >= int(daily_outbound_goal) else "No"
+    if int(daily_outbound_goal) <= 0:
+        goal_met = "NA"
+
     summary = _build_summary(
-        outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, notes,
+        outcome_rows, loads_completed, total_shorts, goal_met, daily_goal_text, notes,
     )
     report_rows, misses = build_report_rows(
-        outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal,
+        outcome_rows, daily_outbound_goal, loads_completed, total_shorts,
         service_rows=opendock_service_rows,
     )
     try:
-        result = shift_log.save_outcomes(operating_date_str, shift, outcome_rows, summary)
+        result = shift_log.save_outcomes(operating_date_str, DAILY_SHIFT_KEY, outcome_rows, summary)
         pdf_bytes = build_report_pdf(
-            operating_date_str, shift, report_rows, misses, notes,
+            operating_date_str, report_rows, misses, notes,
             service_rows=opendock_service_rows,
         )
         st.session_state["closeout_report"] = {
             "date": operating_date_str,
-            "shift": shift,
+            "shift": DAILY_SHIFT_KEY,
             "rows": report_rows,
             "misses": misses,
             "notes": notes,
@@ -1215,23 +1284,22 @@ if submitted:
             "pdf": pdf_bytes,
         }
         st.success(
-            f"Closeout saved — {result['outcomes_written']} commitment outcome(s) "
-            f"recorded for {operating_date_str} {shift} shift."
+            f"Daily closeout saved — {result['outcomes_written']} commitment outcome(s) "
+            f"recorded for {operating_date_str}."
         )
     except Exception as e:
-        st.error(f"Could not save closeout: {e}")
+        st.error(f"Could not save daily closeout: {e}")
 
 
-
-# ── End-of-Shift report (persists across reruns via session_state) ──────────
+# ── End-of-Day report (persists across reruns via session_state) ─────────────
 report = st.session_state.get("closeout_report")
-if report and report["date"] == operating_date_str and report["shift"] == shift:
+if report and report["date"] == operating_date_str and report["shift"] == DAILY_SHIFT_KEY:
     st.markdown("---")
-    st.subheader("End-of-Shift Report — Expectations vs Actual")
+    st.subheader("End-of-Day Report — Expectations vs Actual")
     render_report_table(report["rows"])
 
     if report["misses"]:
-        st.markdown("**Misses this shift**")
+        st.markdown("**Controllable misses this day**")
         st.dataframe(
             pd.DataFrame([
                 {
@@ -1245,7 +1313,7 @@ if report and report["date"] == operating_date_str and report["shift"] == shift:
         )
 
     if report.get("service_rows"):
-        with st.expander("OpenDock service-time report included in report", expanded=False):
+        with st.expander("OpenDock service-time report — 1st shift", expanded=False):
             st.dataframe(
                 pd.DataFrame([
                     {
@@ -1256,16 +1324,31 @@ if report and report["date"] == operating_date_str and report["shift"] == shift:
                         "Service Min": r.get("service_minutes"),
                         "Result": r.get("service_result"),
                     }
-                    for r in report.get("service_rows", [])
+                    for r in _service_rows_by_shift(report.get("service_rows", []), "1st")
+                ]),
+                use_container_width=True,
+            )
+        with st.expander("OpenDock service-time report — 2nd shift", expanded=False):
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Load": r.get("load"),
+                        "Customer/Carrier": r.get("customer"),
+                        "Appt": r.get("appt_time"),
+                        "Status": r.get("status"),
+                        "Service Min": r.get("service_minutes"),
+                        "Result": r.get("service_result"),
+                    }
+                    for r in _service_rows_by_shift(report.get("service_rows", []), "2nd")
                 ]),
                 use_container_width=True,
             )
 
     if report.get("pdf"):
         st.download_button(
-            "Download End-of-Shift Report (PDF)",
+            "Download End-of-Day Report (PDF)",
             data=report["pdf"],
-            file_name=f"End_of_Shift_{operating_date_str.replace('/', '-')}_{shift}.pdf",
+            file_name=f"End_of_Day_{operating_date_str.replace('/', '-')}.pdf",
             mime="application/pdf",
         )
     elif not REPORTLAB_AVAILABLE:
@@ -1283,13 +1366,13 @@ except Exception as e:
     score = None
 
 if score:
-    st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 7 days.")
+    st.caption(f"Based on {score['shifts_logged']} daily closeout(s) in the last 7 days.")
     m1, m2, m3, m4 = st.columns(4)
 
     current_report_oc_service = None
     current_report_oc_shorts = None
     current_report = st.session_state.get("closeout_report")
-    if current_report and current_report.get("date") == operating_date_str and current_report.get("shift") == shift:
+    if current_report and current_report.get("date") == operating_date_str and current_report.get("shift") == DAILY_SHIFT_KEY:
         current_report_oc_service = _score_block_from_report_rows(
             current_report.get("rows", []), "OC Service Target"
         )
@@ -1313,4 +1396,4 @@ if score:
         m2.caption("No data yet.")
 
     _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
-    _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
+    _metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
