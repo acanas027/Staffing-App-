@@ -4978,7 +4978,7 @@ def run_full_generation(
 
         write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
 
-        # --- Snapshot today's commitments + daily goal for closeout ---
+        # --- Snapshot today's commitments + daily goal for closeout --- 
 try:
     import shift_log
 
@@ -5012,7 +5012,6 @@ try:
         operating_date, shift, oc_load_matches, cpu_commitments,
         shift_goal=shift_goal_for_snapshot,
     )
-
 except Exception as e:
     st.warning(f"Commitment snapshot skipped: {e}")
        
