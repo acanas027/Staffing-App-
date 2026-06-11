@@ -718,7 +718,7 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
     return {
         "loads_completed": loads_completed,
         "total_shorts": total_shorts,
-        "goal_met": _norm_na(goal_met),
+        "goal_met": goal_met,
         "shift_goal": shift_goal,
         "actual_cutoff": "",
         "oc_total": len(oc),
@@ -902,10 +902,14 @@ def build_report_rows(outcome_rows, daily_outbound_goal, loads_completed, total_
 
     service_counts = _opendock_counts(service_rows)
 
-    daily_goal = int(daily_outbound_goal or 0)
+    # Daily goal = completed / achievable (planned minus no-show/cancelled), capped 100%.
+    uncontrollable = service_counts["no_show"] + service_counts["cancelled"]
+    planned_goal = int(daily_outbound_goal or 0)
+    achievable_goal = max(0, planned_goal - uncontrollable)
     completed = int(loads_completed or 0)
-    goal_required = daily_goal > 0
-    goal_status = _status(completed >= daily_goal, required=goal_required)
+    goal_required = achievable_goal > 0
+    goal_pct = min(100, round(100 * completed / achievable_goal)) if goal_required else None
+    goal_status = _status(completed >= achievable_goal, required=goal_required)
 
     if service_counts["total"]:
         service_actual = (
@@ -921,9 +925,16 @@ def build_report_rows(outcome_rows, daily_outbound_goal, loads_completed, total_
 
     rows = [
         {
-            "area": "Daily Outbound Goal",
-            "expected": f"Complete {daily_goal} total outbound load(s) today" if goal_required else "Daily goal not entered",
-            "actual": f"{completed} completed in OpenDock",
+            "area": "Daily Goal",
+            "expected": (
+                f"{achievable_goal} achievable ({planned_goal} planned - "
+                f"{uncontrollable} no-show/cancelled)"
+                if goal_required else "Daily goal not entered"
+            ),
+            "actual": (
+                f"{completed} completed = {goal_pct}%" if goal_pct is not None
+                else f"{completed} completed"
+            ),
             "status": goal_status,
         },
         {
@@ -1362,10 +1373,27 @@ if submitted:
         st.stop()
 
     loads_completed = _completed_outbound_count(opendock_service_rows)
-    daily_goal_text = f"Daily outbound goal: complete {int(daily_outbound_goal)} outbound load(s)."
-    goal_met = "Yes" if int(daily_outbound_goal) > 0 and loads_completed >= int(daily_outbound_goal) else "No"
-    if int(daily_outbound_goal) <= 0:
-        goal_met = "NA"
+
+    # Daily Goal KPI = completed / achievable, capped at 100%.
+    # Achievable = planned input minus loads that were impossible to complete
+    # (driver no-show / cancelled appointment), so those never drag the score down.
+    counts = _opendock_counts(opendock_service_rows)
+    uncontrollable = counts["no_show"] + counts["cancelled"]
+    planned_goal = int(daily_outbound_goal)
+    achievable_goal = max(0, planned_goal - uncontrollable)
+
+    if planned_goal <= 0 or achievable_goal <= 0:
+        daily_goal_pct = None
+        goal_met = "NA"   # no real goal, or every planned load was uncontrollable
+    else:
+        daily_goal_pct = min(100, round(100 * loads_completed / achievable_goal))
+        goal_met = str(daily_goal_pct)   # stored as a percent number, not Y/N
+
+    daily_goal_text = (
+        f"Daily goal: {loads_completed} completed of {achievable_goal} achievable "
+        f"({planned_goal} planned - {uncontrollable} no-show/cancelled) = "
+        f"{daily_goal_pct if daily_goal_pct is not None else 'NA'}%."
+    )
 
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, daily_goal_text, notes,
