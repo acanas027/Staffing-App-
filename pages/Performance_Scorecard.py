@@ -1,10 +1,12 @@
 """
 4_Performance_Scorecard.py
 ==========================
-Weekly or monthly view of how well we met our goals, from the same persistent log
-the shift closeout writes to. Pick Week or Month, see headline percentages, the
-top reasons loads missed requirements, the per-shift breakdown, and every miss.
-A one-page PDF is available to hand to the DC manager.
+Daily, weekly, or monthly view of how well we met our goals, from the same
+persistent log the shift closeout writes to. Pick Day / Week / Month and a date,
+see the same KPIs the closeout uses (OC Service Target, OC Shorts Target,
+CPU Service Target, Daily Goal Met), the top reasons loads missed requirements,
+the per-shift breakdown, and every miss. A one-page PDF of the selected period
+is available to hand to the DC manager.
 """
 
 import datetime
@@ -46,6 +48,33 @@ def _metric(column, label, block, met_key, total_key):
         column.caption(f"{met} of {total}")
 
 
+def _oc_shorts_block(score):
+    """
+    OC Shorts Target, computed the same way the closeout's rolling scorecard does it:
+    scorable OC loads (the OC Service Target denominator) minus OC loads flagged short,
+    over scorable OC loads. Returns a {rate, met, total} block.
+    """
+    oc_service = score.get("oc_signoff") or {}
+    total = oc_service.get("required", oc_service.get("total", 0)) or 0
+    try:
+        total = int(total)
+    except Exception:
+        total = 0
+    if total <= 0:
+        return {"rate": None, "met": 0, "total": 0}
+
+    shorts = 0
+    for row in score.get("misses", []):
+        if str(row.get("type", "")).strip().upper() != "OC":
+            continue
+        if str(row.get("short", "")).strip().upper() in ("Y", "YES"):
+            shorts += 1
+
+    met = max(total - shorts, 0)
+    rate = round(100 * met / total)
+    return {"rate": rate, "met": met, "total": total}
+
+
 def _recent_month_options(count=12):
     today = datetime.date.today()
     out = []
@@ -69,7 +98,7 @@ def rank_top_miss_reasons(misses, top_n=3):
 
 
 def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
-    """One-page scorecard PDF for any period. Returns bytes, or None."""
+    """One-page scorecard PDF for any period (day/week/month). Returns bytes, or None."""
     if not REPORTLAB_AVAILABLE:
         return None
 
@@ -96,7 +125,7 @@ def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
 
     story = [
         Paragraph("Performance Scorecard", title_style),
-        Paragraph(f"{period_label} &nbsp;|&nbsp; {score['shifts_logged']} shift(s) closed out", sub_style),
+        Paragraph(f"{period_label} &nbsp;|&nbsp; {score['shifts_logged']} closeout(s) recorded", sub_style),
     ]
 
     def _cell(block, met_key, total_key):
@@ -105,12 +134,14 @@ def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
             return "No data"
         return f"{rate}%  ({block.get(met_key, 0)} of {block.get(total_key, 0)})"
 
+    oc_shorts = _oc_shorts_block(score)
+
     goal_data = [
         ["Goal Area", "This Period"],
-        ["OC Sign-Off Compliance", _cell(score["oc_signoff"], "met", "required")],
-        ["OC Photo Compliance", _cell(score["oc_photos"], "met", "required")],
-        ["CPU On-Time", _cell(score["cpu_on_time"], "met", "total")],
-        ["Shift Goal Met", _cell(score["shift_goal"], "met", "total")],
+        ["OC Service Target (<= 120 min)", _cell(score["oc_signoff"], "met", "required")],
+        ["OC Shorts Target (0 short)", _cell(oc_shorts, "met", "total")],
+        ["CPU Service Target (<= 120 min)", _cell(score["cpu_on_time"], "met", "total")],
+        ["Daily Goal Met", _cell(score["shift_goal"], "met", "total")],
         ["Loads Completed (total)", str(score["loads_completed_total"])],
         ["Shorts (total)", str(score["shorts_total"])],
     ]
@@ -193,8 +224,10 @@ def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
 st.set_page_config(page_title="Performance Scorecard", layout="wide")
 st.title("Performance Scorecard")
 st.write(
-    "How much of our goals we've met. Pick a week or a month. This updates "
-    "automatically every time a shift is closed out."
+    "How much of our goals we've met. Pick a day, a week, or a month. This updates "
+    "automatically every time a shift is closed out, and uses the same KPIs as the "
+    "daily closeout: OC Service Target, OC Shorts Target, CPU Service Target, and "
+    "Daily Goal Met."
 )
 
 if not shift_log.is_configured():
@@ -208,9 +241,19 @@ if not shift_log.is_configured():
     )
     st.stop()
 
-period = st.radio("Period", ["This week", "Month"], horizontal=True)
+period = st.radio("Period", ["Day", "Week", "Month"], horizontal=True)
 
-if period == "This week":
+if period == "Day":
+    day = st.date_input("Operating date", value=datetime.date.today())
+    try:
+        score = shift_log.get_daily_scorecard(day)
+    except Exception as e:
+        st.error(f"Could not load the daily scorecard: {e}")
+        st.stop()
+    period_label = score["date"]
+    file_tag = f"Daily_{score['date'].replace('/', '-')}"
+
+elif period == "Week":
     end = st.date_input("Week ending", value=datetime.date.today())
     try:
         score = shift_log.get_weekly_scorecard(end)
@@ -219,6 +262,7 @@ if period == "This week":
         st.stop()
     period_label = f"{score['start']} – {score['end']}"
     file_tag = f"Weekly_{score['end'].replace('/', '-')}"
+
 else:
     options = _recent_month_options(12)
     labels = [o[2] for o in options]
@@ -233,21 +277,22 @@ else:
     file_tag = f"Monthly_{year}-{month:02d}"
 
 if score["shifts_logged"] == 0:
-    st.warning(f"No shifts have been closed out for {period_label} yet.")
+    st.warning(f"No closeouts have been recorded for {period_label} yet.")
     st.stop()
 
-st.caption(f"Based on {score['shifts_logged']} shift(s) closed out — {period_label}.")
+st.caption(f"Based on {score['shifts_logged']} closeout(s) — {period_label}.")
 
-# Headline goal metrics
+# Headline KPIs — matched to the daily closeout's Rolling Scorecard.
+oc_shorts_block = _oc_shorts_block(score)
 m1, m2, m3, m4 = st.columns(4)
-_metric(m1, "OC Sign-Off", score["oc_signoff"], "met", "required")
-_metric(m2, "OC Photos", score["oc_photos"], "met", "required")
-_metric(m3, "CPU On-Time", score["cpu_on_time"], "met", "total")
-_metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
+_metric(m1, "OC Service Target", score["oc_signoff"], "met", "required")
+_metric(m2, "OC Shorts Target", oc_shorts_block, "met", "total")
+_metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
+_metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
 
 # Period totals
 t1, t2, t3 = st.columns(3)
-t1.metric("Shifts closed out", score["shifts_logged"])
+t1.metric("Closeouts recorded", score["shifts_logged"])
 t2.metric("Loads completed (total)", score["loads_completed_total"])
 t3.metric("Shorts (total)", score["shorts_total"])
 
@@ -266,7 +311,7 @@ else:
 
 # Per-shift breakdown
 st.markdown("---")
-st.subheader("Shift-by-shift")
+st.subheader("Closeout-by-closeout")
 if score["per_shift"]:
     st.dataframe(
         pd.DataFrame([
@@ -276,9 +321,9 @@ if score["per_shift"]:
                 "Goal met": r.get("goal_met"),
                 "Loads done": r.get("loads_completed"),
                 "Shorts": r.get("total_shorts"),
-                "OC sign-off met": r.get("oc_signoff_met"),
-                "OC photos met": r.get("oc_photos_met"),
-                "CPU on time": f"{r.get('cpu_on_time')}/{r.get('cpu_total')}",
+                "OC service met": r.get("oc_signoff_met"),
+                "OC loads": r.get("oc_total"),
+                "CPU service": f"{r.get('cpu_on_time')}/{r.get('cpu_total')}",
                 "Notes": r.get("notes"),
             }
             for r in score["per_shift"]
@@ -287,7 +332,7 @@ if score["per_shift"]:
         height=320,
     )
 else:
-    st.caption("No per-shift summary rows for this period.")
+    st.caption("No per-closeout summary rows for this period.")
 
 # Full miss list
 st.markdown("---")
@@ -299,8 +344,8 @@ if score["misses"]:
                 "Date": m.get("date"), "Shift": m.get("shift"),
                 "Type": m.get("type"), "Load": m.get("load"),
                 "Customer": m.get("customer"), "Appt": m.get("appt_time"),
-                "On time": m.get("on_time"), "Sign-off": m.get("signoff_done"),
-                "Photos": m.get("photos_done"), "Short": m.get("short"),
+                "On time": m.get("on_time"), "OC service": m.get("signoff_done"),
+                "Short": m.get("short"),
                 "Reason": m.get("miss_reason"),
             }
             for m in score["misses"]
@@ -311,12 +356,12 @@ if score["misses"]:
 else:
     st.success("No misses recorded this period.")
 
-# Download
+# Download the scorecard for the selected period
 st.markdown("---")
 pdf_bytes = build_scorecard_pdf(score, period_label, top_reasons, total_miss_events)
 if pdf_bytes:
     st.download_button(
-        "Download Scorecard (PDF)",
+        f"Download {period} Scorecard (PDF)",
         data=pdf_bytes,
         file_name=f"Performance_Scorecard_{file_tag}.pdf",
         mime="application/pdf",
