@@ -4980,46 +4980,46 @@ def run_full_generation(
 
       write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
 
-    # --- Snapshot today's commitments + daily goal for closeout ---
-    try:
-        import shift_log
+# --- Snapshot today's commitments + daily goal for closeout ---
+try:
+    import shift_log
 
-        operating_date = datetime.date.today().strftime("%m/%d/%Y")
+    operating_date = datetime.date.today().strftime("%m/%d/%Y")
 
-        # "Total Outbound Loads for the Day" input
-        daily_outbound_goal = int(total_outbound_loads_day or 0)
+    # "Total Outbound Loads for the Day" input
+    daily_outbound_goal = int(total_outbound_loads_day or 0)
 
-        cpu_commitments = []
-        for r in rows_for_selected_day(board_rows_for_alerts, day):
-            if "CPU" in str(r.get("type", "")).upper():
-                cpu_commitments.append({
-                    "load": r.get("load") or r.get("load_number", ""),
-                    "customer": r.get("customer", ""),
-                    "appt_time": r.get("time") or r.get("appt_time", ""),
-                    "morning_status": r.get("status", ""),
-                    "daily_outbound_goal": daily_outbound_goal,
-                })
+    cpu_commitments = []
+    for r in rows_for_selected_day(board_rows_for_alerts, day):
+        if "CPU" in str(r.get("type", "")).upper():
+            cpu_commitments.append({
+                "load": r.get("load") or r.get("load_number", ""),
+                "customer": r.get("customer", ""),
+                "appt_time": r.get("time") or r.get("appt_time", ""),
+                "morning_status": r.get("status", ""),
+                "daily_outbound_goal": daily_outbound_goal,
+            })
 
-        # Add daily goal to OC commitments too
-        for c in oc_load_matches:
-            c["daily_outbound_goal"] = daily_outbound_goal
+    # Add daily goal to OC commitments too
+    for c in oc_load_matches:
+        c["daily_outbound_goal"] = daily_outbound_goal
 
-        shift_goal_for_snapshot = (
-            python_shift_goal_preview.get("goal", "")
-            if python_shift_goal_preview else ""
-        )
+    shift_goal_for_snapshot = (
+        python_shift_goal_preview.get("goal", "")
+        if python_shift_goal_preview else ""
+    )
 
-        shift_log.snapshot_commitments(
-            operating_date, shift, oc_load_matches, cpu_commitments,
-            shift_goal=shift_goal_for_snapshot,
-        )
-    except Exception as e:
-        st.warning(f"Commitment snapshot skipped: {e}")
+    shift_log.snapshot_commitments(
+        operating_date, shift, oc_load_matches, cpu_commitments,
+        shift_goal=shift_goal_for_snapshot,
+    )
+except Exception as e:
+    st.warning(f"Commitment snapshot skipped: {e}")
 
-        executive_summary_text = None
-        
-    else:
-        board_text = ""
+    executive_summary_text = None
+    
+else:
+    board_text = ""
 
     build_dashboard(
         wb, summary_table, present_recommendations, recommendations,
