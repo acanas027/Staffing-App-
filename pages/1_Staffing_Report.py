@@ -2675,13 +2675,13 @@ def appointment_controlled_by_allocation(
         1 for r in selected_rows if status_is_rtl(r.get("status"))
     )
     already_controlled = sum(
-        1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
-    )
-    excluded_from_new_control = sum(
-        1 for r in selected_rows
-        if (not status_is_controlled_appointment(r.get("status"))
-            and status_is_excluded_from_new_control(r.get("status")))
-    )
+    1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
+)
+excluded_from_new_control = sum(
+    1 for r in selected_rows
+    if (not status_is_controlled_appointment(r.get("status"))
+        and status_is_excluded_from_new_control(r.get("status")))
+)
 
     remaining_candidate_loads = max(
         0,
