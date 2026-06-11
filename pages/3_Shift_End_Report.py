@@ -7,9 +7,10 @@ It loads the commitments + shift goal snapshotted during the morning run, asks t
 supervisor to confirm what actually happened, writes the result to the persistent
 log, and produces a one-page End-of-Shift report comparing expectations vs actual.
 
-The supervisor uploads the OpenDock export. The app auto-scores service time for
-all outbound loads in the uploaded file, then asks only for the human confirmations
-still needed: OC shorts/reasons, shift goal, totals, and notes.
+The supervisor uploads the raw OpenDock export. The app filters to outbound loads,
+removes cancelled appointments, calculates service time when the export does not
+already include it, and then asks only for the human confirmations still needed:
+OC shorts/reasons, shift goal, totals, and notes.
 """
 
 import datetime
@@ -197,6 +198,32 @@ def _service_minutes(value):
     return int(round(float(num)))
 
 
+def _raw_opendock_service_minutes(dwell_time, on_time):
+    """
+    Calculate the Service Time column from a raw OpenDock export.
+
+    Your worked file used this Excel logic:
+        If On-Time (mins) is negative: Dwell Time - ABS(On-Time)
+        Otherwise: Dwell Time
+        If that result is negative: use 0
+
+    Examples:
+        Dwell 112 and On-Time -74 -> 38
+        Dwell 122 and On-Time 22 -> 122
+    """
+    dwell = _service_minutes(dwell_time)
+    if dwell is None:
+        return None
+
+    on_time_min = _service_minutes(on_time)
+    if on_time_min is not None and on_time_min < 0:
+        service_min = dwell - abs(on_time_min)
+    else:
+        service_min = dwell
+
+    return max(int(round(service_min)), 0)
+
+
 def _score_opendock_service(status, arrival_date, arrival_time, departure_date, departure_time, service_time):
     """Apply the end-of-shift service-time rules to one OpenDock row."""
     status_text = _clean_text(status)
@@ -276,6 +303,13 @@ def build_opendock_service_report(uploaded_file, operating_date, shift):
         "departure_date": _find_col(df, ["Departure Date"]),
         "departure_time": _find_col(df, ["Departure Time"]),
         "service_time": _find_col(df, ["Service Time", "Service Time (mins)", "Service Time mins"]),
+        # Raw OpenDock exports do not include Service Time. They include Dwell Time
+        # and On-Time, which we use below to calculate the Service Time column.
+        "dwell_time": _find_col(df, [
+            "Dwell Time (mins)", "Dwell Time",
+            "Total Time  here(mins)", "Total Time here(mins)", "Total Time Here (mins)",
+        ]),
+        "on_time": _find_col(df, ["On-Time (mins)", "On Time (mins)", "Ontime (mins)"]),
         "load_reference": _find_col(df, ["Load Reference", "Load Ref", "Load"]),
         "carrier": _find_col(df, ["Carrier Company", "Carrier", "Customer"]),
         "load_type": _find_col(df, ["Load Type"]),
@@ -283,22 +317,46 @@ def build_opendock_service_report(uploaded_file, operating_date, shift):
         "dock": _find_col(df, ["Dock"]),
     }
 
+    work = df.copy()
+
+    # Raw OpenDock exports do not have a Service Time column. Build it in memory so
+    # the rest of the existing report logic can continue using cols["service_time"].
+    # This lets the supervisor upload the raw OpenDock export directly.
+    if not cols.get("service_time") and cols.get("dwell_time"):
+        work["_service_time_auto"] = work.apply(
+            lambda row: _raw_opendock_service_minutes(
+                row.get(cols["dwell_time"]),
+                row.get(cols["on_time"]) if cols.get("on_time") else None,
+            ),
+            axis=1,
+        )
+        cols["service_time"] = "_service_time_auto"
+
     required = ["appt_date", "appt_time", "status", "arrival_date", "arrival_time",
                 "departure_date", "departure_time", "service_time", "load_reference"]
     missing = [name for name in required if not cols.get(name)]
     if missing:
+        extra_hint = ""
+        if "service_time" in missing:
+            extra_hint = (
+                " Raw OpenDock files need either a Service Time column or both "
+                "Dwell Time (mins) and On-Time (mins) so Service Time can be calculated."
+            )
         raise ValueError(
-            "OpenDock upload is missing required column(s): " + ", ".join(missing)
+            "OpenDock upload is missing required column(s): " + ", ".join(missing) + extra_hint
         )
 
-    work = df.copy()
     work["_appt_date_parsed"] = pd.to_datetime(work[cols["appt_date"]], errors="coerce").dt.date
     work["_appt_time_text"] = work[cols["appt_time"]].apply(_fmt_opendock_time)
     work["_load_norm"] = work[cols["load_reference"]].apply(_norm_load_id)
 
-    # End-of-shift report is outbound-focused. Remove this filter if you later want inbound reported too.
+    # End-of-shift report is outbound-focused. Raw OpenDock uploads may include inbound rows.
     if cols.get("direction"):
         work = work[work[cols["direction"]].astype(str).str.strip().str.upper().eq("OUTBOUND")]
+
+    # Raw OpenDock uploads may include cancelled appointments. Remove them before scoring
+    # so they do not show as flags or misses in the closeout report.
+    work = work[~work[cols["status"]].astype(str).str.strip().str.upper().eq("CANCELLED")]
 
     work = work[work["_appt_date_parsed"].eq(operating_date)]
     work = work[work["_appt_time_text"].apply(lambda x: _in_shift_window(x, shift))]
@@ -949,7 +1007,11 @@ opendock_file = st.file_uploader(
     "Upload today's OpenDock appointment export",
     type=["xlsx", "xls"],
     key="opendock_file",
-    help="The report will automatically score every outbound load in this file against the 120-minute service target.",
+    help=(
+        "Upload the raw OpenDock export. The app filters to outbound loads, removes "
+        "cancelled appointments, calculates Service Time from Dwell Time and On-Time "
+        "when needed, and scores against the 120-minute service target."
+    ),
 )
 
 opendock_service_rows = []
@@ -968,7 +1030,7 @@ if opendock_file is not None:
         opendock_upload_error = str(e)
         st.error(f"Could not read OpenDock upload: {e}")
 else:
-    st.info("Upload OpenDock before saving closeout so service time is reported automatically.")
+    st.info("Upload the raw OpenDock export before saving closeout so service time is calculated and reported automatically.")
 
 
 # ── The closeout form ───────────────────────────────────────────────────────
