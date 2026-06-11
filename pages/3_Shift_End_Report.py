@@ -250,7 +250,7 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
         "result_type": "delayed",
         "service_minutes": service_min,
         "delay_minutes": delay,
-        "service_result": f"Delayed service by {delay} minutes over {SERVICE_TARGET_MINUTES}",
+        "service_result": f"Delayed service by {delay} minutes",
     }
 
 
