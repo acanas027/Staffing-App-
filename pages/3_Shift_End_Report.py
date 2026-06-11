@@ -449,10 +449,10 @@ def _commitment_auto_fields(commitment, service_by_load):
     if rt == "missing_service_time":
         return {"shipped": "Yes", "on_time": "N", "auto_reason": service.get("service_result", "")}
     if rt in ("no_show", "no_departure", "cancelled"):
-        # These are flags, not misses. They stay visible in the report, but they
-        # are excluded from service-target scoring because the load was not a
-        # completed, controllable service-time event.
-        return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "")}
+        # These are flags, not misses. Use shipped = NA instead of No so the
+        # rolling scorecard/miss logic does not treat a customer no-show or
+        # no-departure record as a failed shipped load.
+        return {"shipped": "NA", "on_time": "NA", "auto_reason": service.get("service_result", "")}
     return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "Review OpenDock status")}
 
 
@@ -1227,16 +1227,16 @@ if report and report["date"] == operating_date_str and report["shift"] == shift:
 
 # ── Rolling scorecard ───────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("Rolling 30-Day Scorecard")
+st.subheader("Rolling 7-Day Scorecard")
 
 try:
-    score = shift_log.get_recent_scorecard(days=30)
+    score = shift_log.get_recent_scorecard(days=7)
 except Exception as e:
     st.error(f"Could not load scorecard: {e}")
     score = None
 
 if score:
-    st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 30 days.")
+    st.caption(f"Based on {score['shifts_logged']} shift(s) closed out in the last 7 days.")
     m1, m2, m3, m4 = st.columns(4)
 
     current_report_oc_service = None
@@ -1267,22 +1267,3 @@ if score:
 
     _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
-
-    if score["misses"]:
-        st.markdown("**Itemized misses (last 30 days)**")
-        st.dataframe(
-            pd.DataFrame([
-                {
-                    "Date": r.get("date"), "Shift": r.get("shift"),
-                    "Type": r.get("type"), "Load": r.get("load"),
-                    "Customer": r.get("customer"), "Appt": r.get("appt_time"),
-                    "Service target": r.get("on_time"),
-                    "Short": r.get("short"),
-                    "Reason": r.get("miss_reason"),
-                }
-                for r in score["misses"]
-            ]),
-            use_container_width=True, height=300,
-        )
-    else:
-        st.success("No misses recorded in the last 30 days.")
