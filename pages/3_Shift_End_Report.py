@@ -250,13 +250,13 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
         "result_type": "delayed",
         "service_minutes": service_min,
         "delay_minutes": delay,
-        "service_result": f"Delayed service by {delay} minutes over {SERVICE_TARGET_MINUTES}",
+        "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES} min)",
     }
 
 
-def build_opendock_service_audit(uploaded_file, operating_date, shift):
+def build_opendock_service_report(uploaded_file, operating_date, shift):
     """
-    Read the uploaded OpenDock Excel export and build service-time audit rows for all
+    Read the uploaded OpenDock Excel export and build service-time report rows for all
     outbound loads on the selected operating date and shift.
     Returns: (service_rows, service_by_load)
     """
@@ -296,7 +296,7 @@ def build_opendock_service_audit(uploaded_file, operating_date, shift):
     work["_appt_time_text"] = work[cols["appt_time"]].apply(_fmt_opendock_time)
     work["_load_norm"] = work[cols["load_reference"]].apply(_norm_load_id)
 
-    # End-of-shift report is outbound-focused. Remove this filter if you later want inbound audited too.
+    # End-of-shift report is outbound-focused. Remove this filter if you later want inbound reported too.
     if cols.get("direction"):
         work = work[work[cols["direction"]].astype(str).str.strip().str.upper().eq("OUTBOUND")]
 
@@ -343,7 +343,7 @@ def build_opendock_service_audit(uploaded_file, operating_date, shift):
 
 
 def _opendock_counts(service_rows):
-    """Summarize OpenDock service audit rows for report scoring."""
+    """Summarize OpenDock service report rows for report scoring."""
     counts = {
         "total": len(service_rows),
         "target_met": 0,
@@ -730,8 +730,8 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_
     else:
         story.append(Paragraph("No misses recorded this shift.", body))
 
-    # OpenDock service audit
-    story.append(Paragraph("OpenDock service-time audit", h_style))
+    # OpenDock service report
+    story.append(Paragraph("OpenDock service-time report", h_style))
     if service_rows:
         service_data = [["Load", "Customer/Carrier", "Appt", "Status", "Svc Min", "Result"]]
         for r in service_rows:
@@ -858,8 +858,8 @@ else:
     st.caption("No shift goal was recorded for this day.")
 
 
-# ── OpenDock upload + automatic service audit ───────────────────────────────
-st.subheader("OpenDock service audit")
+# ── OpenDock upload + automatic service report ───────────────────────────────
+st.subheader("OpenDock service report")
 opendock_file = st.file_uploader(
     "Upload today's OpenDock appointment export",
     type=["xlsx", "xls"],
@@ -872,7 +872,7 @@ opendock_by_load = {}
 opendock_upload_error = ""
 if opendock_file is not None:
     try:
-        opendock_service_rows, opendock_by_load = build_opendock_service_audit(
+        opendock_service_rows, opendock_by_load = build_opendock_service_report(
             opendock_file, operating_date, shift
         )
         st.caption(
@@ -883,7 +883,7 @@ if opendock_file is not None:
         opendock_upload_error = str(e)
         st.error(f"Could not read OpenDock upload: {e}")
 else:
-    st.info("Upload OpenDock before saving closeout so service time is audited automatically.")
+    st.info("Upload OpenDock before saving closeout so service time is reported automatically.")
 
 
 # ── The closeout form ───────────────────────────────────────────────────────
@@ -1051,7 +1051,7 @@ if report and report["date"] == operating_date_str and report["shift"] == shift:
         )
 
     if report.get("service_rows"):
-        with st.expander("OpenDock service-time audit included in report", expanded=False):
+        with st.expander("OpenDock service-time report included in report", expanded=False):
             st.dataframe(
                 pd.DataFrame([
                     {
