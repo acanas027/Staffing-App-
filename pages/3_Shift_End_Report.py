@@ -803,7 +803,7 @@ def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, sh
             "status": _status(int(total_shorts) == 0),
         },
         {
-            "area": "Loads Completed",
+            "area": "Loads Controlled",
             "expected": "—",
             "actual": f"{int(loads_controlled)}",
             "status": "—",
