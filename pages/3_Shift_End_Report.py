@@ -551,7 +551,7 @@ def _cutoff_variance(shift_goal, actual_cutoff):
             "delta_min": delta, "direction": direction, "message": message}
 
 
-def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
+def _build_summary(outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, notes,
                    actual_cutoff=""):
     """Roll per-commitment outcomes into the one-row shift summary."""
     oc = [o for o in outcome_rows if o.get("type") == "OC"]
@@ -563,7 +563,7 @@ def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_
     oc_shorts_met = max(oc_service_total - oc_shorts_count, 0)
 
     return {
-        "loads_completed": loads_completed,
+        "loads_controlled": loads_controlled,
         "total_shorts": total_shorts,
         "goal_met": _norm_na(goal_met),
         "shift_goal": shift_goal,
@@ -728,7 +728,7 @@ def _status(ok, required=True):
     return "On target" if ok else "Missed"
 
 
-def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, service_rows=None):
+def build_report_rows(outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, service_rows=None):
     """
     Build the expectations-vs-actual comparison rows.
     Each row: area, expected, actual, status.
@@ -805,7 +805,7 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
         {
             "area": "Loads Completed",
             "expected": "—",
-            "actual": f"{int(loads_completed)}",
+            "actual": f"{int(loads_controlled)}",
             "status": "—",
         },
     ]
@@ -1153,7 +1153,7 @@ with st.form("closeout_form"):
     # ----- Shift totals -----
     st.subheader("Shift totals")
     s1, s2 = st.columns(2)
-    loads_completed = s1.number_input("Loads completed this shift", min_value=0, step=1, value=0)
+    loads_controlled = s1.number_input("Loads completed this shift", min_value=0, step=1, value=0)
     total_shorts = s2.number_input(
         "Loads shipped short this shift",
         min_value=0, step=1, value=0,
@@ -1193,10 +1193,10 @@ if submitted:
         st.stop()
 
     summary = _build_summary(
-        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
+        outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal, notes,
     )
     report_rows, misses = build_report_rows(
-        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal,
+        outcome_rows, loads_controlled, total_shorts, goal_met, shift_goal,
         service_rows=opendock_service_rows,
     )
     try:
