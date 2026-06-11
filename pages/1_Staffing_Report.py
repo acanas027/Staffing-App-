@@ -2438,7 +2438,7 @@ def status_is_controlled_appointment(status):
     but it should stay counted as controlled for cutoff/pacing so it does not consume new pick/stage capacity.
     """
     status_upper = str(status or "").strip().upper()
-    return status_is_completed_or_loaded(status) or status_is_rtl(status) or status_upper in {"R/S", "READY/SHORT"}
+    return status_is_completed_or_loaded(status) or status_is_rtl(status) or status_upper in {"R/S", "READY/SHORT" ,  "Loaded Short"}
 
 
 def status_is_excluded_from_new_control(status):
