@@ -7,12 +7,14 @@ It loads the commitments + shift goal snapshotted during the morning run, asks t
 supervisor to confirm what actually happened, writes the result to the persistent
 log, and produces a one-page End-of-Shift report comparing expectations vs actual.
 
-The supervisor uploads nothing. The only inputs are confirmations (mostly taps) of
-the soft facts a spreadsheet can't see, plus loads completed, shorts, and notes.
+The supervisor uploads the OpenDock export. The app auto-scores service time for
+all outbound loads in the uploaded file, then asks only for the human confirmations
+still needed: OC shorts/reasons, shift goal, totals, and notes.
 """
 
 import datetime
 import io
+import re
 
 import pandas as pd
 import streamlit as st
@@ -35,6 +37,7 @@ except Exception:
 
 
 YES_NO = ["Yes", "No"]
+SERVICE_TARGET_MINUTES = 120
 
 # Standardized miss/late reasons. "Other" reveals a free-text box so nothing is lost,
 # but every common cause is now countable across shifts.
@@ -104,6 +107,293 @@ def _fmt_minutes(mins):
     """Minutes since midnight -> 'HH:MM'."""
     mins = int(mins) % (24 * 60)
     return f"{mins // 60:02d}:{mins % 60:02d}"
+
+
+# ============================================================
+#  OPENDOCK HELPERS
+# ============================================================
+
+def _clean_text(value):
+    """Return a safe display string for uploaded spreadsheet values."""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _norm_header(value):
+    """Normalize spreadsheet headers so minor spacing/punctuation changes do not break the upload."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _find_col(df, candidates):
+    """Find the first matching column from a list of possible OpenDock column names."""
+    lookup = {_norm_header(c): c for c in df.columns}
+    for candidate in candidates:
+        key = _norm_header(candidate)
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
+def _norm_load_id(value):
+    """
+    Normalize load references for matching.
+    Examples: 173760 -> 173760, LD174921 -> 174921.
+    """
+    text = _clean_text(value).upper()
+    if not text:
+        return ""
+    digits = re.findall(r"\d+", text)
+    return digits[-1] if digits else text
+
+
+def _fmt_opendock_time(value):
+    """Normalize OpenDock appointment times to HH:MM when possible."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%H:%M")
+    if isinstance(value, datetime.time):
+        return value.strftime("%H:%M")
+    if isinstance(value, (int, float)) and 0 <= float(value) < 1:
+        mins = int(round(float(value) * 24 * 60))
+        return _fmt_minutes(mins)
+    text = str(value).strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})", text)
+    if m:
+        return f"{int(m.group(1)):02d}:{m.group(2)}"
+    return text
+
+
+def _opendock_blank_datetime(value):
+    """
+    Detect blank date/time cells from OpenDock.
+    Some exports/templates show placeholder 45 in blank date/time fields, so date/time
+    checks treat 45 as blank. Service Time does NOT use this helper because 45 minutes
+    is a valid service time.
+    """
+    text = _clean_text(value)
+    return text == "" or text.lower() in ("nan", "nat", "none", "null") or text == "45"
+
+
+def _service_minutes(value):
+    """Convert OpenDock Service Time to an integer number of minutes."""
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    num = pd.to_numeric(value, errors="coerce")
+    if pd.isna(num):
+        return None
+    return int(round(float(num)))
+
+
+def _score_opendock_service(status, arrival_date, arrival_time, departure_date, departure_time, service_time):
+    """Apply the end-of-shift service-time rules to one OpenDock row."""
+    status_text = _clean_text(status)
+    status_key = status_text.lower().replace(" ", "")
+    arrived = not (_opendock_blank_datetime(arrival_date) and _opendock_blank_datetime(arrival_time))
+    departed = not (_opendock_blank_datetime(departure_date) and _opendock_blank_datetime(departure_time))
+    service_min = _service_minutes(service_time)
+
+    if status_key in ("scheduled", "noshow", "no-show"):
+        return {
+            "result_type": "no_show",
+            "service_minutes": service_min,
+            "delay_minutes": None,
+            "service_result": "Customer no-show",
+        }
+
+    if status_key == "cancelled":
+        return {
+            "result_type": "cancelled",
+            "service_minutes": service_min,
+            "delay_minutes": None,
+            "service_result": "Cancelled appointment",
+        }
+
+    if arrived and not departed:
+        return {
+            "result_type": "no_departure",
+            "service_minutes": service_min,
+            "delay_minutes": None,
+            "service_result": "No departure recorded",
+        }
+
+    if service_min is None:
+        return {
+            "result_type": "missing_service_time",
+            "service_minutes": None,
+            "delay_minutes": None,
+            "service_result": "Service time not recorded",
+        }
+
+    if service_min <= SERVICE_TARGET_MINUTES:
+        return {
+            "result_type": "target_met",
+            "service_minutes": service_min,
+            "delay_minutes": 0,
+            "service_result": "Service time target met",
+        }
+
+    delay = service_min - SERVICE_TARGET_MINUTES
+    return {
+        "result_type": "delayed",
+        "service_minutes": service_min,
+        "delay_minutes": delay,
+        "service_result": f"Delayed service by {delay} minutes over {SERVICE_TARGET_MINUTES}",
+    }
+
+
+def build_opendock_service_audit(uploaded_file, operating_date, shift):
+    """
+    Read the uploaded OpenDock Excel export and build service-time audit rows for all
+    outbound loads on the selected operating date and shift.
+    Returns: (service_rows, service_by_load)
+    """
+    if uploaded_file is None:
+        return [], {}
+
+    uploaded_file.seek(0)
+    df = pd.read_excel(uploaded_file)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    cols = {
+        "appt_date": _find_col(df, ["Appt Date", "Appointment Date"]),
+        "appt_time": _find_col(df, ["Appt Time", "Appointment Time"]),
+        "status": _find_col(df, ["Status"]),
+        "arrival_date": _find_col(df, ["Arrival Date"]),
+        "arrival_time": _find_col(df, ["Arrival Time"]),
+        "departure_date": _find_col(df, ["Departure Date"]),
+        "departure_time": _find_col(df, ["Departure Time"]),
+        "service_time": _find_col(df, ["Service Time", "Service Time (mins)", "Service Time mins"]),
+        "load_reference": _find_col(df, ["Load Reference", "Load Ref", "Load"]),
+        "carrier": _find_col(df, ["Carrier Company", "Carrier", "Customer"]),
+        "load_type": _find_col(df, ["Load Type"]),
+        "direction": _find_col(df, ["Direction"]),
+        "dock": _find_col(df, ["Dock"]),
+    }
+
+    required = ["appt_date", "appt_time", "status", "arrival_date", "arrival_time",
+                "departure_date", "departure_time", "service_time", "load_reference"]
+    missing = [name for name in required if not cols.get(name)]
+    if missing:
+        raise ValueError(
+            "OpenDock upload is missing required column(s): " + ", ".join(missing)
+        )
+
+    work = df.copy()
+    work["_appt_date_parsed"] = pd.to_datetime(work[cols["appt_date"]], errors="coerce").dt.date
+    work["_appt_time_text"] = work[cols["appt_time"]].apply(_fmt_opendock_time)
+    work["_load_norm"] = work[cols["load_reference"]].apply(_norm_load_id)
+
+    # End-of-shift report is outbound-focused. Remove this filter if you later want inbound audited too.
+    if cols.get("direction"):
+        work = work[work[cols["direction"]].astype(str).str.strip().str.upper().eq("OUTBOUND")]
+
+    work = work[work["_appt_date_parsed"].eq(operating_date)]
+    work = work[work["_appt_time_text"].apply(lambda x: _in_shift_window(x, shift))]
+
+    service_rows = []
+    for _, row in work.iterrows():
+        score = _score_opendock_service(
+            row.get(cols["status"]),
+            row.get(cols["arrival_date"]), row.get(cols["arrival_time"]),
+            row.get(cols["departure_date"]), row.get(cols["departure_time"]),
+            row.get(cols["service_time"]),
+        )
+        load = _clean_text(row.get(cols["load_reference"]))
+        appt = _fmt_opendock_time(row.get(cols["appt_time"]))
+        service_rows.append({
+            "load": load,
+            "load_norm": _norm_load_id(load),
+            "customer": _clean_text(row.get(cols["carrier"])) if cols.get("carrier") else "",
+            "appt_date": operating_date.strftime("%m/%d/%Y"),
+            "appt_time": appt,
+            "status": _clean_text(row.get(cols["status"])),
+            "service_minutes": score["service_minutes"],
+            "delay_minutes": score["delay_minutes"],
+            "service_result": score["service_result"],
+            "result_type": score["result_type"],
+            "load_type": _clean_text(row.get(cols["load_type"])) if cols.get("load_type") else "",
+            "dock": _clean_text(row.get(cols["dock"])) if cols.get("dock") else "",
+        })
+
+    service_by_load = {}
+    for r in service_rows:
+        exact_key = _clean_text(r.get("load", "")).upper()
+        norm_key = r.get("load_norm")
+        if exact_key:
+            service_by_load[exact_key] = r
+        if norm_key and norm_key not in service_by_load:
+            # Only use the digit-only fallback when there is not an exact text match.
+            # This prevents LD173153 from overwriting a different 173153 appointment.
+            service_by_load[norm_key] = r
+
+    return service_rows, service_by_load
+
+
+def _opendock_counts(service_rows):
+    """Summarize OpenDock service audit rows for report scoring."""
+    counts = {
+        "total": len(service_rows),
+        "target_met": 0,
+        "delayed": 0,
+        "no_show": 0,
+        "no_departure": 0,
+        "missing_service_time": 0,
+        "cancelled": 0,
+    }
+    for r in service_rows:
+        rt = r.get("result_type")
+        if rt in counts:
+            counts[rt] += 1
+    counts["issues"] = (
+        counts["delayed"] + counts["no_show"] +
+        counts["no_departure"] + counts["missing_service_time"]
+    )
+    return counts
+
+
+def _commitment_auto_fields(commitment, service_by_load):
+    """
+    Convert OpenDock service result into the existing outcome fields used by shift_log.
+    This lets the old scorecard keep working while the supervisor no longer manually
+    answers shipped/on-time for every load.
+    """
+    raw_key = _clean_text(commitment.get("load", "")).upper()
+    norm_key = _norm_load_id(commitment.get("load", ""))
+    service = service_by_load.get(raw_key) or service_by_load.get(norm_key)
+    if not service:
+        return {
+            "shipped": "No",
+            "on_time": "NA",
+            "auto_reason": "Not found in OpenDock upload",
+        }
+
+    rt = service.get("result_type")
+    if rt == "target_met":
+        return {"shipped": "Yes", "on_time": "Y", "auto_reason": ""}
+    if rt == "delayed":
+        return {"shipped": "Yes", "on_time": "N", "auto_reason": service.get("service_result", "")}
+    if rt in ("no_show", "no_departure", "missing_service_time", "cancelled"):
+        return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "")}
+    return {"shipped": "No", "on_time": "NA", "auto_reason": service.get("service_result", "Review OpenDock status")}
+
+
+def _combine_reasons(*parts):
+    """Join non-empty reason strings without losing either manual or OpenDock context."""
+    clean = [str(p).strip() for p in parts if str(p or "").strip()]
+    return " | ".join(dict.fromkeys(clean))
 
 
 def _goal_predicted_cutoff(shift_goal):
@@ -189,26 +479,37 @@ def _status(ok, required=True):
     return "On target" if ok else "Missed"
 
 
-def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal):
+def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, service_rows=None):
     """
     Build the expectations-vs-actual comparison rows.
     Each row: area, expected, actual, status.
     """
+    service_rows = service_rows or []
     oc = [o for o in outcome_rows if o.get("type") == "OC"]
     cpu = [o for o in outcome_rows if o.get("type") == "CPU"]
 
-    oc_signoff_req = sum(1 for o in oc if o.get("signoff_done") in ("Y", "N"))
-    oc_signoff_met = sum(1 for o in oc if o.get("signoff_done") == "Y")
-    oc_photos_req = sum(1 for o in oc if o.get("photos_done") in ("Y", "N"))
-    oc_photos_met = sum(1 for o in oc if o.get("photos_done") == "Y")
     oc_total = len(oc)
-    oc_on_time = sum(1 for o in oc if o.get("on_time") == "Y")
+    oc_shorts = sum(1 for o in oc if str(o.get("short")).strip().upper() in ("Y", "YES"))
     cpu_total = len(cpu)
     cpu_on_time = sum(1 for o in cpu if o.get("on_time") == "Y")
+
+    service_counts = _opendock_counts(service_rows)
 
     goal_norm = _norm_na(goal_met)
     goal_actual = {"Y": "Met", "N": "Not met"}.get(goal_norm, "Not recorded")
     goal_status = "On target" if goal_norm == "Y" else ("Missed" if goal_norm == "N" else "—")
+
+    if service_counts["total"]:
+        service_actual = (
+            f"{service_counts['target_met']} met / {service_counts['total']} load(s); "
+            f"{service_counts['delayed']} delayed; "
+            f"{service_counts['no_show']} no-show; "
+            f"{service_counts['no_departure']} no departure"
+        )
+        service_status = "On target" if service_counts["issues"] == 0 else "Missed"
+    else:
+        service_actual = "No OpenDock rows found for this date/shift"
+        service_status = "—"
 
     rows = [
         {
@@ -218,27 +519,21 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
             "status": goal_status,
         },
         {
-            "area": "OC Sign-Off",
-            "expected": f"{oc_signoff_req} required" if oc_signoff_req else "None required",
-            "actual": f"{oc_signoff_met} collected",
-            "status": _status(oc_signoff_met >= oc_signoff_req, required=oc_signoff_req > 0),
+            "area": "OpenDock Service Time",
+            "expected": f"Target <= {SERVICE_TARGET_MINUTES} min for all outbound loads",
+            "actual": service_actual,
+            "status": service_status,
         },
         {
-            "area": "OC Photos",
-            "expected": f"{oc_photos_req} required" if oc_photos_req else "None required",
-            "actual": f"{oc_photos_met} taken",
-            "status": _status(oc_photos_met >= oc_photos_req, required=oc_photos_req > 0),
+            "area": "OC Shorts",
+            "expected": f"0 short across {oc_total} OC load(s)" if oc_total else "No OC loads",
+            "actual": f"{oc_shorts} short",
+            "status": _status(oc_shorts == 0, required=oc_total > 0),
         },
         {
-            "area": "OC On-Time",
-            "expected": f"{oc_total} load(s)" if oc_total else "No OC loads",
-            "actual": f"{oc_on_time} on time",
-            "status": _status(oc_on_time >= oc_total, required=oc_total > 0),
-        },
-        {
-            "area": "CPU On-Time",
-            "expected": f"{cpu_total} appt(s)" if cpu_total else "No CPUs",
-            "actual": f"{cpu_on_time} on time",
+            "area": "CPU Service Target",
+            "expected": f"{cpu_total} CPU appointment(s) auto-scored from OpenDock" if cpu_total else "No CPUs",
+            "actual": f"{cpu_on_time} met service target",
             "status": _status(cpu_on_time >= cpu_total, required=cpu_total > 0),
         },
         {
@@ -269,8 +564,9 @@ def build_report_rows(outcome_rows, loads_completed, total_shorts, goal_met, shi
     return rows, misses
 
 
-def build_report_pdf(operating_date, shift, report_rows, misses, notes):
-    """Build the one-page End-of-Shift report PDF. Returns bytes, or None."""
+def build_report_pdf(operating_date, shift, report_rows, misses, notes, service_rows=None):
+    """Build the End-of-Shift report PDF. Returns bytes, or None."""
+    service_rows = service_rows or []
     if not REPORTLAB_AVAILABLE:
         return None
 
@@ -361,6 +657,47 @@ def build_report_pdf(operating_date, shift, report_rows, misses, notes):
     else:
         story.append(Paragraph("No misses recorded this shift.", body))
 
+    # OpenDock service audit
+    story.append(Paragraph("OpenDock service-time audit", h_style))
+    if service_rows:
+        service_data = [["Load", "Customer/Carrier", "Appt", "Status", "Svc Min", "Result"]]
+        for r in service_rows:
+            service_min = "—" if r.get("service_minutes") is None else str(r.get("service_minutes"))
+            service_data.append([
+                Paragraph(str(r.get("load", "")), body),
+                Paragraph(str(r.get("customer", "")), body),
+                Paragraph(str(r.get("appt_time", "")), body),
+                Paragraph(str(r.get("status", "")), body),
+                Paragraph(service_min, body),
+                Paragraph(str(r.get("service_result", "")), body),
+            ])
+        service_table = Table(
+            service_data,
+            colWidths=[0.8 * inch, 1.7 * inch, 0.65 * inch, 0.8 * inch, 0.6 * inch, 2.55 * inch],
+            repeatRows=1,
+        )
+        service_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F5B78")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#B7B7B7")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]
+        for i, r in enumerate(service_rows, start=1):
+            if r.get("result_type") == "target_met":
+                service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#C6EFCE")))
+            elif r.get("result_type") in ("delayed", "no_show", "no_departure", "missing_service_time"):
+                service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#FFC7CE")))
+            else:
+                service_style.append(("BACKGROUND", (5, i), (5, i), colors.HexColor("#ECECEC")))
+        service_table.setStyle(TableStyle(service_style))
+        story.append(service_table)
+    else:
+        story.append(Paragraph("No OpenDock service rows were included.", body))
+
     # Notes
     story.append(Paragraph("Operational notes", h_style))
     story.append(Paragraph(str(notes).strip() or "—", body))
@@ -448,95 +785,94 @@ else:
     st.caption("No shift goal was recorded for this day.")
 
 
+# ── OpenDock upload + automatic service audit ───────────────────────────────
+st.subheader("OpenDock service audit")
+opendock_file = st.file_uploader(
+    "Upload today's OpenDock appointment export",
+    type=["xlsx", "xls"],
+    key="opendock_file",
+    help="The report will automatically score every outbound load in this file against the 120-minute service target.",
+)
+
+opendock_service_rows = []
+opendock_by_load = {}
+opendock_upload_error = ""
+if opendock_file is not None:
+    try:
+        opendock_service_rows, opendock_by_load = build_opendock_service_audit(
+            opendock_file, operating_date, shift
+        )
+        st.caption(
+            f"OpenDock loaded: {len(opendock_service_rows)} outbound load(s) found for "
+            f"{operating_date_str} {shift} shift. Details will appear in the PDF report."
+        )
+    except Exception as e:
+        opendock_upload_error = str(e)
+        st.error(f"Could not read OpenDock upload: {e}")
+else:
+    st.info("Upload OpenDock before saving closeout so service time is audited automatically.")
+
+
 # ── The closeout form ───────────────────────────────────────────────────────
 with st.form("closeout_form"):
     outcome_rows = []
 
     if oc_commitments:
-        st.subheader("Opportunity Customer loads")
+        st.subheader("Opportunity Customer loads — short confirmation")
+        st.caption(
+            "OpenDock now auto-scores service time in the background. For OC loads, "
+            "the supervisor only confirms whether anything shipped short and why."
+        )
         for c in oc_commitments:
             load = str(c.get("load", ""))
             cust = str(c.get("customer", ""))
             appt = str(c.get("appt_time", ""))
-            signoff_required = str(c.get("signoff_required")).upper() == "Y"
-            photos_required = str(c.get("photos_required")).upper() == "Y"
+            auto = _commitment_auto_fields(c, opendock_by_load)
 
             with st.expander(f"OC  •  Load {load}  •  {cust}  •  appt {appt}", expanded=True):
                 if c.get("requirement"):
                     st.caption(f"Requirement: {c.get('requirement')}")
 
-                row1 = st.columns(2)
-                shipped = row1[0].selectbox("Shipped?", YES_NO, key=f"oc_ship_{load}")
-                on_time = row1[1].selectbox(
-                    "On time vs appointment?", YES_NO, key=f"oc_ot_{load}",
-                    help="Did it leave by its appointment time?",
-                )
-
-                row2 = st.columns(2)
-                if signoff_required:
-                    signoff_done = row2[0].selectbox(
-                        "Supervisor sign-off collected?", YES_NO, key=f"oc_sign_{load}"
-                    )
-                else:
-                    signoff_done = "NA"
-                    row2[0].caption("Sign-off not required.")
-
-                if photos_required:
-                    photos_done = row2[1].selectbox(
-                        "Photos taken (3 dock + 3 loading)?", YES_NO, key=f"oc_pho_{load}"
-                    )
-                else:
-                    photos_done = "NA"
-                    row2[1].caption("Photos not required.")
-
-                row3 = st.columns(2)
-                short = row3[0].selectbox("Loaded short?", YES_NO, index=1, key=f"oc_short_{load}")
-                miss_reason_choice = row3[1].selectbox(
-                    "Miss reason (if something went wrong)",
+                row = st.columns(2)
+                short = row[0].selectbox("Loaded short?", YES_NO, index=1, key=f"oc_short_{load}")
+                miss_reason_choice = row[1].selectbox(
+                    "Short reason / miss reason",
                     MISS_REASONS, index=0, key=f"oc_miss_{load}",
                 )
                 miss_reason_other = ""
                 if miss_reason_choice == "Other (explain)":
-                    miss_reason_other = row3[1].text_input("Describe", key=f"oc_miss_other_{load}")
-                miss_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
+                    miss_reason_other = row[1].text_input("Describe", key=f"oc_miss_other_{load}")
+                manual_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
+                miss_reason = _combine_reasons(manual_reason, auto.get("auto_reason"))
 
                 outcome_rows.append({
                     "type": "OC", "load": load, "customer": cust, "appt_time": appt,
-                    "shipped": shipped,
-                    "on_time": _yn_or_na(shipped, on_time),
-                    "signoff_done": _norm_na(signoff_done),
-                    "photos_done": _norm_na(photos_done),
-                    "short": short, "miss_reason": miss_reason,
+                    "shipped": auto.get("shipped", "No"),
+                    "on_time": auto.get("on_time", "NA"),
+                    "signoff_done": "NA",
+                    "photos_done": "NA",
+                    "short": short,
+                    "miss_reason": miss_reason,
                 })
 
     if cpu_commitments:
         st.subheader("CPU appointments")
+        st.caption(
+            "CPU service outcomes are auto-scored from OpenDock. No manual CPU closeout is needed here."
+        )
         for c in cpu_commitments:
             load = str(c.get("load", ""))
             cust = str(c.get("customer", ""))
             appt = str(c.get("appt_time", ""))
-
-            with st.expander(f"CPU  •  Load {load}  •  {cust}  •  appt {appt}", expanded=True):
-                row1 = st.columns(2)
-                shipped = row1[0].selectbox("Shipped?", YES_NO, key=f"cpu_ship_{load}")
-                on_time = row1[1].selectbox("Customer left on time?", YES_NO, key=f"cpu_ot_{load}")
-                row2 = st.columns(2)
-                short = row2[0].selectbox("Loaded short?", YES_NO, index=1, key=f"cpu_short_{load}")
-                miss_reason_choice = row2[1].selectbox(
-                    "Miss reason", MISS_REASONS, index=0, key=f"cpu_miss_{load}",
-                )
-                miss_reason_other = ""
-                if miss_reason_choice == "Other (explain)":
-                    miss_reason_other = row2[1].text_input("Describe", key=f"cpu_miss_other_{load}")
-                miss_reason = _resolve_miss_reason(miss_reason_choice, miss_reason_other)
-
-                outcome_rows.append({
-                    "type": "CPU", "load": load, "customer": cust, "appt_time": appt,
-                    "shipped": shipped,
-                    "on_time": _yn_or_na(shipped, on_time),
-                    "signoff_done": "NA", "photos_done": "NA",
-                    "short": short, "miss_reason": miss_reason,
-                })
+            auto = _commitment_auto_fields(c, opendock_by_load)
+            outcome_rows.append({
+                "type": "CPU", "load": load, "customer": cust, "appt_time": appt,
+                "shipped": auto.get("shipped", "No"),
+                "on_time": auto.get("on_time", "NA"),
+                "signoff_done": "NA", "photos_done": "NA",
+                "short": "No",
+                "miss_reason": auto.get("auto_reason", ""),
+            })
 
     # ----- Shift goal result -----
     st.subheader("Shift goal")
@@ -557,7 +893,7 @@ with st.form("closeout_form"):
         goal_met = "NA"
         st.caption("No shift goal was recorded, so there's nothing to mark here.")
 
-    # ----- Shift totals (OT removed) -----
+    # ----- Shift totals -----
     st.subheader("Shift totals")
     s1, s2 = st.columns(2)
     loads_completed = s1.number_input("Loads completed this shift", min_value=0, step=1, value=0)
@@ -565,7 +901,7 @@ with st.form("closeout_form"):
         "Loads shipped short this shift",
         min_value=0, step=1, value=0,
         help="Total number of loads that shipped short across the whole shift, "
-             "including any OC/CPU loads you already marked short above. Count loads, not cases.",
+             "including any OC loads you already marked short above. Count loads, not cases.",
     )
     notes = st.text_area("Operational notes")
 
@@ -574,6 +910,19 @@ with st.form("closeout_form"):
 
 # ── Handle submission ───────────────────────────────────────────────────────
 if submitted:
+    if opendock_file is None:
+        st.error("Upload the OpenDock appointment export before saving closeout.")
+        st.stop()
+    if opendock_upload_error:
+        st.error(f"Fix the OpenDock upload before saving closeout: {opendock_upload_error}")
+        st.stop()
+    if not opendock_service_rows:
+        st.error(
+            "OpenDock loaded, but no outbound loads were found for this operating date and shift. "
+            "Check the Operating date, Shift, and the Appt Date/Appt Time columns in the upload."
+        )
+        st.stop()
+
     shorts_marked_above = sum(
         1 for o in outcome_rows if str(o.get("short")).strip().upper() in ("Y", "YES")
     )
@@ -605,17 +954,22 @@ if submitted:
         actual_cutoff=actual_cutoff,
     )
     report_rows, misses = build_report_rows(
-        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal
+        outcome_rows, loads_completed, total_shorts, goal_met, shift_goal,
+        service_rows=opendock_service_rows,
     )
     try:
         result = shift_log.save_outcomes(operating_date_str, shift, outcome_rows, summary)
-        pdf_bytes = build_report_pdf(operating_date_str, shift, report_rows, misses, notes)
+        pdf_bytes = build_report_pdf(
+            operating_date_str, shift, report_rows, misses, notes,
+            service_rows=opendock_service_rows,
+        )
         st.session_state["closeout_report"] = {
             "date": operating_date_str,
             "shift": shift,
             "rows": report_rows,
             "misses": misses,
             "notes": notes,
+            "service_rows": opendock_service_rows,
             "pdf": pdf_bytes,
         }
         st.success(
@@ -656,6 +1010,23 @@ if report and report["date"] == operating_date_str and report["shift"] == shift:
             use_container_width=True,
         )
 
+    if report.get("service_rows"):
+        with st.expander("OpenDock service-time audit included in report", expanded=False):
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Load": r.get("load"),
+                        "Customer/Carrier": r.get("customer"),
+                        "Appt": r.get("appt_time"),
+                        "Status": r.get("status"),
+                        "Service Min": r.get("service_minutes"),
+                        "Result": r.get("service_result"),
+                    }
+                    for r in report.get("service_rows", [])
+                ]),
+                use_container_width=True,
+            )
+
     if report.get("pdf"):
         st.download_button(
             "Download End-of-Shift Report (PDF)",
@@ -682,7 +1053,7 @@ if score:
     m1, m2, m3, m4 = st.columns(4)
     _metric(m1, "OC Sign-Off", score["oc_signoff"], "met", "required")
     _metric(m2, "OC Photos", score["oc_photos"], "met", "required")
-    _metric(m3, "CPU On-Time", score["cpu_on_time"], "met", "total")
+    _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m4, "Shift Goal Met", score["shift_goal"], "met", "total")
 
     if score["misses"]:
