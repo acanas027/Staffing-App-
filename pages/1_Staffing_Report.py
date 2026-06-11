@@ -2118,7 +2118,7 @@ def slim_summary_for_ai(board_summary):
 def slim_pacing_for_ai(selected_day_pacing):
     """Drop the row-list arrays from pacing — they duplicate the actionable table.
     Keep all counts and the pacing verdict."""
-    drop_keys = {"due_not_done_loads_first_10", "future_done_loads_first_10"}
+    drop_keys = {"due_not_RTL_loads_first_10", "future_done_loads_first_10"}
     return {k: v for k, v in (selected_day_pacing or {}).items() if k not in drop_keys}
 
 
@@ -2319,7 +2319,7 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
     due_by_now = 0
     due_done = 0
     future_done = 0
-    due_not_done_rows = []
+    due_not_RTL_rows = []
     future_done_rows = []
 
     for row in selected_rows:
@@ -2357,17 +2357,17 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
                 if controlled_for_pacing:
                     due_done += 1
                 else:
-                    due_not_done_rows.append(slim_row)
+                    due_not_RTL_rows.append(slim_row)
             elif controlled_for_pacing:
                 future_done += 1
                 future_done_rows.append(slim_row)
 
-    due_not_done = max(0, due_by_now - due_done)
+    due_not_RTL = max(0, due_by_now - due_done)
     actionable_or_not_done = max(0, len(selected_rows) - done_count)
 
-    if due_not_done > 0:
+    if due_not_RTL > 0:
         pacing = "BEHIND"
-        reason = f"{due_not_done} selected-day load(s) due by now are still picking/pulling."
+        reason = f"{due_not_RTL} selected-day load(s) due by now are still picking/pulling."
     elif future_done > 0:
         pacing = "AHEAD"
         reason = f"{future_done} future selected-day load(s) are already done."
@@ -2386,11 +2386,11 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
         "actionable_or_not_done_count": actionable_or_not_done,
         "due_by_now": due_by_now,
         "due_done": due_done,
-        "due_not_done": due_not_done,
+        "due_not_RTL": due_not_RTL,
         "future_done": future_done,
         "pacing": pacing,
         "reason": reason,
-        "due_not_done_loads_first_10": due_not_done_rows[:10],
+        "due_not_RTL_loads_first_10": due_not_RTL_rows[:10],
         "future_done_loads_first_10": future_done_rows[:10],
     }
 
@@ -3195,7 +3195,7 @@ def analyze_board_with_groq(
         f"ActionableOrNotDone:{selected_day_pacing.get('actionable_or_not_done_count',0)}\n"
         f"DueByNow:{selected_day_pacing.get('due_by_now',0)}  "
         f"DueDone:{selected_day_pacing.get('due_done',0)}  "
-        f"DueNotDone:{selected_day_pacing.get('due_not_done',0)}  "
+        f"DueNotDone:{selected_day_pacing.get('due_not_RTL',0)}  "
         f"FutureDone:{selected_day_pacing.get('future_done',0)}  "
         f"Pacing:{selected_day_pacing.get('pacing','UNKNOWN')}  "
         f"CurrentTimeEstimate:{selected_day_pacing.get('estimated_current_time','unknown')}\n"
@@ -3453,7 +3453,7 @@ def build_executive_summary_with_groq(
         f"Picking/Short: {py_out.get('picking_short_loads', 0)}; Picking: {py_out.get('picking_loads', 0)}; "
         f"Blank/Not started: {py_out.get('blank_or_not_started_loads', 0)}; "
         f"Pacing: {pacing.get('pacing', 'not provided')}; "
-        f"Due by now: {pacing.get('due_by_now', 0)}; Due not done: {pacing.get('due_not_done', 0)}; "
+        f"Due by now: {pacing.get('due_by_now', 0)}; Due not done: {pacing.get('due_not_RTL', 0)}; "
         f"Estimated current time: {pacing.get('estimated_current_time', 'not provided')}"
     )
 
@@ -3926,7 +3926,7 @@ def build_email_draft(
         f"Loads: {pacing.get('selected_day_total_loads', 0)} today | "
         f"Completed {pacing.get('completed_count', 0)} | "
         f"Due now {pacing.get('due_by_now', 0)} | "
-        f"Due not done {pacing.get('due_not_done', 0)} | "
+        f"Due not done {pacing.get('due_not_RTL', 0)} | "
         f"Pacing {pacing.get('pacing', 'n/a')}."
     )
     lines.append(f"Picks left {picks_left:,} | Pulls left {pulls_left:,} | Hours left {hours_remaining}.")
@@ -4029,11 +4029,11 @@ def pdf_status_color(health):
 def derive_shift_health(summary_table, pacing, py_out):
     """Simple transparent health rule for the PDF headline."""
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
-    due_not_done = pdf_number(pacing.get("due_not_done", 0)) if pacing else 0
+    due_not_RTL = pdf_number(pacing.get("due_not_RTL", 0)) if pacing else 0
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
 
-    if due_not_done > 3 or net_gap <= -3:
+    if due_not_RTL > 3 or net_gap <= -3:
         return "RED"
     if net_gap < 2 or picking_short > 1 or str(pacing.get("pacing", "")).upper() == "BEHIND":
         return "YELLOW"
@@ -4339,12 +4339,12 @@ def build_pdf_board_summary_rows(selected_rows):
 def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, crossdock_matches, tt4_matches):
     """First-page service risk level based on actual allocation gaps and selected-day board risk."""
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
-    due_not_done = pdf_number(pacing.get("due_not_done", 0)) if pacing else 0
+    due_not_RTL = pdf_number(pacing.get("due_not_RTL", 0)) if pacing else 0
     picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     alert_count = len(oc_load_matches or []) + len(crossdock_matches or []) + len(tt4_matches or [])
 
-    if due_not_done > 2 or loaded_short > 0 or net_gap <= -3:
+    if due_not_RTL > 2 or loaded_short > 0 or net_gap <= -3:
         return "HIGH", "Past-due/short exposure or a major actual staffing gap is present."
     if picking_short > 2 or net_gap < 0 or alert_count > 0:
         return "MEDIUM", "Execution is controllable, but staffing gaps or customer/load alerts require follow-up."
@@ -4542,7 +4542,7 @@ def build_pdf_report(
     fact_rows = [
         ["Selected-day loads", pacing.get("selected_day_total_loads", "not provided"), "Pacing", pacing.get("pacing", "not provided")],
         ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
-        ["Due by now", pacing.get("due_by_now", 0), "Due now not RTL", pacing.get("due_not_done", 0)],
+        ["Due by now", pacing.get("due_by_now", 0), "Due now not RTL", pacing.get("due_not_RTL", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
         ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
         ["Tasking staffing", _staffing_fact("Tasking"), "Tasking/pull capacity", f"{tasking_pull_capacity:,.0f} pallets"],
