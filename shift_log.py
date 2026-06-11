@@ -149,7 +149,7 @@ def make_snapshot_id(operating_date, shift):
 #  WRITE: MORNING COMMITMENT SNAPSHOT
 # ============================================================
 
-def snapshot_commitments(operating_date, shift, oc_load_matches, cpu_commitments, shift_goal=""):
+def snapshot_commitments(operating_date, shift, oc_load_matches, cpu_commitments, shift_goal="",  total_loads_for_day=""):
     """
     Persist today's commitments and the shift goal. Idempotent per (date, shift):
     re-running the morning report replaces the prior snapshot.
@@ -171,7 +171,7 @@ def snapshot_commitments(operating_date, shift, oc_load_matches, cpu_commitments
     # Shift goal stored as a single GOAL row (goal text lives in the requirement column).
     rows.append([
         snapshot_id, operating_date, shift, "GOAL",
-        "", "", "", "", str(shift_goal or ""), "", "", "", now,
+        "", "", "", "", str(shift_goal or ""), "", "", str(total_loads_for_day or ""), now,
     ])
 
     for m in oc_load_matches or []:
@@ -232,6 +232,17 @@ def get_shift_goal(commitments):
             return str(c.get("requirement", ""))
     return ""
 
+def get_total_loads_for_day(commitments):
+    """Pull the day's total outbound-loads input out of a loaded commitment list.
+    Stored on the GOAL row's morning_status column by snapshot_commitments()."""
+    for c in commitments or []:
+        if str(c.get("type")) == "GOAL":
+            value = c.get("morning_status")
+            try:
+                return int(float(str(value).strip()))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 def outcomes_exist(operating_date, shift):
     """True if this shift has already been closed out (used to warn on re-submit)."""
