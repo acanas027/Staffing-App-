@@ -1294,7 +1294,14 @@ with st.form("closeout_form"):
     # ----- Daily goal + totals -----
     st.subheader("Daily goal and totals")
     completed_from_opendock = _completed_outbound_count(opendock_service_rows)
-    staffing_daily_goal, staffing_goal_source = _daily_goal_from_staffing_report(commitments)
+     # Prefer the supervisor's "Total Outbound Loads for the Day" input, stored by the
+    # morning report on the GOAL row. Fall back to the older heuristic scan for
+    # snapshots taken before that value was being saved.
+    staffing_daily_goal = shift_log.get_total_loads_for_day(commitments)
+    if staffing_daily_goal is not None:
+        staffing_goal_source = "morning report input (Total Outbound Loads for the Day)"
+    else:
+        staffing_daily_goal, staffing_goal_source = _daily_goal_from_staffing_report(commitments)
 
     g1, g2 = st.columns(2)
     if staffing_daily_goal is not None:
