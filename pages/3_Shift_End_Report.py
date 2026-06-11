@@ -281,6 +281,49 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
     }
 
 
+
+def _dedupe_opendock_loads_prefer_completed(work, status_col):
+    """
+    If OpenDock has duplicate rows for the same load reference, keep only one.
+    Preference rule: if any duplicate row has Completed status, keep the Completed row
+    and drop the not-completed duplicate(s). If none are Completed, keep the first row.
+    """
+    if work is None or work.empty or not status_col or "_load_norm" not in work.columns:
+        return work
+
+    temp = work.copy()
+    load_keys = temp["_load_norm"].astype(str).str.strip()
+
+    # Do not collapse blank load references together. They are safer left untouched.
+    with_load = temp[load_keys.ne("")].copy()
+    without_load = temp[load_keys.eq("")].copy()
+
+    if with_load.empty:
+        return work
+
+    with_load["_original_order"] = range(len(with_load))
+    with_load["_completed_priority"] = (
+        with_load[status_col]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"[^a-z0-9]+", "", regex=True)
+        .isin(["completed", "complete"])
+        .astype(int)
+    )
+
+    with_load = (
+        with_load
+        .sort_values(
+            by=["_load_norm", "_completed_priority", "_original_order"],
+            ascending=[True, False, True],
+        )
+        .drop_duplicates(subset=["_load_norm"], keep="first")
+        .drop(columns=["_original_order", "_completed_priority"], errors="ignore")
+    )
+
+    return pd.concat([with_load, without_load], axis=0).sort_index()
+
 def build_opendock_service_report(uploaded_file, operating_date, shift):
     """
     Read the uploaded OpenDock Excel export and build service-time report rows for all
@@ -360,6 +403,10 @@ def build_opendock_service_report(uploaded_file, operating_date, shift):
 
     work = work[work["_appt_date_parsed"].eq(operating_date)]
     work = work[work["_appt_time_text"].apply(lambda x: _in_shift_window(x, shift))]
+
+    # If the raw OpenDock export has duplicate rows for the same load, keep the
+    # Completed appointment when one exists and drop the not-completed duplicate.
+    work = _dedupe_opendock_loads_prefer_completed(work, cols["status"])
 
     service_rows = []
     for _, row in work.iterrows():
