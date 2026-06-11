@@ -1153,7 +1153,7 @@ with st.form("closeout_form"):
     # ----- Shift totals -----
     st.subheader("Shift totals")
     s1, s2 = st.columns(2)
-    loads_controlled = s1.number_input("Loads completed this shift", min_value=0, step=1, value=0)
+    loads_controlled = s1.number_input("Loads controlled this shift", min_value=0, step=1, value=0)
     total_shorts = s2.number_input(
         "Loads shipped short this shift",
         min_value=0, step=1, value=0,
