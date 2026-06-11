@@ -2430,15 +2430,14 @@ def status_is_rtl(status):
     status_upper = str(status or "").strip().upper()
     return status_upper in {"RTL", "READY TO LOAD"}
 
-
 def status_is_controlled_appointment(status):
-    """
-    Controlled for appointment cutoff means the load is already protected for the appointment wave:
-    Completed, Loaded, RTL, or R/S. RTL still needs loader work. R/S is waiting for product,
-    but it should stay counted as controlled for cutoff/pacing so it does not consume new pick/stage capacity.
-    """
     status_upper = str(status or "").strip().upper()
-    return status_is_completed_or_loaded(status) or status_is_rtl(status) or status_upper in {"R/S", "READY/SHORT" ,  "Loaded Short"}
+    return (
+        status_is_completed_or_loaded(status)
+        or status_is_rtl(status)
+        or status_upper in {"R/S", "READY/SHORT", "LOADED SHORT"}
+    )
+
 
 
 def status_is_excluded_from_new_control(status):
