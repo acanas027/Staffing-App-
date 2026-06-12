@@ -48,6 +48,19 @@ def _metric(column, label, block, met_key, total_key):
         column.caption(f"{met} of {total}")
 
 
+def _achievement_metric(column, label, block):
+    """Render the Avg Daily Achievement tile (a daily-percent average, not a met/total count)."""
+    block = block or {}
+    rate = block.get("rate")
+    if rate is None:
+        column.metric(label, "—")
+        column.caption("No data this period.")
+    else:
+        column.metric(label, f"{rate}%")
+        days = block.get("days", 0)
+        column.caption(f"avg across {days} day(s)")
+
+
 def _oc_shorts_block(score):
     """
     OC Shorts Target, computed the same way the closeout's rolling scorecard does it:
@@ -136,12 +149,19 @@ def build_scorecard_pdf(score, period_label, top_reasons, total_miss_events):
 
     oc_shorts = _oc_shorts_block(score)
 
+    ach = score.get("daily_achievement") or {}
+    ach_cell = (
+        "No data" if ach.get("rate") is None
+        else f"{ach.get('rate')}%  (avg across {ach.get('days', 0)} day(s))"
+    )
+
     goal_data = [
         ["Goal Area", "This Period"],
         ["OC Service Target (<= 120 min)", _cell(score["oc_signoff"], "met", "required")],
         ["OC Shorts Target (0 short)", _cell(oc_shorts, "met", "total")],
         ["CPU Service Target (<= 120 min)", _cell(score["cpu_on_time"], "met", "total")],
-        ["Daily Goal Met", _cell(score["shift_goal"], "met", "total")],
+        ["Daily Goal Met (days at 100%)", _cell(score["shift_goal"], "met", "total")],
+        ["Avg Daily Achievement", ach_cell],
         ["Loads Completed (total)", str(score["loads_completed_total"])],
         ["Shorts (total)", str(score["shorts_total"])],
     ]
@@ -284,11 +304,12 @@ st.caption(f"Based on {score['shifts_logged']} closeout(s) — {period_label}.")
 
 # Headline KPIs — matched to the daily closeout's Rolling Scorecard.
 oc_shorts_block = _oc_shorts_block(score)
-m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4, m5 = st.columns(5)
 _metric(m1, "OC Service Target", score["oc_signoff"], "met", "required")
 _metric(m2, "OC Shorts Target", oc_shorts_block, "met", "total")
 _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
 _metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
+_achievement_metric(m5, "Avg Daily Achievement", score.get("daily_achievement"))
 
 # Period totals
 t1, t2, t3 = st.columns(3)
