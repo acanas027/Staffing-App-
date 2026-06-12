@@ -987,8 +987,6 @@ def build_report_rows(outcome_rows, daily_outbound_goal, loads_completed, total_
 
     misses = []
     for o in outcome_rows:
-        # Do not count customer no-shows or no-departure records as misses.
-        # They have on_time = NA and remain visible as flags in the OpenDock detail.
         if (
             str(o.get("on_time")).strip().upper() == "N"
             or str(o.get("signoff_done")).strip().upper() == "N"
@@ -996,6 +994,24 @@ def build_report_rows(outcome_rows, daily_outbound_goal, loads_completed, total_
             or str(o.get("short")).strip().upper() in ("Y", "YES")
         ):
             misses.append(o)
+
+    # Also count OpenDock service-time failures (delayed / missing service time)
+    # that aren't already captured as a commitment miss above.
+    already = {_norm_load_id(m.get("load", "")) for m in misses}
+    for r in service_rows:
+        if r.get("result_type") in ("delayed", "missing_service_time"):
+            key = r.get("load_norm") or _norm_load_id(r.get("load", ""))
+            if key and key in already:
+                continue
+            if key:
+                already.add(key)
+            misses.append({
+                "type": r.get("load_type") or "OUTBOUND",
+                "load": r.get("load", ""),
+                "customer": r.get("customer", ""),
+                "appt_time": r.get("appt_time", ""),
+                "miss_reason": r.get("service_result", ""),
+            })
 
     return rows, misses
 
