@@ -357,10 +357,13 @@ def get_recent_scorecard(days=30):
             r for r in sum_records
             if (_parse_date(r.get("date")) is not None and _parse_date(r.get("date")) >= cutoff)
         ]
-        relevant = [r for r in recent_sum if str(r.get("goal_met")).upper() in ("Y", "N")]
-        if relevant:
-            goal_met = sum(1 for r in relevant if str(r.get("goal_met")).upper() == "Y")
-            goal_total = len(relevant)
+        for r in recent_sum:
+            counts, was_met = _goal_met_pair(r.get("goal_met"))
+            if counts:
+                goal_total += 1
+                if was_met:
+                    goal_met += 1
+        if goal_total:
             goal_rate = round(100 * goal_met / goal_total)
     except Exception:
         pass
@@ -425,10 +428,10 @@ def get_monthly_scorecard(year, month):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         month_sum = [r for r in sum_records if _in_month(r)]
         for r in month_sum:
-            gm = str(r.get("goal_met")).upper()
-            if gm in ("Y", "N"):
+            counts, was_met = _goal_met_pair(r.get("goal_met"))
+            if counts:
                 goal_total += 1
-                if gm == "Y":
+                if was_met:
                     goal_met += 1
             loads_completed_total += _to_int(r.get("loads_completed"))
             shorts_total += _to_int(r.get("total_shorts"))
@@ -521,10 +524,10 @@ def get_daily_scorecard(operating_date):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         day_sum = [r for r in sum_records if _on_day(r)]
         for r in day_sum:
-            gm = str(r.get("goal_met")).upper()
-            if gm in ("Y", "N"):
+            counts, was_met = _goal_met_pair(r.get("goal_met"))
+            if counts:
                 goal_total += 1
-                if gm == "Y":
+                if was_met:
                     goal_met += 1
             loads_completed_total += _to_int(r.get("loads_completed"))
             shorts_total += _to_int(r.get("total_shorts"))
@@ -618,10 +621,10 @@ def get_weekly_scorecard(end_date):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         week_sum = [r for r in sum_records if _in_week(r)]
         for r in week_sum:
-            gm = str(r.get("goal_met")).upper()
-            if gm in ("Y", "N"):
+            counts, was_met = _goal_met_pair(r.get("goal_met"))
+            if counts:
                 goal_total += 1
-                if gm == "Y":
+                if was_met:
                     goal_met += 1
             loads_completed_total += _to_int(r.get("loads_completed"))
             shorts_total += _to_int(r.get("total_shorts"))
@@ -682,6 +685,27 @@ def _to_int(value):
         return int(float(str(value).strip()))
     except Exception:
         return 0
+
+
+def _goal_met_pair(value):
+    """
+    Interpret a stored goal_met value as (counts_toward_total, was_met).
+
+    The closeout stores Daily Goal as a percent string ("87", "100"). This also
+    still understands the legacy Y/N convention. A day "meets" the goal when it
+    reaches 100% of the achievable goal. NA / blank / unparseable values do not
+    count toward the denominator at all.
+    """
+    text = str(value).strip().upper()
+    if text in ("Y", "N"):
+        return True, text == "Y"
+    if text in ("", "NA", "N/A", "NONE"):
+        return False, False
+    try:
+        pct = float(text.rstrip("%"))
+    except ValueError:
+        return False, False
+    return True, pct >= 100
 
 
 def _replace_rows_for_snapshot(ws, header, snapshot_id, new_rows):
