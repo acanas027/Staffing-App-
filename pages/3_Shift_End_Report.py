@@ -1577,7 +1577,7 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
         var = fc.get("variance") or {}
         st.write(
             f"Predicted cutoff {pred} → actual {act}"
-            + (f"  ·  {var.get('direction','')} ({abs(var.get('delta_min',0))} min)" if var else "")
+            + (f"  ·  {var.get('direction','')}" if var else "")
         )
         st.write(f"Loads short of goal cutoff: **{fc.get('loads_short', 0)}**")
         for r in fc.get("loads_short_rows", []):
