@@ -424,6 +424,51 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
             "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES} min)",
             "departed": departed}
 
+def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
+    """
+    Count loads DUE by the goal cutoff that were not controlled (did not depart on
+    time), in this shift group. This is the honest 'loads short of the cutoff goal'
+    number: it counts misses sitting BEHIND the cutoff line, not the distance to it.
+
+    What counts as a miss here (controllable, not-shipped-on-time):
+      - departed late (result_type 'delayed'), OR
+      - arrived but no departure recorded (result_type 'no_departure').
+        NOTE: counting no_departure as a miss ASSUMES departures are logged reliably.
+        If a no-departure is just a forgotten scan, this over-counts. The no-departure
+        count is surfaced separately on the report so that assumption stays auditable.
+    What is excluded (not the warehouse's miss, same rule used elsewhere):
+      - no_show, cancelled  -> carrier/customer, never scored
+      - drops that departed late -> carrier pickup timing (see _drop_late_note)
+
+    Returns (count, detail_rows). detail_rows are the offending loads for display.
+    """
+    if goal_cutoff_min is None:
+        return 0, []
+    short = []
+    for r in service_rows or []:
+        if str(r.get("shift_group", "")).strip() != shift_group:
+            continue
+        appt = _appt_minutes(r.get("appt_time"))
+        if appt is None or appt > goal_cutoff_min:
+            continue  # only loads DUE by the goal cutoff
+        rt = r.get("result_type")
+        is_drop = "DROP" in str(r.get("load_type", "")).upper()
+        if rt == "delayed" and is_drop:
+            continue  # late drop = carrier pickup timing, not a staging miss
+        if rt in ("delayed", "no_departure"):
+            short.append(r)
+    return len(short), short
+
+
+def _no_departure_count(service_rows, shift_group="1st"):
+    """Loads that arrived but have no departure recorded — surfaced as a data-quality
+    line so the 'departures are logged reliably' assumption stays visible every run."""
+    return sum(
+        1 for r in service_rows or []
+        if str(r.get("shift_group", "")).strip() == shift_group
+        and r.get("result_type") == "no_departure"
+    )
+
 
 
 def _dedupe_opendock_loads_prefer_completed(work, status_col):
@@ -1452,6 +1497,17 @@ if submitted:
         f"({planned_goal} planned - {uncontrollable} no-show/cancelled) = "
         f"{daily_goal_pct if daily_goal_pct is not None else 'NA'}%."
     )
+
+    # --- Feedback loop: predicted vs actual cutoff (1st shift) ---
+    first_shift_commitments = shift_log.load_commitments(operating_date_str, "1st")
+    first_shift_goal = shift_log.get_shift_goal(first_shift_commitments)
+    goal_cutoff_min = _goal_predicted_cutoff(first_shift_goal)
+    actual_cutoff = _actual_departure_cutoff(opendock_service_rows, "1st")
+    cutoff_variance = _cutoff_variance(first_shift_goal, actual_cutoff)
+    loads_short, loads_short_rows = _loads_short_of_cutoff(
+        opendock_service_rows, goal_cutoff_min, "1st"
+    )
+    no_dep_count = _no_departure_count(opendock_service_rows, "1st")
 
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, daily_goal_text, notes,
