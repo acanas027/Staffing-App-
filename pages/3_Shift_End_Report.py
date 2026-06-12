@@ -451,7 +451,7 @@ def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
         appt = _appt_minutes(r.get("appt_time"))
         if appt is None or appt > goal_cutoff_min:
             continue  # only loads DUE by the goal cutoff
-        rt = r.get("result_type")
+     rt = r.get("result_type")
         is_drop = "DROP" in str(r.get("load_type", "")).upper()
         # Drops are never a controllable miss: a drop's departure is the carrier's
         # pickup, and a no-departure on a drop is "carrier hasn't grabbed it / not
@@ -461,18 +461,22 @@ def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
         if is_drop:
             continue
         if rt in ("delayed", "no_departure"):
-            short.append(r)
+            short.append(r)   
     return len(short), short
 
-
-def _no_departure_count(service_rows, shift_group="1st"):
-    """Loads that arrived but have no departure recorded — surfaced as a data-quality
-    line so the 'departures are logged reliably' assumption stays visible every run."""
-    return sum(
-        1 for r in service_rows or []
+def _no_departure_loads(service_rows, shift_group="1st"):
+    """
+    Loads that arrived but have no departure recorded, for this shift group.
+    This is a DATA-QUALITY / logging-compliance signal, not a warehouse miss: a
+    supervisor uses the list to have the OpenDock clerk log the missing departure.
+    Returns the list of rows (use len() for the count).
+    """
+    return [
+        r for r in service_rows or []
         if str(r.get("shift_group", "")).strip() == shift_group
         and r.get("result_type") == "no_departure"
-    )
+    ]
+
 
 
 
@@ -1513,16 +1517,8 @@ if submitted:
         opendock_service_rows, goal_cutoff_min, "1st"
     )
     no_dep_count = _no_departure_count(opendock_service_rows, "1st")
+    no_dep_count = len(no_dep_loads)
     
-    # --- TEMP Step 2 check; delete after verifying ---
-    st.write("DEBUG predicted cutoff (1st goal):",
-             _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else "none in goal text")
-    st.write("DEBUG actual cutoff (1st):", actual_cutoff)
-    st.write("DEBUG cutoff variance:", cutoff_variance)
-    st.write("DEBUG loads short of goal cutoff:", loads_short)
-    st.write("DEBUG no-departure count (1st):", no_dep_count)
-    st.write("DEBUG loads-short detail:",
-             [(r.get("appt_time"), r.get("result_type"), r.get("load_type")) for r in loads_short_rows])
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, daily_goal_text, notes,
     )
@@ -1544,6 +1540,20 @@ if submitted:
             "notes": notes,
             "service_rows": opendock_service_rows,
             "pdf": pdf_bytes,
+            "forecast": {
+                "predicted_cutoff": _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else None,
+                "actual_cutoff": actual_cutoff,
+                "variance": cutoff_variance,
+                "loads_short": loads_short,
+                "loads_short_rows": [
+                    {"load": r.get("load", ""), "appt_time": r.get("appt_time", "")}
+                    for r in loads_short_rows
+                ],
+                "no_dep_loads": [
+                    {"load": r.get("load", ""), "appt_time": r.get("appt_time", "")}
+                    for r in no_dep_loads
+                ],
+            },
         }
         st.success(
             f"Daily closeout saved — {result['outcomes_written']} commitment outcome(s) "
@@ -1559,6 +1569,23 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
     st.markdown("---")
     st.subheader("End-of-Day Report — Expectations vs Actual")
     render_report_table(report["rows"])
+fc = report.get("forecast") or {}
+    if fc:
+        st.markdown("**Forecast Accuracy — 1st shift** (how well the morning plan predicted the day)")
+        pred = fc.get("predicted_cutoff") or "—"
+        act = fc.get("actual_cutoff") or "—"
+        var = fc.get("variance") or {}
+        st.write(
+            f"Predicted cutoff {pred} → actual {act}"
+            + (f"  ·  {var.get('direction','')} ({abs(var.get('delta_min',0))} min)" if var else "")
+        )
+        st.write(f"Loads short of goal cutoff: **{fc.get('loads_short', 0)}**")
+        for r in fc.get("loads_short_rows", []):
+            st.write(f"   • load {r.get('load') or '(no #)'} — appt {r.get('appt_time') or '?'}")
+        nd = fc.get("no_dep_loads", [])
+        st.write(f"Loads with no departure logged (verify with OpenDock clerk): **{len(nd)}**")
+        for r in nd:
+            st.write(f"   • load {r.get('load') or '(no #)'} — appt {r.get('appt_time') or '?'}")
 
     if report["misses"]:
         st.markdown("**Controllable misses this day**")
