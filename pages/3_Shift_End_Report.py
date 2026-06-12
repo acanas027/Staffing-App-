@@ -1528,10 +1528,13 @@ if submitted:
     )
     try:
         result = shift_log.save_outcomes(operating_date_str, DAILY_SHIFT_KEY, outcome_rows, summary)
-        pdf_bytes = build_report_pdf(
-            operating_date_str, report_rows, misses, notes,
-            service_rows=opendock_service_rows,
-        )
+        shift_log.save_forecast_accuracy(operating_date_str, "1st", {
+            "predicted_cutoff": _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else None,
+            "actual_cutoff": actual_cutoff,
+            "variance": cutoff_variance,
+            "loads_short": loads_short,
+            "no_departure_count": no_dep_count,
+        })
         st.session_state["closeout_report"] = {
             "date": operating_date_str,
             "shift": DAILY_SHIFT_KEY,
