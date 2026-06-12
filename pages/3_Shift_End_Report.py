@@ -394,52 +394,35 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
     service_min = _service_minutes(service_time)
 
     if status_key in ("scheduled", "noshow", "no-show"):
-        return {
-            "result_type": "no_show",
-            "service_minutes": service_min,
-            "delay_minutes": None,
-            "service_result": "Customer no-show",
-        }
+        return {"result_type": "no_show", "service_minutes": service_min,
+                "delay_minutes": None, "service_result": "Customer no-show",
+                "departed": departed}
 
     if status_key == "cancelled":
-        return {
-            "result_type": "cancelled",
-            "service_minutes": service_min,
-            "delay_minutes": None,
-            "service_result": "Cancelled appointment",
-        }
+        return {"result_type": "cancelled", "service_minutes": service_min,
+                "delay_minutes": None, "service_result": "Cancelled appointment",
+                "departed": departed}
 
     if arrived and not departed:
-        return {
-            "result_type": "no_departure",
-            "service_minutes": service_min,
-            "delay_minutes": None,
-            "service_result": "No departure recorded",
-        }
+        return {"result_type": "no_departure", "service_minutes": service_min,
+                "delay_minutes": None, "service_result": "No departure recorded",
+                "departed": departed}
 
     if service_min is None:
-        return {
-            "result_type": "missing_service_time",
-            "service_minutes": None,
-            "delay_minutes": None,
-            "service_result": "Service time not recorded",
-        }
+        return {"result_type": "missing_service_time", "service_minutes": None,
+                "delay_minutes": None, "service_result": "Service time not recorded",
+                "departed": departed}
 
     if service_min <= SERVICE_TARGET_MINUTES:
-        return {
-            "result_type": "target_met",
-            "service_minutes": service_min,
-            "delay_minutes": 0,
-            "service_result": "Service time target met",
-        }
+        return {"result_type": "target_met", "service_minutes": service_min,
+                "delay_minutes": 0, "service_result": "Service time target met",
+                "departed": departed}
 
     delay = service_min - SERVICE_TARGET_MINUTES
-    return {
-        "result_type": "delayed",
-        "service_minutes": service_min,
-        "delay_minutes": delay,
-        "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES} min)",
-    }
+    return {"result_type": "delayed", "service_minutes": service_min,
+            "delay_minutes": delay,
+            "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES} min)",
+            "departed": departed}
 
 
 
@@ -592,6 +575,7 @@ def build_opendock_service_report(uploaded_file, operating_date):
             "delay_minutes": score["delay_minutes"],
             "service_result": score["service_result"],
             "result_type": score["result_type"],
+            "departed": bool(score.get("departed")),
             "load_type": _clean_text(row.get(cols["load_type"])) if cols.get("load_type") else "",
             "dock": _clean_text(row.get(cols["dock"])) if cols.get("dock") else "",
         })
@@ -712,6 +696,54 @@ def _cutoff_variance(shift_goal, actual_cutoff):
         message = f"Controlled to {actual_cutoff}, exactly the predicted cutoff."
     return {"predicted_min": predicted, "actual_min": actual,
             "delta_min": delta, "direction": direction, "message": message}
+
+def _actual_departure_cutoff(service_rows, shift_group="1st"):
+    """
+    The actual appointment cutoff controlled to: the latest appointment time among
+    loads in this shift group that DEPARTED on time (real departure + service <= target).
+
+    The `departed` guard is load-bearing: result_type 'target_met' can occur on a row
+    that never departed (service value present, no departure recorded), and without
+    this guard a phantom 0-minute row with a late appointment could set the cutoff to
+    a time nothing actually left by. Requiring a real departure prevents that.
+    Returns 'HH:MM' or None when nothing qualifies.
+    """
+    times = []
+    for r in service_rows or []:
+        if str(r.get("shift_group", "")).strip() != shift_group:
+            continue
+        if not r.get("departed"):
+            continue
+        if r.get("result_type") != "target_met":
+            continue
+        m = _appt_minutes(r.get("appt_time"))
+        if m is not None:
+            times.append(m)
+    return _fmt_minutes(max(times)) if times else None
+
+
+def _drop_late_note(service_rows, shift_group="1st"):
+    """
+    One-line note for drop loads in this shift group that departed late
+    (service > target). Framed as carrier pickup timing, not a warehouse miss,
+    so a drop's late departure is never read as a staging failure.
+    Returns '' when there are none.
+    """
+    n = 0
+    for r in service_rows or []:
+        if str(r.get("shift_group", "")).strip() != shift_group:
+            continue
+        if not r.get("departed"):
+            continue
+        if "DROP" not in str(r.get("load_type", "")).upper():
+            continue
+        if r.get("result_type") == "delayed":
+            n += 1
+    if not n:
+        return ""
+    return (f"{n} drop load(s) departed more than {SERVICE_TARGET_MINUTES} min after "
+            f"appointment - status loaded; departure reflects carrier pickup timing, "
+            f"not warehouse control.")
 
 
 def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
@@ -1592,3 +1624,9 @@ if score:
 
     _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
+
+# --- TEMP Step 1 check; delete after verifying ---
+if opendock_service_rows:
+    st.write("DEBUG 1st-shift actual cutoff:", _actual_departure_cutoff(opendock_service_rows, "1st"))
+    st.write("DEBUG 2nd-shift actual cutoff:", _actual_departure_cutoff(opendock_service_rows, "2nd"))
+    st.write("DEBUG drop-late note:", _drop_late_note(opendock_service_rows, "1st") or "(none)")
