@@ -301,14 +301,41 @@ def save_outcomes(operating_date, shift, outcome_rows, summary):
             now,
         ])
 
+    ws_out = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
+    _replace_rows_for_snapshot(ws_out, OUTCOMES_HEADER, snapshot_id, rows)
+
+    summary_row = [
+        snapshot_id, operating_date, shift,
+        summary.get("loads_completed", 0),
+        summary.get("total_shorts", 0),
+        str(summary.get("goal_met", "")),     # Y / N / NA
+        str(summary.get("shift_goal", "")),
+        str(summary.get("actual_cutoff", "")),
+        summary.get("oc_total", 0),
+        summary.get("oc_signoff_met", 0),
+        summary.get("oc_photos_met", 0),
+        summary.get("cpu_total", 0),
+        summary.get("cpu_on_time", 0),
+        str(summary.get("notes", "")),
+        now,
+    ]
+    ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
+    _replace_rows_for_snapshot(ws_sum, SUMMARY_HEADER, snapshot_id, [summary_row])
+
+    _read_tab_records.clear()  # invalidate cached reads so the new data shows immediately
+    return {"snapshot_id": snapshot_id, "outcomes_written": len(rows)}
+
+
 def save_forecast_accuracy(operating_date, shift, forecast):
     """
     Persist one forecast-accuracy row for an operating date + shift. Idempotent per
     (date, shift): re-running the closeout overwrites rather than duplicating.
 
+    Measures the TOOL (did the morning plan predict the day), not the supervisor, so
+    it lives in its own tab and is keyed PER SHIFT (e.g. make_snapshot_id(date,"1st")).
+
     forecast : dict with keys predicted_cutoff, actual_cutoff, loads_short,
-        no_departure_count, and variance (a dict with delta_min / direction), as
-        produced by the closeout.
+        no_departure_count, and variance (a dict with delta_min / direction).
     """
     if not is_configured():
         raise RuntimeError(f"Shift log not configured: {setup_hint()}")
@@ -333,30 +360,6 @@ def save_forecast_accuracy(operating_date, shift, forecast):
 
     _read_tab_records.clear()
     return {"snapshot_id": snapshot_id}
-
-    ws_out = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
-    _replace_rows_for_snapshot(ws_out, OUTCOMES_HEADER, snapshot_id, rows)
-
-    summary_row = [
-        snapshot_id, operating_date, shift,
-        summary.get("loads_completed", 0),
-        summary.get("total_shorts", 0),
-        str(summary.get("goal_met", "")),     # Y / N / NA
-        str(summary.get("shift_goal", "")),
-        str(summary.get("actual_cutoff", "")),
-        summary.get("oc_total", 0),
-        summary.get("oc_signoff_met", 0),
-        summary.get("oc_photos_met", 0),
-        summary.get("cpu_total", 0),
-        summary.get("cpu_on_time", 0),
-        str(summary.get("notes", "")),
-        now,
-    ]
-    ws_sum = _get_tab(SUMMARY_TAB, SUMMARY_HEADER)
-    _replace_rows_for_snapshot(ws_sum, SUMMARY_HEADER, snapshot_id, [summary_row])
-
-    _read_tab_records.clear()  # invalidate cached reads so the new data shows immediately
-    return {"snapshot_id": snapshot_id, "outcomes_written": len(rows)}
 
 
 # ============================================================
