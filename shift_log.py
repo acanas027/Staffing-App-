@@ -351,6 +351,7 @@ def get_recent_scorecard(days=30):
 
     # Shift-goal-met from the summary tab.
     goal_rate, goal_met, goal_total = None, 0, 0
+    ach_sum, ach_days = 0.0, 0
     try:
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         recent_sum = [
@@ -358,6 +359,10 @@ def get_recent_scorecard(days=30):
             if (_parse_date(r.get("date")) is not None and _parse_date(r.get("date")) >= cutoff)
         ]
         for r in recent_sum:
+            pct = _goal_achievement_pct(r.get("goal_met"))
+            if pct is not None:
+                ach_sum += pct
+                ach_days += 1
             counts, was_met = _goal_met_pair(r.get("goal_met"))
             if counts:
                 goal_total += 1
@@ -385,6 +390,7 @@ def get_recent_scorecard(days=30):
         "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
         "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
         "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "daily_achievement": {"rate": (round(ach_sum / ach_days) if ach_days else None), "days": ach_days},
         "misses": misses,
     }
 
@@ -421,6 +427,7 @@ def get_monthly_scorecard(year, month):
 
     # Goal-met + month totals + per-shift breakdown from the summary tab.
     goal_rate, goal_met, goal_total = None, 0, 0
+    ach_sum, ach_days = 0.0, 0
     loads_completed_total = 0
     shorts_total = 0
     per_shift = []
@@ -428,6 +435,10 @@ def get_monthly_scorecard(year, month):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         month_sum = [r for r in sum_records if _in_month(r)]
         for r in month_sum:
+            pct = _goal_achievement_pct(r.get("goal_met"))
+            if pct is not None:
+                ach_sum += pct
+                ach_days += 1
             counts, was_met = _goal_met_pair(r.get("goal_met"))
             if counts:
                 goal_total += 1
@@ -478,6 +489,7 @@ def get_monthly_scorecard(year, month):
         "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
         "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
         "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "daily_achievement": {"rate": (round(ach_sum / ach_days) if ach_days else None), "days": ach_days},
         "per_shift": per_shift,
         "misses": misses,
     }
@@ -517,6 +529,7 @@ def get_daily_scorecard(operating_date):
     cpu_rate, cpu_met, cpu_total = _rate(cpu, "on_time")
 
     goal_rate, goal_met, goal_total = None, 0, 0
+    ach_sum, ach_days = 0.0, 0
     loads_completed_total = 0
     shorts_total = 0
     per_shift = []
@@ -524,6 +537,10 @@ def get_daily_scorecard(operating_date):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         day_sum = [r for r in sum_records if _on_day(r)]
         for r in day_sum:
+            pct = _goal_achievement_pct(r.get("goal_met"))
+            if pct is not None:
+                ach_sum += pct
+                ach_days += 1
             counts, was_met = _goal_met_pair(r.get("goal_met"))
             if counts:
                 goal_total += 1
@@ -573,6 +590,7 @@ def get_daily_scorecard(operating_date):
         "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
         "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
         "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "daily_achievement": {"rate": (round(ach_sum / ach_days) if ach_days else None), "days": ach_days},
         "per_shift": per_shift,
         "misses": misses,
     }
@@ -614,6 +632,7 @@ def get_weekly_scorecard(end_date):
     cpu_rate, cpu_met, cpu_total = _rate(cpu, "on_time")
 
     goal_rate, goal_met, goal_total = None, 0, 0
+    ach_sum, ach_days = 0.0, 0
     loads_completed_total = 0
     shorts_total = 0
     per_shift = []
@@ -621,6 +640,10 @@ def get_weekly_scorecard(end_date):
         sum_records = _read_tab_records(SUMMARY_TAB, tuple(SUMMARY_HEADER))
         week_sum = [r for r in sum_records if _in_week(r)]
         for r in week_sum:
+            pct = _goal_achievement_pct(r.get("goal_met"))
+            if pct is not None:
+                ach_sum += pct
+                ach_days += 1
             counts, was_met = _goal_met_pair(r.get("goal_met"))
             if counts:
                 goal_total += 1
@@ -671,6 +694,7 @@ def get_weekly_scorecard(end_date):
         "oc_photos": {"rate": photos_rate, "met": photos_met, "required": photos_req},
         "cpu_on_time": {"rate": cpu_rate, "met": cpu_met, "total": cpu_total},
         "shift_goal": {"rate": goal_rate, "met": goal_met, "total": goal_total},
+        "daily_achievement": {"rate": (round(ach_sum / ach_days) if ach_days else None), "days": ach_days},
         "per_shift": per_shift,
         "misses": misses,
     }
@@ -706,6 +730,27 @@ def _goal_met_pair(value):
     except ValueError:
         return False, False
     return True, pct >= 100
+
+
+def _goal_achievement_pct(value):
+    """
+    Interpret a stored goal_met value as a numeric achievement percentage (0-100),
+    or None when there's nothing to score. Percent strings ("87", "100") return that
+    number; legacy "Y" counts as 100 and legacy "N" as 0; NA/blank return None.
+    Uses the same set of "countable" values as _goal_met_pair, so the achievement
+    average and the met/not-met count always share the same denominator.
+    """
+    text = str(value).strip().upper()
+    if text in ("", "NA", "N/A", "NONE"):
+        return None
+    if text == "Y":
+        return 100.0
+    if text == "N":
+        return 0.0
+    try:
+        return float(text.rstrip("%"))
+    except ValueError:
+        return None
 
 
 def _replace_rows_for_snapshot(ws, header, snapshot_id, new_rows):
