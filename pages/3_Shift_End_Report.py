@@ -453,8 +453,13 @@ def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
             continue  # only loads DUE by the goal cutoff
         rt = r.get("result_type")
         is_drop = "DROP" in str(r.get("load_type", "")).upper()
-        if rt == "delayed" and is_drop:
-            continue  # late drop = carrier pickup timing, not a staging miss
+        # Drops are never a controllable miss: a drop's departure is the carrier's
+        # pickup, and a no-departure on a drop is "carrier hasn't grabbed it / not
+        # logged," not "we failed to load it." Late drops were already excluded;
+        # this also excludes no-departure drops so the two are treated consistently.
+        # Unlogged drops still surface on the no-departure compliance line below.
+        if is_drop:
+            continue
         if rt in ("delayed", "no_departure"):
             short.append(r)
     return len(short), short
