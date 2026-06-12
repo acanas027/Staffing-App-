@@ -75,7 +75,7 @@ def _daily_goal_metric(column, label, block, single_day):
         column.metric(label, "—")
         column.caption("No data this period.")
     elif single_day:
-        column.metric(label, "Met" if met >= total and total > 0 else "Not met")
+        column.metric(label, "YES" if met >= total and total > 0 else "NO")
     else:
         column.metric(label, f"{rate}%")
         column.caption(f"{met} of {total} days")
