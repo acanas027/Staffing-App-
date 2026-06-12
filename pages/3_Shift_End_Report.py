@@ -451,7 +451,7 @@ def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
         appt = _appt_minutes(r.get("appt_time"))
         if appt is None or appt > goal_cutoff_min:
             continue  # only loads DUE by the goal cutoff
-     rt = r.get("result_type")
+        rt = r.get("result_type")
         is_drop = "DROP" in str(r.get("load_type", "")).upper()
         # Drops are never a controllable miss: a drop's departure is the carrier's
         # pickup, and a no-departure on a drop is "carrier hasn't grabbed it / not
@@ -1516,7 +1516,7 @@ if submitted:
     loads_short, loads_short_rows = _loads_short_of_cutoff(
         opendock_service_rows, goal_cutoff_min, "1st"
     )
-    no_dep_count = _no_departure_count(opendock_service_rows, "1st")
+    no_dep_loads = _no_departure_loads(opendock_service_rows, "1st")
     no_dep_count = len(no_dep_loads)
     
     summary = _build_summary(
@@ -1569,7 +1569,7 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
     st.markdown("---")
     st.subheader("End-of-Day Report — Expectations vs Actual")
     render_report_table(report["rows"])
-fc = report.get("forecast") or {}
+    fc = report.get("forecast") or {}
     if fc:
         st.markdown("**Forecast Accuracy — 1st shift** (how well the morning plan predicted the day)")
         pred = fc.get("predicted_cutoff") or "—"
