@@ -61,6 +61,26 @@ def _achievement_metric(column, label, block):
         column.caption(f"avg across {days} day(s)")
 
 
+def _daily_goal_metric(column, label, block, single_day):
+    """
+    Daily Goal Met tile.
+    Single day  -> show 'Met' / 'Not met' with no caption (it's one yes/no answer).
+    Range       -> show the percentage with an 'X of Y days' caption.
+    """
+    block = block or {}
+    rate = block.get("rate")
+    met = block.get("met", 0)
+    total = block.get("total", 0)
+    if rate is None:
+        column.metric(label, "—")
+        column.caption("No data this period.")
+    elif single_day:
+        column.metric(label, "Met" if met >= total and total > 0 else "Not met")
+    else:
+        column.metric(label, f"{rate}%")
+        column.caption(f"{met} of {total} days")
+
+
 def _oc_shorts_block(score):
     """
     OC Shorts Target, computed the same way the closeout's rolling scorecard does it:
@@ -308,7 +328,7 @@ m1, m2, m3, m4, m5 = st.columns(5)
 _metric(m1, "OC Service Target", score["oc_signoff"], "met", "required")
 _metric(m2, "OC Shorts Target", oc_shorts_block, "met", "total")
 _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
-_metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
+_daily_goal_metric(m4, "Daily Goal Met", score["shift_goal"], single_day=(period == "Day"))
 _achievement_metric(m5, "Avg Daily Achievement", score.get("daily_achievement"))
 
 # Period totals
