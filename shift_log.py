@@ -63,6 +63,18 @@ SUMMARY_HEADER = [
     "cpu_total", "cpu_on_time", "notes", "closed_at",
 ]
 
+FORECAST_TAB = "forecast_accuracy"
+
+# Forecast-accuracy log — measures the TOOL (did the morning plan predict the day),
+# NOT the supervisor. Kept in its own tab, separate from shift_summary, on purpose.
+# Keyed PER SHIFT (make_snapshot_id(date, "1st")), not the daily 'Daily' key the
+# closeout summary uses, because each shift has its own morning prediction.
+FORECAST_HEADER = [
+    "snapshot_id", "date", "shift",
+    "predicted_cutoff", "actual_cutoff", "delta_min", "direction",
+    "loads_short", "no_departure_count", "created_at",
+]
+
 
 # ============================================================
 #  CONFIG / CONNECTION
@@ -288,6 +300,39 @@ def save_outcomes(operating_date, shift, outcome_rows, summary):
             str(o.get("miss_reason", "")),
             now,
         ])
+
+def save_forecast_accuracy(operating_date, shift, forecast):
+    """
+    Persist one forecast-accuracy row for an operating date + shift. Idempotent per
+    (date, shift): re-running the closeout overwrites rather than duplicating.
+
+    forecast : dict with keys predicted_cutoff, actual_cutoff, loads_short,
+        no_departure_count, and variance (a dict with delta_min / direction), as
+        produced by the closeout.
+    """
+    if not is_configured():
+        raise RuntimeError(f"Shift log not configured: {setup_hint()}")
+
+    snapshot_id = make_snapshot_id(operating_date, shift)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    var = forecast.get("variance") or {}
+
+    row = [
+        snapshot_id, operating_date, shift,
+        str(forecast.get("predicted_cutoff") or ""),
+        str(forecast.get("actual_cutoff") or ""),
+        var.get("delta_min", ""),
+        str(var.get("direction", "")),
+        forecast.get("loads_short", 0),
+        forecast.get("no_departure_count", 0),
+        now,
+    ]
+
+    ws = _get_tab(FORECAST_TAB, FORECAST_HEADER)
+    _replace_rows_for_snapshot(ws, FORECAST_HEADER, snapshot_id, [row])
+
+    _read_tab_records.clear()
+    return {"snapshot_id": snapshot_id}
 
     ws_out = _get_tab(OUTCOMES_TAB, OUTCOMES_HEADER)
     _replace_rows_for_snapshot(ws_out, OUTCOMES_HEADER, snapshot_id, rows)
