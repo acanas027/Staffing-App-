@@ -1681,8 +1681,12 @@ if score:
     _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
 
-# --- TEMP Step 1 check; delete after verifying ---
-if opendock_service_rows:
-    st.write("DEBUG 1st-shift actual cutoff:", _actual_departure_cutoff(opendock_service_rows, "1st"))
-    st.write("DEBUG 2nd-shift actual cutoff:", _actual_departure_cutoff(opendock_service_rows, "2nd"))
-    st.write("DEBUG drop-late note:", _drop_late_note(opendock_service_rows, "1st") or "(none)")
+# --- TEMP Step 2 check; delete after verifying ---
+    st.write("DEBUG predicted cutoff (1st goal):",
+             _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else "none in goal text")
+    st.write("DEBUG actual cutoff (1st):", actual_cutoff)
+    st.write("DEBUG cutoff variance:", cutoff_variance)
+    st.write("DEBUG loads short of goal cutoff:", loads_short)
+    st.write("DEBUG no-departure count (1st):", no_dep_count)
+    st.write("DEBUG loads-short detail:",
+             [(r.get("appt_time"), r.get("result_type"), r.get("load_type")) for r in loads_short_rows])
