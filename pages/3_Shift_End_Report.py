@@ -1518,7 +1518,7 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
     # mailto can prefill recipient + subject + body, but CANNOT attach the PDF.
     # Download the PDF above, then attach it by hand in your mail app before sending.
     st.markdown("**Email this report**")
-    boss_email = "brianM@reser.com"
+    boss_email = "brianM@resers.com"
 
     email_subject = f"End-of-Day Report — {report['date']}"
     goal_line = ""
