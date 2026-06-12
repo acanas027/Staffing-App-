@@ -747,7 +747,44 @@ def get_weekly_scorecard(end_date):
         "misses": misses,
     }
 
+def get_forecast_accuracy(days=30):
+    """
+    Read recent forecast-accuracy rows (the tool-measurement log, separate from the
+    supervisor scorecard). Returns rows newest-first within the last N days, plus a
+    few simple roll-ups. Trends only become meaningful once several days accumulate.
+    """
+    if not is_configured():
+        raise RuntimeError(f"Shift log not configured: {setup_hint()}")
 
+    try:
+        records = _read_tab_records(FORECAST_TAB, tuple(FORECAST_HEADER))
+    except Exception:
+        # Tab may not exist until the first closeout writes a row.
+        return {"rows": [], "days": days, "count": 0,
+                "avg_loads_short": None, "behind_days": 0, "total_no_dep": 0}
+
+    cutoff = datetime.date.today() - datetime.timedelta(days=days)
+    rows = []
+    for r in records:
+        d = _parse_date(r.get("date"))
+        if d is not None and d >= cutoff:
+            rows.append(r)
+
+    rows.sort(key=lambda r: (str(r.get("date")), str(r.get("shift"))), reverse=True)
+
+    loads_short_vals = [_to_int(r.get("loads_short")) for r in rows]
+    avg_loads_short = round(sum(loads_short_vals) / len(loads_short_vals), 1) if loads_short_vals else None
+    behind_days = sum(1 for r in rows if str(r.get("direction", "")).strip().upper() == "BEHIND")
+    total_no_dep = sum(_to_int(r.get("no_departure_count")) for r in rows)
+
+    return {
+        "rows": rows,
+        "days": days,
+        "count": len(rows),
+        "avg_loads_short": avg_loads_short,
+        "behind_days": behind_days,
+        "total_no_dep": total_no_dep,
+    }
 # ============================================================
 #  PRIVATE HELPERS
 # ============================================================
