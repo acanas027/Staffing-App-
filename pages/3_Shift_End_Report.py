@@ -1535,7 +1535,7 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
         f"End-of-day report for {report['date']} is ready.\n\n"
         f"{goal_line}\n"
         f"{completed_line}\n"
-        f"Controllable misses: {miss_count}.\n\n"
+        f"Controllable service misses: {miss_count}.\n\n"
         "The full PDF is attached.\n\n"  # reminder to you — attach it before sending
         "Thanks,"
     )
