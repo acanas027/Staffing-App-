@@ -14,6 +14,7 @@ import datetime
 from openai import OpenAI
 
 import dc_config
+import urllib
 
 try:
     from reportlab.lib import colors
@@ -3835,6 +3836,13 @@ def build_dashboard(wb, summary_table, present_recommendations, recommendations,
         ws_dash.column_dimensions[col].width = 35
     ws_dash.freeze_panes = f"A{header_row}"
 
+def _build_mailto(to_addr, subject, body):
+    """Build a mailto: link that prefills recipient, subject, and body."""
+    params = urllib.parse.urlencode(
+        {"subject": subject, "body": body},
+        quote_via=urllib.parse.quote,
+    )
+    return f"mailto:{to_addr.strip()}?{params}"
 
 # ============================================================
 #  EMAIL DRAFT
@@ -5624,6 +5632,14 @@ if result:
         st.markdown(executive_summary_text)
 
     st.markdown("---")
-    st.subheader("Email Ready to Send")
-    st.text_input("Email Subject", value=result["email_subject"])
-    st.text_area("Email Body", value=result["email_body"], height=500)
+    st.subheader("Email this report")
+    boss_email = "brianm@resers.com"
+
+    st.link_button(
+        "Open email to boss",
+        _build_mailto(boss_email, result["email_subject"], result["email_body"]),
+    )
+    st.caption(
+        "Opens your mail app with the message prefilled to "
+        f"{boss_email}. Attach the PDF you downloaded above, then send."
+    )
