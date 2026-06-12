@@ -1535,6 +1535,10 @@ if submitted:
             "loads_short": loads_short,
             "no_departure_count": no_dep_count,
         })
+        pdf_bytes = build_report_pdf(
+            operating_date_str, report_rows, misses, notes,
+            service_rows=opendock_service_rows,
+        )
         st.session_state["closeout_report"] = {
             "date": operating_date_str,
             "shift": DAILY_SHIFT_KEY,
