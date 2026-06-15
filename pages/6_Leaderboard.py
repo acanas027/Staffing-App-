@@ -440,10 +440,11 @@ if "raw_text" not in st.session_state:
 tab_text, tab_image = st.tabs(["Paste text", "Paste / upload screenshot"])
 
 with tab_text:
-    st.session_state.raw_text = st.text_area(
+    st.text_area(
         "Paste rows here (one picker per line):",
-        value=st.session_state.raw_text, height=240,
+        height=240,
         placeholder="AIRELH    1,760    0    11.74\nDANIELV   1,659    0    11.07\n...",
+        key="raw_text",
     )
 
 with tab_image:
@@ -475,7 +476,6 @@ with tab_image:
                     extracted = ocr_image(img_bytes)
                 st.text_area("OCR result (edit if needed, then build below):",
                              value=extracted, height=200, key="ocr_box")
-                st.session_state.raw_text = st.session_state.get("ocr_box", extracted)
             except Exception as e:
                 st.error(f"Couldn't read the image ({type(e).__name__}). "
                          "Use the Paste text tab instead.")
@@ -484,15 +484,23 @@ st.divider()
 
 # ---- Build: parse names + cases, then collect hours --------------------------
 if st.button("Build leaderboard", type="primary", use_container_width=True):
-    text = st.session_state.get("ocr_box") or st.session_state.raw_text
-    parsed = parse_rows(text or "")
-    if parsed.empty:
-        st.session_state.pop("picker_df", None)
-        st.error("No valid rows found. Check the text/OCR output above — each line "
-                 "should be a name followed by numbers.")
+    # Read from the widgets' own session keys (stable across the rerun the click
+    # triggers). OCR box wins if it has content, otherwise the pasted text.
+    ocr_text = (st.session_state.get("ocr_box") or "").strip()
+    paste_text = (st.session_state.get("raw_text") or "").strip()
+    text = ocr_text or paste_text
+
+    if not text:
+        st.warning("Paste your picker rows in the **Paste text** tab (or OCR a "
+                   "screenshot) first, then click Build leaderboard.")
     else:
-        # Store only the parsed identity + cases; hours are entered below.
-        st.session_state["picker_df"] = parsed[["rank", "name", "cases", "pct"]].copy()
+        parsed = parse_rows(text)
+        if parsed.empty:
+            st.error("Couldn't find any picker rows in that text. Each line should be "
+                     "a name followed by numbers, e.g. `AIRELH  1,760  0  11.74`.")
+        else:
+            # Store only the parsed identity + cases; hours are entered below.
+            st.session_state["picker_df"] = parsed[["rank", "name", "cases", "pct"]].copy()
 
 # ---- Hours entry + rate leaderboard -----------------------------------------
 if "picker_df" in st.session_state:
