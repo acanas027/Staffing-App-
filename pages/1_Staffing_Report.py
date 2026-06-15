@@ -833,6 +833,13 @@ FIRST_SHIFT_PALLET_SHARE = 0.33
 SECOND_SHIFT_PALLET_SHARE = 0.31
 CASES_PER_PALLET = 75
 
+# Full-shift working hours used ONLY to size the staffing NEED (breaks excluded).
+# This is a fixed shift length, not time-remaining: a full-shift quota must be
+# divided by full-shift hours, or regenerating the report midday inflates every
+# need. hours_remaining is still used everywhere else (goal/handoff math) where
+# remaining work is measured against remaining time -- this does NOT touch those.
+SHIFT_LABOR_HOURS = 9.5
+
 
 def calculate_input_values(day, shift, total_cases):
     # Flat per-shift shares of the day's total cases. `day` is kept in the
@@ -851,8 +858,10 @@ def calculate_needed(
     crossroads_open, deer_creek_open, msb_open,
     cases_to_pick_override=None, full_pallets_override=None,
 ):
-    if hours_remaining <= 0:
-        hours_remaining = 1
+    # NOTE: hours_remaining is still accepted for signature compatibility, but the
+    # staffing NEED is sized off the FIXED full-shift length (SHIFT_LABOR_HOURS),
+    # not time-remaining. A full-shift quota divided by shrinking time-left would
+    # inflate the need every time the report is regenerated later in the shift.
 
     # Old fallback: estimate picks/pulls from total cases.
     # New board flow: use exact board totals from Outbound!L2 and Outbound!K2.
@@ -867,13 +876,13 @@ def calculate_needed(
     if msb_open == "YES":
         inbound_pallets += 640
     raw_needed = {
-        "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * hours_remaining),
-        "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * hours_remaining),
-        "Putaway":       (inbound_pallets / 2) / (PULL_RATE * hours_remaining),
-        "Picking":       cases_to_pick / (PICK_RATE * hours_remaining),
-        "Replenishment": (cases_to_pick / CASES_PER_PALLET) / (PULL_RATE * 8.5),
-        "Full Pallets":  full_pallets / (PULL_RATE * hours_remaining),
-        "Loading":       total_outbound_loads_actual / hours_remaining,
+        "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
+        "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
+        "Putaway":       (inbound_pallets / 2) / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Picking":       cases_to_pick / (PICK_RATE * SHIFT_LABOR_HOURS),
+        "Replenishment": (cases_to_pick / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Full Pallets":  full_pallets / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Loading":       total_outbound_loads_actual / SHIFT_LABOR_HOURS,
     }
     needed = {
         "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
