@@ -3933,15 +3933,14 @@ def build_email_draft(
     pull_pct = int(float(controlled.get("pull_frac", 0) or 0) * 100)
     load_pct = int(float(controlled.get("load_frac", 0) or 0) * 100)
 
-    lines = [f"{day} {shift} shift — first-page summary."]
-    lines.append(f"Shift health: {health}.")
+    lines = [f"Shift health: {health}."]
     if goal:
         lines.append(f"Goal: {goal}")
     lines.append(
         f"Loads: {pacing.get('selected_day_total_loads', 0)} today | "
         f"Completed {pacing.get('completed_count', 0)} | "
         f"Due now {pacing.get('due_by_now', 0)} | "
-        f"Due not done {pacing.get('due_not_RTL', 0)} | "
+        f"Due not RTL {pacing.get('due_not_RTL', 0)} | "
         f"Pacing {pacing.get('pacing', 'n/a')}."
     )
     lines.append(f"Picks left {picks_left:,} | Pulls left {pulls_left:,} | Hours left {hours_remaining}.")
@@ -5647,7 +5646,7 @@ if result:
     boss_email = "brianm@resers.com"
 
     st.link_button(
-        "Open email to boss",
+        "Email to manager",
         _build_mailto(boss_email, result["email_subject"], result["email_body"]),
     )
     st.caption(
