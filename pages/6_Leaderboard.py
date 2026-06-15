@@ -7,7 +7,7 @@ Paste a screenshot OR paste raw text. The app extracts, per row:
     3. % of total
 …then you enter the hours each person actually picked, and it ranks everyone by
 CASES PER HOUR (the fair metric). Top 3 (at/above standard) show green; anyone
-below the 185 cases/hr standard show red.
+below the 210 cases/hr standard show red.
 
 Deploy on Streamlit Community Cloud (files at REPO ROOT):
   - app.py            (this file)
@@ -143,7 +143,7 @@ def ocr_image(file_bytes: bytes) -> str:
 # =============================================================================
 # Rate math  (NEW — single source of truth for screen + PDF)
 # =============================================================================
-STANDARD_RATE = 185   # cases/hr; at/above = OK, below = red flag
+STANDARD_RATE = 210   # cases/hr; at/above = OK, below = red flag
 
 # Predetermined hours worked at each point in the shift, by day type.
 # SUPERVISORS: change these numbers if the schedule changes — nothing else needs editing.
@@ -316,7 +316,7 @@ LINE    = colors.HexColor("#cbd2d9")
 FAINT   = colors.HexColor("#eef1f4")
 HEADER  = colors.HexColor("#243b53")
 GREEN   = colors.HexColor("#2f9e44")   # top 3 at/above standard
-RED     = colors.HexColor("#e03131")   # below 185/hr standard
+RED     = colors.HexColor("#e03131")   # below 210/hr standard
 BASEBAR = colors.HexColor("#52606d")   # everyone else
 ZEBRA   = colors.HexColor("#f5f7fa")
 
@@ -410,11 +410,11 @@ def labeled_bar_chart(df: pd.DataFrame, width: float) -> Drawing:
         d.add(Line(0, row_top - row_h, width, row_top - row_h,
                    strokeColor=FAINT, strokeWidth=0.5))
 
-    # ---- 185 standard marker (drawn on top of the bars) ----
+    # ---- standard marker (drawn on top of the bars) ----
     std_x = bar_x + bar_max * (STANDARD_RATE / maxv)
     d.add(Line(std_x, height - head_h, std_x, 2,
                strokeColor=RED, strokeWidth=0.7, strokeDashArray=[3, 3]))
-    d.add(String(std_x, height - head_h + 1, "185", fontName="Helvetica-Bold",
+    d.add(String(std_x, height - head_h + 1, str(STANDARD_RATE), fontName="Helvetica-Bold",
                  fontSize=6, fillColor=RED, textAnchor="middle"))
 
     return d
@@ -471,7 +471,7 @@ def generate_pdf(df: pd.DataFrame, title: str, subtitle: str) -> bytes:
     stats = [("PICKERS", f"{len(df)}"),
              ("AVG CASES/HR", rfmt(avg_rate)),
              ("TOP CASES/HR", rfmt(top_rate)),
-             ("BELOW 185", f"{below}")]
+             (f"BELOW {STANDARD_RATE}", f"{below}")]
     box = Table([[Table([[Paragraph(l, lbl)], [Paragraph(v, val)]]) for l, v in stats]],
                 colWidths=[content_w / 4.0] * 4)
     box.setStyle(TableStyle([
@@ -512,7 +512,7 @@ def render_rate_view(df: pd.DataFrame):
     c1.metric("Pickers", len(df))
     c2.metric("Avg cases/hr", f"{rated['rate'].mean():,.0f}" if not rated.empty else "—")
     c3.metric("Top cases/hr", f"{rated['rate'].max():,.0f}" if not rated.empty else "—")
-    c4.metric("Below 185", int((rated["rate"] < STANDARD_RATE).sum()) if not rated.empty else 0)
+    c4.metric(f"Below {STANDARD_RATE}", int((rated["rate"] < STANDARD_RATE).sum()) if not rated.empty else 0)
 
     plot = df.copy()
     plot["rate_plot"] = plot["rate"].fillna(0)
@@ -608,7 +608,7 @@ with st.expander("Report details (shown on the PDF)", expanded=False):
 if "raw_text" not in st.session_state:
     st.session_state.raw_text = ""
 
-tab_text, tab_image = st.tabs(["Paste text", "Paste / upload screenshot"])
+tab_image, tab_text = st.tabs(["Paste / upload screenshot", "Paste text"])
 
 with tab_text:
     st.text_area(
@@ -753,52 +753,29 @@ else:
         st.caption("No data saved yet. Build a leaderboard, select **End of day**, "
                    "and click **Save data for this day** to start your history.")
     else:
-        with st.expander("Per-worker history", expanded=False):
-            workers = sorted(history["worker_id"].unique())
-            w = st.selectbox("Worker", workers, key="hist_worker")
-            wdf = history[history["worker_id"] == w].sort_values("date").copy()
+        blocks = saved_dates_in_blocks(history, block_size=5)
+        block_labels = [
+            f"Block {i + 1}: {b[0]} → {b[-1]}  ({len(b)}/5 days)"
+            for i, b in enumerate(blocks)
+        ]
 
-            tot_c = float(wdf["cases"].sum())
-            tot_h = float(wdf["hours"].sum())
-            overall = (tot_c / tot_h) if tot_h > 0 else float("nan")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Saved days", len(wdf))
-            m2.metric("Overall rate", f"{overall:,.0f}/hr" if tot_h > 0 else "—")
-            m3.metric("Total cases", f"{int(tot_c):,}")
+        view = st.radio(
+            "What do you want to see?",
+            ["5-day block leaderboard (everyone)", "Per-worker"],
+            horizontal=True,
+            key="hist_view",
+        )
 
-            try:
-                import altair as alt
-                line = alt.Chart(wdf).mark_line(point=True).encode(
-                    x=alt.X("date:N", title="Date"),
-                    y=alt.Y("rate:Q", title="Cases / hr"),
-                    tooltip=["date", "day_of_week", "cases", "hours", "rate"],
-                )
-                std = alt.Chart(pd.DataFrame({"y": [STANDARD_RATE]})).mark_rule(
-                    color="#e03131", strokeDash=[4, 4]).encode(y="y:Q")
-                st.altair_chart((line + std).properties(height=260),
-                                use_container_width=True)
-            except Exception:
-                st.line_chart(wdf.set_index("date")["rate"])
-
-            st.dataframe(
-                wdf[["date", "day_of_week", "cases", "hours", "rate"]].reset_index(drop=True),
-                use_container_width=True,
-            )
-            st.caption("Overall rate = total cases ÷ total hours across all saved days "
-                       "(dashed line = 185/hr standard).")
-
-        with st.expander("5-day block leaderboard", expanded=True):
-            blocks = saved_dates_in_blocks(history, block_size=5)
-            labels = [
-                f"Block {i + 1}: {b[0]} → {b[-1]}  ({len(b)}/5 days)"
-                for i, b in enumerate(blocks)
-            ]
+        # ---------------------------------------------------------------
+        # VIEW 1: full 5-day block leaderboard (everyone), pick any block
+        # ---------------------------------------------------------------
+        if view == "5-day block leaderboard (everyone)":
             idx = st.selectbox(
-                "Block (each = 5 saved days)",
+                "Block (each = 5 saved days; newest last)",
                 list(range(len(blocks))),
                 index=len(blocks) - 1,
-                format_func=lambda i: labels[i],
-                key="block_sel",
+                format_func=lambda i: block_labels[i],
+                key="lb_block_sel",
             )
             block_dates = blocks[idx]
             bdf = history[history["date"].isin(block_dates)]
@@ -812,12 +789,128 @@ else:
 
             render_rate_view(agg)
             st.download_button(
-                "Download this block's CSV",
+                "Download this block (CSV)",
                 data=agg.to_csv(index=False).encode("utf-8"),
-                file_name=f"block_{idx + 1}.csv", mime="text/csv",
+                file_name=f"block_{idx + 1}_leaderboard.csv", mime="text/csv",
                 use_container_width=True,
             )
             st.caption(
                 f"Block rate = total cases ÷ total hours across {len(block_dates)} "
                 "saved day(s). A heavier day counts proportionally more."
             )
+
+        # ---------------------------------------------------------------
+        # VIEW 2: per-worker — Daily or 5-day-block trend
+        # ---------------------------------------------------------------
+        else:
+            workers = sorted(history["worker_id"].unique())
+            worker = st.selectbox("Worker", workers, key="pw_worker")
+            mode = st.radio("View", ["Daily", "5-day block"],
+                            horizontal=True, key="pw_mode")
+            wdf_all = history[history["worker_id"] == worker].copy()
+
+            if mode == "Daily":
+                wdf = wdf_all.sort_values("date")
+                tot_c = float(wdf["cases"].sum())
+                tot_h = float(wdf["hours"].sum())
+                overall = (tot_c / tot_h) if tot_h > 0 else float("nan")
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Saved days", len(wdf))
+                m2.metric("Overall rate", f"{overall:,.0f}/hr" if tot_h > 0 else "—")
+                m3.metric("Total cases", f"{int(tot_c):,}")
+
+                try:
+                    import altair as alt
+                    line = alt.Chart(wdf).mark_line(point=True).encode(
+                        x=alt.X("date:N", title="Date"),
+                        y=alt.Y("rate:Q", title="Cases / hr"),
+                        tooltip=["date", "day_of_week", "cases", "hours", "rate"],
+                    )
+                    std = alt.Chart(pd.DataFrame({"y": [STANDARD_RATE]})).mark_rule(
+                        color="#e03131", strokeDash=[4, 4]).encode(y="y:Q")
+                    st.altair_chart((line + std).properties(height=260),
+                                    use_container_width=True)
+                except Exception:
+                    st.line_chart(wdf.set_index("date")["rate"])
+
+                show = wdf[["date", "day_of_week", "cases", "hours", "rate"]].reset_index(drop=True)
+                st.dataframe(show, use_container_width=True)
+                st.download_button(
+                    f"Download {worker} daily (CSV)",
+                    data=show.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{worker}_daily.csv", mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption(f"Overall rate = total cases ÷ total hours across all saved "
+                           f"days (dashed line = {STANDARD_RATE}/hr standard).")
+
+            else:  # 5-day block trend: one rate per block this worker appears in
+                rows = []
+                for i, b in enumerate(blocks):
+                    sub = wdf_all[wdf_all["date"].isin(b)]
+                    if sub.empty:
+                        continue
+                    c = float(sub["cases"].sum())
+                    h = float(sub["hours"].sum())
+                    rate = (c / h) if h > 0 else float("nan")
+                    rows.append({
+                        "block_no": i + 1,
+                        "block": f"Block {i + 1}",
+                        "range": f"{b[0]} → {b[-1]}",
+                        "days": len(sub),
+                        "cases": int(c),
+                        "hours": h,
+                        "rate": round(rate, 1) if h > 0 else float("nan"),
+                    })
+                btrend = pd.DataFrame(rows)
+
+                if btrend.empty:
+                    st.caption("No saved blocks for this worker yet.")
+                else:
+                    btrend["color_group"] = btrend["rate"].apply(
+                        lambda v: "neutral" if pd.isna(v)
+                        else ("green" if v >= STANDARD_RATE else "red")
+                    )
+                    rated = btrend[btrend["rate"].notna()]
+                    tot_c = float(btrend["cases"].sum())
+                    tot_h = float(btrend["hours"].sum())
+                    overall = (tot_c / tot_h) if tot_h > 0 else float("nan")
+
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Blocks", len(btrend))
+                    m2.metric("Latest block", f"{rated['rate'].iloc[-1]:,.0f}/hr"
+                              if not rated.empty else "—")
+                    m3.metric("Overall rate", f"{overall:,.0f}/hr" if tot_h > 0 else "—")
+
+                    try:
+                        import altair as alt
+                        bars = alt.Chart(btrend).mark_bar(cornerRadiusEnd=2).encode(
+                            x=alt.X("block:N", sort=list(btrend["block"]), title=None),
+                            y=alt.Y("rate:Q", title="Cases / hr"),
+                            color=alt.Color("color_group:N",
+                                            scale=alt.Scale(domain=["green", "red", "neutral"],
+                                                            range=["#2f9e44", "#e03131", "#52606d"]),
+                                            legend=None),
+                            tooltip=["block", "range", "days", "cases", "hours", "rate"],
+                        )
+                        std = alt.Chart(pd.DataFrame({"y": [STANDARD_RATE]})).mark_rule(
+                            color="#e03131", strokeDash=[4, 4]).encode(y="y:Q")
+                        st.altair_chart((bars + std).properties(height=280),
+                                        use_container_width=True)
+                    except Exception:
+                        st.bar_chart(btrend.set_index("block")["rate"])
+
+                    show = btrend[["block", "range", "days", "cases", "hours", "rate"]]
+                    st.dataframe(show, use_container_width=True)
+                    st.download_button(
+                        f"Download {worker} block trend (CSV)",
+                        data=show.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{worker}_block_trend.csv", mime="text/csv",
+                        use_container_width=True,
+                    )
+                    st.caption(
+                        f"One bar per 5-day block = total cases ÷ total hours for that "
+                        f"worker's days in the block (green ≥ {STANDARD_RATE}/hr, red below). "
+                        "Shows whether they're trending up or down."
+                    )
