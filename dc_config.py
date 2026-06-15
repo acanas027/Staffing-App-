@@ -26,7 +26,7 @@ Change a value here once and every page that imports it picks up the change.
 # ============================================================
 #  WORK RATES  (per person, per hour)
 # ============================================================
-PICK_RATE = 185.0    # cases picked per hour per person
+PICK_RATE = 210.0    # cases picked per hour per person
 PULL_RATE = 25.0     # full pallets pulled per hour per person
 LOAD_RATE = 1.0      # trailers loaded per hour per person
 UNLOAD_RATE = 44.0   # inbound pallets unloaded per hour per person
