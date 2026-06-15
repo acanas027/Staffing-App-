@@ -19,6 +19,20 @@ import io
 import re
 from datetime import datetime
 
+# Central Time clock for report timestamps. America/Chicago auto-handles
+# CST (winter) vs CDT (summer); a fixed -6 offset would be an hour off half the year.
+# Fallback to fixed CST only if the tz database isn't available on the host.
+try:
+    from zoneinfo import ZoneInfo
+    _CENTRAL = ZoneInfo("America/Chicago")
+except Exception:
+    from datetime import timezone, timedelta
+    _CENTRAL = timezone(timedelta(hours=-6))  # CST (no DST) fallback
+
+
+def central_now() -> datetime:
+    return datetime.now(_CENTRAL)
+
 import pandas as pd
 import streamlit as st
 
@@ -334,7 +348,7 @@ def generate_pdf(df: pd.DataFrame, title: str, subtitle: str) -> bytes:
     story = []
 
     # ---- header band ----
-    gen = datetime.now().strftime("%B %d, %Y  %I:%M %p")
+    gen = central_now().strftime("%B %d, %Y  %I:%M %p %Z")
     head = Table([[Paragraph(title, h_title)],
                   [Paragraph(subtitle, h_sub)],
                   [Paragraph(f"Generated {gen}", h_sub)]], colWidths=[content_w])
