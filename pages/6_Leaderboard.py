@@ -5,8 +5,9 @@ Paste a screenshot OR paste raw text. The app extracts, per row:
     1. name
     2. cases picked
     3. % of total
-…and renders a single-page, print-ready leaderboard where every picker's bar
-is labelled with their case count and their % of the total.
+…then you enter the hours each person actually picked, and it ranks everyone by
+CASES PER HOUR (the fair metric). Top 3 (at/above standard) show green; anyone
+below the 185 cases/hr standard shows red.
 
 Deploy on Streamlit Community Cloud (files at REPO ROOT):
   - app.py            (this file)
@@ -60,7 +61,7 @@ def tesseract_engine_ready() -> bool:
 
 
 # =============================================================================
-# Parsing
+# Parsing  (UNCHANGED)
 # =============================================================================
 NUMERIC_RE = re.compile(r"^[\$]?[\d.,]+%?$")
 
@@ -126,20 +127,71 @@ def ocr_image(file_bytes: bytes) -> str:
 
 
 # =============================================================================
+# Rate math  (NEW — single source of truth for screen + PDF)
+# =============================================================================
+STANDARD_RATE = 185   # cases/hr; at/above = OK, below = red flag
+
+
+def compute_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add cases/hr, re-rank by rate, and tag each row's color group.
+    Rules:
+      - no hours entered  -> rate = NaN, group 'neutral'
+      - rate < STANDARD    -> 'red'  (below standard wins, even if top 3)
+      - top 3 by rate (>=standard) -> 'green'
+      - everyone else      -> 'neutral'
+    Rows without hours sort to the bottom (by cases) so the ranking stays clean.
+    """
+    d = df.copy()
+    if "hours" not in d.columns:
+        d["hours"] = 0.0
+    d["hours"] = pd.to_numeric(d["hours"], errors="coerce").fillna(0.0)
+    d["rate"] = [
+        (c / h) if (h and h > 0) else float("nan")
+        for c, h in zip(d["cases"], d["hours"])
+    ]
+
+    has = d[d["rate"].notna()].copy()
+    has["rate"] = has["rate"].astype(float)
+    has = has.sort_values("rate", ascending=False)
+    no = d[d["rate"].isna()].sort_values("cases", ascending=False)
+    d = pd.concat([has, no], ignore_index=True)
+    d["rank"] = d.index + 1
+
+    groups = []
+    for i, rate in enumerate(d["rate"].tolist()):
+        if pd.isna(rate):
+            groups.append("neutral")
+        elif rate < STANDARD_RATE:
+            groups.append("red")
+        elif i < 3:
+            groups.append("green")
+        else:
+            groups.append("neutral")
+    d["color_group"] = groups
+    return d
+
+
+# =============================================================================
 # Print-ready PDF (single combined chart, one page)
 # =============================================================================
-INK    = colors.HexColor("#1f2933")
-STEEL  = colors.HexColor("#3e4c59")
-LINE   = colors.HexColor("#cbd2d9")
-FAINT  = colors.HexColor("#eef1f4")
-HEADER = colors.HexColor("#243b53")
-ACCENT = colors.HexColor("#b45309")   # amber: top 3 bars
-BASEBAR = colors.HexColor("#52606d")  # steel: everyone else
-ZEBRA  = colors.HexColor("#f5f7fa")
+INK     = colors.HexColor("#1f2933")
+STEEL   = colors.HexColor("#3e4c59")
+LINE    = colors.HexColor("#cbd2d9")
+FAINT   = colors.HexColor("#eef1f4")
+HEADER  = colors.HexColor("#243b53")
+GREEN   = colors.HexColor("#2f9e44")   # top 3 at/above standard
+RED     = colors.HexColor("#e03131")   # below 185/hr standard
+BASEBAR = colors.HexColor("#52606d")   # everyone else
+ZEBRA   = colors.HexColor("#f5f7fa")
+
+
+def _bar_color(group):
+    return GREEN if group == "green" else (RED if group == "red" else BASEBAR)
 
 
 def labeled_bar_chart(df: pd.DataFrame, width: float) -> Drawing:
-    """One row per picker: rank + name | bar with case count | % of total."""
+    """One row per picker: rank + name | bar = cases/hr | cases | % of total."""
     n = len(df)
     row_h = 28
     head_h = 18
@@ -147,19 +199,28 @@ def labeled_bar_chart(df: pd.DataFrame, width: float) -> Drawing:
     d = Drawing(width, height)
 
     name_w = 132          # rank + name zone
-    pct_w = 58            # right % column
+    cases_w = 56          # right CASES column
+    pct_w = 52            # right % OF TOTAL column
+    right_w = cases_w + pct_w
     gap = 10
     bar_x = name_w + gap
-    bar_max = width - name_w - pct_w - 2 * gap
-    maxv = max(df["cases"].max(), 1)
+    bar_max = width - name_w - right_w - 2 * gap
+    cases_x = width - pct_w - 4   # right edge of the CASES number
+    pct_x = width - 2             # right edge of the % number
+
+    rate_vals = [r for r in df["rate"].tolist() if not pd.isna(r)]
+    maxv = max(rate_vals + [STANDARD_RATE]) if rate_vals else STANDARD_RATE
+    maxv = max(maxv, 1)
 
     # ---- column headers ----
     hy = height - 11
     d.add(String(2, hy, "RANK / PICKER", fontName="Helvetica-Bold",
                  fontSize=7.5, fillColor=STEEL))
-    d.add(String(bar_x, hy, "CASES PICKED", fontName="Helvetica-Bold",
+    d.add(String(bar_x, hy, "CASES / HR", fontName="Helvetica-Bold",
                  fontSize=7.5, fillColor=STEEL))
-    d.add(String(width - 2, hy, "% OF TOTAL", fontName="Helvetica-Bold",
+    d.add(String(cases_x, hy, "CASES", fontName="Helvetica-Bold",
+                 fontSize=7.5, fillColor=STEEL, textAnchor="end"))
+    d.add(String(pct_x, hy, "% OF TOTAL", fontName="Helvetica-Bold",
                  fontSize=7.5, fillColor=STEEL, textAnchor="end"))
     d.add(Line(0, height - head_h, width, height - head_h,
                strokeColor=LINE, strokeWidth=0.8))
@@ -168,46 +229,58 @@ def labeled_bar_chart(df: pd.DataFrame, width: float) -> Drawing:
     for i, (_, r) in enumerate(df.iterrows()):
         row_top = height - head_h - i * row_h
         cy = row_top - row_h / 2
-        is_top = r["rank"] <= 3
+        grp = r["color_group"]
+        is_top = grp == "green"
 
-        # zebra background
         if i % 2 == 1:
             d.add(Rect(0, row_top - row_h, width, row_h,
                        fillColor=ZEBRA, strokeColor=None))
 
-        bar_color = ACCENT if is_top else BASEBAR
+        bar_color = _bar_color(grp)
         name_font = "Helvetica-Bold" if is_top else "Helvetica"
         text_y = cy - 3.2
 
         # rank + name
         d.add(String(2, text_y, str(int(r["rank"])), fontName="Helvetica-Bold",
-                     fontSize=9, fillColor=ACCENT if is_top else STEEL))
+                     fontSize=9, fillColor=(bar_color if grp != "neutral" else STEEL)))
         d.add(String(22, text_y, str(r["name"]), fontName=name_font,
                      fontSize=9.5, fillColor=INK))
 
-        # bar
+        rate = r["rate"]
         bar_h = 15
         by = cy - bar_h / 2
-        w = max(bar_max * (r["cases"] / maxv), 2)
-        d.add(Rect(bar_x, by, w, bar_h, fillColor=bar_color, strokeColor=None))
-
-        # case count: inside the bar if it fits, otherwise just past the end
-        cases_str = f"{int(r['cases']):,}"
-        if w > 50:
-            d.add(String(bar_x + w - 6, text_y, cases_str, fontName="Helvetica-Bold",
-                         fontSize=8.5, fillColor=colors.white, textAnchor="end"))
+        if pd.isna(rate):
+            d.add(String(bar_x, text_y, "— enter hours", fontName="Helvetica-Oblique",
+                         fontSize=8, fillColor=STEEL))
         else:
-            d.add(String(bar_x + w + 5, text_y, cases_str, fontName="Helvetica-Bold",
-                         fontSize=8.5, fillColor=STEEL, textAnchor="start"))
+            w = max(bar_max * (rate / maxv), 2)
+            d.add(Rect(bar_x, by, w, bar_h, fillColor=bar_color, strokeColor=None))
+            rate_str = f"{rate:.0f}/hr"
+            if w > 46:
+                d.add(String(bar_x + w - 6, text_y, rate_str, fontName="Helvetica-Bold",
+                             fontSize=8.5, fillColor=colors.white, textAnchor="end"))
+            else:
+                d.add(String(bar_x + w + 5, text_y, rate_str, fontName="Helvetica-Bold",
+                             fontSize=8.5, fillColor=STEEL, textAnchor="start"))
 
-        # % of total (right column)
-        d.add(String(width - 2, text_y, f"{r['pct']:.2f}%", fontName=name_font,
-                     fontSize=9.5, fillColor=INK if is_top else STEEL,
-                     textAnchor="end"))
+        # cases + % of total (two right columns)
+        d.add(String(cases_x, text_y, f"{int(r['cases']):,}", fontName=name_font,
+                     fontSize=9.5, fillColor=INK if is_top else STEEL, textAnchor="end"))
+        pct_val = r.get("pct")
+        pct_str = f"{float(pct_val):.2f}%" if pct_val is not None and not pd.isna(pct_val) else "—"
+        d.add(String(pct_x, text_y, pct_str, fontName=name_font,
+                     fontSize=9.5, fillColor=INK if is_top else STEEL, textAnchor="end"))
 
         # row separator
         d.add(Line(0, row_top - row_h, width, row_top - row_h,
                    strokeColor=FAINT, strokeWidth=0.5))
+
+    # ---- 185 standard marker (drawn on top of the bars) ----
+    std_x = bar_x + bar_max * (STANDARD_RATE / maxv)
+    d.add(Line(std_x, height - head_h, std_x, 2,
+               strokeColor=RED, strokeWidth=0.7, strokeDashArray=[3, 3]))
+    d.add(String(std_x, height - head_h + 1, "185", fontName="Helvetica-Bold",
+                 fontSize=6, fillColor=RED, textAnchor="middle"))
 
     return d
 
@@ -245,18 +318,25 @@ def generate_pdf(df: pd.DataFrame, title: str, subtitle: str) -> bytes:
         ("RIGHTPADDING", (0, 0), (-1, -1), 16),
         ("TOPPADDING", (0, 0), (0, 0), 14),
         ("BOTTOMPADDING", (-1, -1), (-1, -1), 14),
-        ("LINEBELOW", (0, -1), (-1, -1), 3, ACCENT),
+        ("LINEBELOW", (0, -1), (-1, -1), 3, GREEN),
     ]))
     story.append(head)
     story.append(Spacer(1, 12))
 
-    # ---- summary boxes ----
+    # ---- summary boxes (rate-focused) ----
+    rated = df[df["rate"].notna()]
     total = int(df["cases"].sum())
-    avg = int(round(df["cases"].mean()))
+    avg_rate = rated["rate"].mean() if not rated.empty else None
+    top_rate = rated["rate"].max() if not rated.empty else None
+    below = int((rated["rate"] < STANDARD_RATE).sum()) if not rated.empty else 0
+
+    def rfmt(v):
+        return f"{v:,.0f}/hr" if v is not None else "—"
+
     stats = [("PICKERS", f"{len(df)}"),
-             ("TOTAL CASES", f"{total:,}"),
-             ("AVG PER PICKER", f"{avg:,}"),
-             ("TOP PICKER", df.iloc[0]["name"])]
+             ("AVG CASES/HR", rfmt(avg_rate)),
+             ("TOP CASES/HR", rfmt(top_rate)),
+             ("BELOW 185", f"{below}")]
     box = Table([[Table([[Paragraph(l, lbl)], [Paragraph(v, val)]]) for l, v in stats]],
                 colWidths=[content_w / 4.0] * 4)
     box.setStyle(TableStyle([
@@ -271,51 +351,66 @@ def generate_pdf(df: pd.DataFrame, title: str, subtitle: str) -> bytes:
     story.append(box)
 
     # ---- the single combined chart ----
-    story.append(Paragraph("Leaderboard", h_sec))
+    story.append(Paragraph("Leaderboard — ranked by cases / hour", h_sec))
     story.append(labeled_bar_chart(df, content_w))
 
     foot = ParagraphStyle("foot", fontName="Helvetica", fontSize=7.5,
                           textColor=STEEL, alignment=1, spaceBefore=10)
     story.append(Spacer(1, 4))
-    story.append(Paragraph("Ranked by cases picked. Top three shown in amber.", foot))
+    story.append(Paragraph(
+        f"Ranked by cases/hr. Green = top 3 at/above the {STANDARD_RATE}/hr standard. "
+        f"Red = below {STANDARD_RATE}/hr. Total cases: {total:,}.", foot))
 
     doc.build(story)
     return buf.getvalue()
 
 
 # =============================================================================
-# On-screen leaderboard (matches the PDF: one labelled chart)
+# On-screen leaderboard (matches the PDF: one labelled chart, rate-first)
 # =============================================================================
 def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str):
+    rated = df[df["rate"].notna()]
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Pickers", len(df))
-    c2.metric("Total cases", f"{int(df['cases'].sum()):,}")
-    c3.metric("Avg per picker", f"{int(round(df['cases'].mean())):,}")
-    c4.metric("Top picker", df.iloc[0]["name"])
+    c2.metric("Avg cases/hr", f"{rated['rate'].mean():,.0f}" if not rated.empty else "—")
+    c3.metric("Top cases/hr", f"{rated['rate'].max():,.0f}" if not rated.empty else "—")
+    c4.metric("Below 185", int((rated["rate"] < STANDARD_RATE).sum()) if not rated.empty else 0)
 
-    st.markdown("##### Leaderboard")
+    st.markdown("##### Leaderboard — ranked by cases / hour")
     plot = df.copy()
+    plot["rate_plot"] = plot["rate"].fillna(0)
     plot["label"] = plot.apply(
-        lambda r: f"{int(r['cases']):,}  •  {r['pct']:.2f}%", axis=1)
+        lambda r: (f"{r['rate']:.0f}/hr  •  {int(r['cases']):,} cs  •  {float(r['pct']):.2f}%"
+                   if not pd.isna(r["rate"]) else "enter hours"),
+        axis=1,
+    )
     try:
         import altair as alt
         base = alt.Chart(plot).encode(
-            y=alt.Y("name:N", sort="-x", title=None,
-                    axis=alt.Axis(labelFontWeight="bold", labelFontSize=12)),
+            y=alt.Y("name:N", sort=alt.SortField("rate_plot", order="descending"),
+                    title=None, axis=alt.Axis(labelFontWeight="bold", labelFontSize=12)),
         )
         bars = base.mark_bar(cornerRadiusEnd=2).encode(
-            x=alt.X("cases:Q", title="Cases picked"),
-            color=alt.condition(alt.datum.rank <= 3,
-                                alt.value("#b45309"), alt.value("#52606d")),
-            tooltip=["rank", "name", "cases", "pct"],
+            x=alt.X("rate_plot:Q", title="Cases per hour"),
+            color=alt.Color("color_group:N",
+                            scale=alt.Scale(domain=["green", "red", "neutral"],
+                                            range=["#2f9e44", "#e03131", "#52606d"]),
+                            legend=None),
+            tooltip=["rank", "name", "cases", "pct", "hours", "rate"],
         )
         text = base.mark_text(align="left", dx=4, fontSize=11,
                               fontWeight="bold", color="#1f2933").encode(
-            x="cases:Q", text="label:N")
-        st.altair_chart((bars + text).properties(height=max(240, len(df) * 30)),
+            x="rate_plot:Q", text="label:N")
+        rule = alt.Chart(pd.DataFrame({"x": [STANDARD_RATE]})).mark_rule(
+            color="#e03131", strokeDash=[4, 4], size=1.5).encode(x="x:Q")
+        st.altair_chart((bars + text + rule).properties(height=max(240, len(df) * 30)),
                         use_container_width=True)
     except Exception:
-        st.bar_chart(df.set_index("name")["cases"], use_container_width=True)
+        st.bar_chart(df.set_index("name")["rate"].fillna(0), use_container_width=True)
+
+    st.caption(f"Green = top 3 at/above {STANDARD_RATE}/hr  ·  Red = below {STANDARD_RATE}/hr  "
+               "·  dashed line marks the standard.")
 
     pdf_bytes = generate_pdf(df, title or "Case-Picking Leaderboard", subtitle or "")
     st.download_button("Download print-ready PDF (1 page)", data=pdf_bytes,
@@ -331,8 +426,9 @@ def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str):
 # =============================================================================
 st.set_page_config(page_title="Warehouse Leaderboard", layout="centered")
 st.title("Warehouse Case-Picking Leaderboard")
-st.caption("Paste a screenshot or raw text. The app extracts each picker's name, "
-           "cases picked, and share of the total, then builds a one-page report.")
+st.caption("Paste a screenshot or raw text. The app extracts each picker's name and "
+           "cases picked; you enter the hours they actually picked, and it ranks "
+           "everyone by cases per hour.")
 
 with st.expander("Report details (shown on the PDF)", expanded=False):
     report_title = st.text_input("Title", value="Case-Picking Leaderboard")
@@ -386,11 +482,46 @@ with tab_image:
 
 st.divider()
 
+# ---- Build: parse names + cases, then collect hours --------------------------
 if st.button("Build leaderboard", type="primary", use_container_width=True):
     text = st.session_state.get("ocr_box") or st.session_state.raw_text
-    df = parse_rows(text or "")
-    if df.empty:
+    parsed = parse_rows(text or "")
+    if parsed.empty:
+        st.session_state.pop("picker_df", None)
         st.error("No valid rows found. Check the text/OCR output above — each line "
                  "should be a name followed by numbers.")
     else:
-        render_leaderboard(df, report_title, report_subtitle)
+        # Store only the parsed identity + cases; hours are entered below.
+        st.session_state["picker_df"] = parsed[["rank", "name", "cases", "pct"]].copy()
+
+# ---- Hours entry + rate leaderboard -----------------------------------------
+if "picker_df" in st.session_state:
+    base_df = st.session_state["picker_df"]
+    cases_map = dict(zip(base_df["name"], base_df["cases"]))
+
+    st.subheader("Enter hours each person picked")
+    st.caption("Type the hours each person actually spent PICKING today. "
+               "Rate = cases ÷ hours. Leave at 0 if unknown — that person shows no rate. "
+               "Fill them all in, then hit Calculate rates.")
+
+    with st.form("hours_form"):
+        names = base_df["name"].tolist()
+        ncols = 3
+        for i in range(0, len(names), ncols):
+            chunk = names[i:i + ncols]
+            cols = st.columns(ncols)
+            for col, nm in zip(cols, chunk):
+                col.number_input(
+                    f"{nm}  ({int(cases_map[nm]):,} cs)",
+                    min_value=0.0, max_value=24.0, step=0.5, value=0.0,
+                    key=f"hrs::{nm}",
+                )
+        st.form_submit_button("Calculate rates", type="primary", use_container_width=True)
+
+    # Build the working frame from whatever hours have been submitted so far.
+    work = base_df.copy()
+    work["hours"] = work["name"].apply(
+        lambda n: float(st.session_state.get(f"hrs::{n}", 0.0) or 0.0)
+    )
+    work = compute_rates(work)
+    render_leaderboard(work, report_title, report_subtitle)
