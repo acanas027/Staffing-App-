@@ -152,6 +152,11 @@ DEFAULT_HOURS = {
 DAY_TYPES = ["Weekday", "Weekend"]
 BREAK_POINTS = ["1st break", "Lunch", "2nd break", "End of day"]
 
+# Per-worker hours dropdown: every 15 minutes from 0 up to MAX_HOURS.
+# All DEFAULT_HOURS values are quarter-hours, so they're guaranteed to be in this list.
+MAX_HOURS = 13.0
+HOURS_OPTIONS = [round(i * 0.25, 2) for i in range(int(MAX_HOURS / 0.25) + 1)]
+
 
 def compute_rates(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -565,9 +570,10 @@ if "picker_df" in st.session_state:
             chunk = names[i:i + ncols]
             cols = st.columns(ncols)
             for col, nm in zip(cols, chunk):
-                col.number_input(
+                col.selectbox(
                     f"{nm}  ({int(cases_map[nm]):,} cs)",
-                    min_value=0.0, max_value=24.0, step=0.25,
+                    options=HOURS_OPTIONS,
+                    format_func=lambda v: f"{v:.2f} h",
                     key=f"hrs::{nm}",
                 )
         st.form_submit_button("Calculate rates", type="primary", use_container_width=True)
