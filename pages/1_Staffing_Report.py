@@ -4898,6 +4898,10 @@ def run_full_generation(
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
 
+    # Tool's recommended placement, captured BEFORE any supervisor override below
+    # reassigns the same crew. This is shown on screen as the comparison board.
+    # build_summary() already returns a fresh copy, but copy() makes the intent explicit.
+    recommended_present_board = present_recommendations.copy()
     total_present = len(present_recommendations)
     total_needed = int(pd.Series(needed).sum())
     lead_extra_override = None
@@ -5053,6 +5057,7 @@ def run_full_generation(
         "excel_output_bytes": output.getvalue(),
         "summary_table": summary_table,
         "present_recommendations": present_recommendations,
+        "recommended_present_board": recommended_present_board,
         "recommendations": recommendations,
         "board_analysis_text": board_analysis_text,
         "executive_summary_text": executive_summary_text,
@@ -5597,8 +5602,18 @@ if result:
     st.dataframe(summary_table, use_container_width=True)
 
     st.subheader("Recommended Staffing Board")
+    recommended_board_to_show = result.get("recommended_present_board")
+    if recommended_board_to_show is None:
+        recommended_board_to_show = present_recommendations
+    if result.get("override_mode") and result.get("deviation_reason") not in (
+        None, "", "Running the tool's recommended allocation."
+    ):
+        st.caption(
+            "This is the tool's recommended placement, shown for comparison. "
+            "The report above reflects your actual allocation."
+        )
     st.dataframe(
-        present_recommendations[["Name", "Skills", "Best Fit", "Recommended Task"]].reset_index(drop=True),
+        recommended_board_to_show[["Name", "Skills", "Best Fit", "Recommended Task"]].reset_index(drop=True),
         use_container_width=True,
     )
 
