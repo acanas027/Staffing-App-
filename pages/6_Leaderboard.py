@@ -1,4 +1,4 @@
-"""
+        """
 Warehouse Case-Picking Leaderboard
 ==================================
 Paste a screenshot OR paste raw text. The app extracts, per row:
@@ -163,8 +163,13 @@ DEFAULT_HOURS = {
         "End of day":  11.25,
     },
 }
-DAY_TYPES = ["Weekday", "Weekend"]
 BREAK_POINTS = ["1st break", "Lunch", "2nd break", "End of day"]
+
+# The 7 days, and which schedule each one uses.
+# Weekend schedule: Saturday, Sunday, Monday.   Weekday schedule: Tuesday-Friday.
+DAYS_OF_WEEK = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+WEEKEND_DAYS = {"Saturday", "Sunday", "Monday"}
+DAY_TO_TYPE = {d: ("Weekend" if d in WEEKEND_DAYS else "Weekday") for d in DAYS_OF_WEEK}
 
 # Per-worker hours dropdown: every 15 minutes from 0 up to MAX_HOURS.
 # All DEFAULT_HOURS values are quarter-hours, so they're guaranteed to be in this list.
@@ -554,13 +559,16 @@ if "picker_df" in st.session_state:
 
     # --- Shift settings -> predetermined hours for everyone ---
     sc1, sc2 = st.columns(2)
-    day_type = sc1.selectbox("Day type", DAY_TYPES, key="day_type")
+    today_name = central_now().strftime("%A")
+    default_day_idx = DAYS_OF_WEEK.index(today_name) if today_name in DAYS_OF_WEEK else 0
+    selected_day = sc1.selectbox("Day", DAYS_OF_WEEK, index=default_day_idx, key="day_of_week")
     break_point = sc2.selectbox("Point in shift", BREAK_POINTS, key="break_point")
+    day_type = DAY_TO_TYPE[selected_day]
     default_hours = float(DEFAULT_HOURS[day_type][break_point])
 
     st.caption(
-        f"Predetermined hours for **{day_type} · {break_point} = {default_hours} h** are filled in "
-        "automatically. Lower anyone who was moved off picking or came in late. "
+        f"Predetermined hours for **{selected_day} ({day_type}) · {break_point} = {default_hours} h** "
+        "are filled in automatically. Lower anyone who was moved off picking or came in late. "
         "Leave at 0 to show no rate for that person."
     )
 
