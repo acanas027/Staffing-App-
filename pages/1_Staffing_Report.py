@@ -822,29 +822,27 @@ def name_contains(row, text):
     return text.lower() in str(row["Name"]).lower()
 
 
+# Shift shares of TODAY'S TOTAL CASES, used to size the staffing NEED.
+# These set the minimum each shift is expected to handle out of the whole day,
+# so a single shift is never sized to clear the entire all-day board.
+#   cases:   share of total cases that shift is expected to pick
+#   pallets: share of total cases that shift is expected to pull, then / CASES_PER_PALLET
+FIRST_SHIFT_PICK_SHARE = 0.20
+SECOND_SHIFT_PICK_SHARE = 0.19
+FIRST_SHIFT_PALLET_SHARE = 0.33
+SECOND_SHIFT_PALLET_SHARE = 0.31
+CASES_PER_PALLET = 75
+
+
 def calculate_input_values(day, shift, total_cases):
-    first_shift_pick = {
-        "Sunday": 0.20, "Monday": 0.18, "Tuesday": 0.18, "Wednesday": 0.19,
-        "Thursday": 0.19, "Friday": 0.18, "Saturday": 0.21,
-    }
-    second_shift_pick = {
-        "Sunday": 0.19, "Monday": 0.15, "Tuesday": 0.15, "Wednesday": 0.17,
-        "Thursday": 0.17, "Friday": 0.17, "Saturday": 0.19,
-    }
-    first_shift_fp = {
-        "Sunday": 0.28, "Monday": 0.32, "Tuesday": 0.40, "Wednesday": 0.35,
-        "Thursday": 0.35, "Friday": 0.36, "Saturday": 0.31,
-    }
-    second_shift_fp = {
-        "Sunday": 0.32, "Monday": 0.33, "Tuesday": 0.27, "Wednesday": 0.29,
-        "Thursday": 0.28, "Friday": 0.30, "Saturday": 0.30,
-    }
+    # Flat per-shift shares of the day's total cases. `day` is kept in the
+    # signature for compatibility but no longer changes the result.
     if shift == "1st":
-        cases_to_pick = total_cases * first_shift_pick.get(day, 0)
-        full_pallets = (total_cases * first_shift_fp.get(day, 0)) / 70
+        cases_to_pick = total_cases * FIRST_SHIFT_PICK_SHARE
+        full_pallets = (total_cases * FIRST_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
     else:
-        cases_to_pick = total_cases * second_shift_pick.get(day, 0)
-        full_pallets = (total_cases * second_shift_fp.get(day, 0)) / 70
+        cases_to_pick = total_cases * SECOND_SHIFT_PICK_SHARE
+        full_pallets = (total_cases * SECOND_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
     return cases_to_pick, full_pallets
 
 
@@ -873,7 +871,7 @@ def calculate_needed(
         "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * hours_remaining),
         "Putaway":       (inbound_pallets / 2) / (PULL_RATE * hours_remaining),
         "Picking":       cases_to_pick / (PICK_RATE * hours_remaining),
-        "Replenishment": (cases_to_pick / 70) / (PULL_RATE * 8.5),
+        "Replenishment": (cases_to_pick / CASES_PER_PALLET) / (PULL_RATE * 8.5),
         "Full Pallets":  full_pallets / (PULL_RATE * hours_remaining),
         "Loading":       total_outbound_loads_actual / hours_remaining,
     }
@@ -4711,28 +4709,12 @@ def compute_recommended_allocation(
     """Phase 1: compute the recommended placement only. No file writes, no AI."""
     total_outbound_loads_actual = total_outbound_loads_day * LOAD_TARGET_SHARE
 
-    cases_to_pick_override = None
-    full_pallets_override = None
-    if board_file is not None:
-        try:
-            board_file.seek(0)
-            bt = read_board_today_totals_from_excel(board_file)
-            if bt.get("picks_left_today") is not None or bt.get("pulls_left_today") is not None:
-                cases_to_pick_override = float(bt.get("picks_left_today") or 0)
-                full_pallets_override = float(bt.get("pulls_left_today") or 0)
-        except Exception:
-            pass
-        finally:
-            try:
-                board_file.seek(0)
-            except Exception:
-                pass
-
+    # NEEDED is derived from total cases via the per-shift shares in
+    # calculate_input_values() -- NOT from the board's all-day remaining picks/pulls.
+    # The board totals still drive the goal/handoff preview further below.
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
-        cases_to_pick_override=cases_to_pick_override,
-        full_pallets_override=full_pallets_override,
     )
 
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
@@ -4861,6 +4843,9 @@ def run_full_generation(
     else:
         cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
 
+    # B5/B6 keep their meaning: the TRUE remaining picks/pulls (board K2/L2) when a
+    # board is uploaded, or the formula estimate when it isn't. These feed the goal /
+    # handoff math and the AI prompt -- they are NOT the staffing-need driver.
     ws["B5"] = cases_to_pick
     ws["B6"] = full_pallets
     ws["B7"] = total_outbound_loads_actual
@@ -4884,11 +4869,13 @@ def run_full_generation(
     wb.calculation.forceFullCalc = True
     wb.save(working_file)
 
+    # NEEDED is derived from total cases via the per-shift shares in
+    # calculate_input_values() -- NOT from the board's all-day remaining picks/pulls.
+    # (cases_to_pick / full_pallets returned here are the formula values; B5/B6 above
+    # still hold the true board remaining for the goal/handoff math.)
     needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets = calculate_needed(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
-        cases_to_pick_override=cases_to_pick,
-        full_pallets_override=full_pallets,
     )
 
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
