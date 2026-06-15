@@ -1,4 +1,4 @@
-        """
+"""
 Warehouse Case-Picking Leaderboard
 ==================================
 Paste a screenshot OR paste raw text. The app extracts, per row:
