@@ -7,7 +7,7 @@ Paste a screenshot OR paste raw text. The app extracts, per row:
     3. % of total
 …then you enter the hours each person actually picked, and it ranks everyone by
 CASES PER HOUR (the fair metric). Top 3 (at/above standard) show green; anyone
-below the 185 cases/hr standard shows red.
+below the 185 cases/hr standard show red.
 
 Deploy on Streamlit Community Cloud (files at REPO ROOT):
   - app.py            (this file)
@@ -218,6 +218,96 @@ def compute_rates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
+# Persistent storage — Google Sheets (survives Streamlit Cloud restarts)
+# =============================================================================
+# One worksheet, one row per worker per saved day. We only save people who
+# actually picked (hours > 0). Re-saving a date overwrites that date's rows.
+HISTORY_COLUMNS = ["date", "worker_id", "cases", "hours", "rate",
+                   "day_of_week", "day_type", "saved_at"]
+
+
+def _gsheets_configured() -> bool:
+    try:
+        return ("gcp_leaderboard_service_account" in st.secrets) and ("gsheets" in st.secrets)
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def _get_worksheet():
+    """Open (or create) the storage worksheet. Cached so we authenticate once."""
+    import gspread
+    gc = gspread.service_account_from_dict(dict(st.secrets["gcp_leaderboard_service_account"]))
+    sh = gc.open_by_key(st.secrets["gsheets"]["sheet_key"])
+    ws_name = st.secrets["gsheets"].get("worksheet", "daily")
+    try:
+        ws = sh.worksheet(ws_name)
+    except Exception:
+        ws = sh.add_worksheet(title=ws_name, rows=2000, cols=len(HISTORY_COLUMNS))
+        ws.update([HISTORY_COLUMNS], "A1")
+    if ws.row_values(1) != HISTORY_COLUMNS:
+        ws.update([HISTORY_COLUMNS], "A1")
+    return ws
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_history() -> pd.DataFrame:
+    """Read all saved rows. Returns an empty frame if storage isn't set up."""
+    if not _gsheets_configured():
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+    try:
+        ws = _get_worksheet()
+        df = pd.DataFrame(ws.get_all_records())
+        if df.empty:
+            return pd.DataFrame(columns=HISTORY_COLUMNS)
+        for c in ("cases", "hours", "rate"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["date"] = df["date"].astype(str)
+        df["worker_id"] = df["worker_id"].astype(str)
+        return df
+    except Exception as e:
+        st.error(f"Couldn't read saved history: {e}")
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+
+
+def save_day(date_str: str, work_df: pd.DataFrame, day_of_week: str, day_type: str) -> int:
+    """Upsert one day's records. Overwrites any existing rows for date_str.
+    Only workers with hours > 0 are saved. Returns how many were written."""
+    ws = _get_worksheet()
+    saved_at = central_now().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    new_rows = []
+    for _, r in work_df.iterrows():
+        hours = float(r.get("hours", 0) or 0)
+        if hours <= 0:
+            continue
+        cases = int(r.get("cases", 0) or 0)
+        rate = round(cases / hours, 2) if hours > 0 else ""
+        new_rows.append([str(date_str), str(r["name"]), cases, hours, rate,
+                         day_of_week, day_type, saved_at])
+
+    # Overwrite semantics: load everything, drop this date, append, rewrite.
+    current = load_history()
+    if not current.empty:
+        current = current[current["date"].astype(str) != str(date_str)]
+        keep = current[HISTORY_COLUMNS].values.tolist()
+    else:
+        keep = []
+
+    ws.clear()
+    ws.update([HISTORY_COLUMNS] + keep + new_rows, "A1")
+    load_history.clear()   # bust the read cache so views refresh
+    return len(new_rows)
+
+
+def saved_dates_in_blocks(history: pd.DataFrame, block_size: int = 5):
+    """Return chronological blocks of saved dates: [[d1..d5],[d6..d10],...]."""
+    dates = sorted(history["date"].astype(str).unique())
+    return [dates[i:i + block_size] for i in range(0, len(dates), block_size)]
+
+
+# =============================================================================
 # Print-ready PDF (single combined chart, one page)
 # =============================================================================
 INK     = colors.HexColor("#1f2933")
@@ -413,7 +503,9 @@ def generate_pdf(df: pd.DataFrame, title: str, subtitle: str) -> bytes:
 # =============================================================================
 # On-screen leaderboard (matches the PDF: one labelled chart, rate-first)
 # =============================================================================
-def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str):
+def render_rate_view(df: pd.DataFrame):
+    """Shared on-screen visual: 4 KPIs + the ranked cases/hr chart. Used by the
+    daily leaderboard and the 5-day block leaderboard so they look identical."""
     rated = df[df["rate"].notna()]
 
     c1, c2, c3, c4 = st.columns(4)
@@ -422,7 +514,6 @@ def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str):
     c3.metric("Top cases/hr", f"{rated['rate'].max():,.0f}" if not rated.empty else "—")
     c4.metric("Below 185", int((rated["rate"] < STANDARD_RATE).sum()) if not rated.empty else 0)
 
-    st.markdown("##### Leaderboard — ranked by cases / hour")
     plot = df.copy()
     plot["rate_plot"] = plot["rate"].fillna(0)
     plot["label"] = plot.apply(
@@ -457,13 +548,48 @@ def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str):
     st.caption(f"Green = top 3 at/above {STANDARD_RATE}/hr  ·  Red = below {STANDARD_RATE}/hr  "
                "·  dashed line marks the standard.")
 
+
+def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str,
+                       day_of_week=None, day_type=None, break_point=None):
+    st.markdown("##### Leaderboard — ranked by cases / hour")
+    render_rate_view(df)
+
     pdf_bytes = generate_pdf(df, title or "Case-Picking Leaderboard", subtitle or "")
-    st.download_button("Download print-ready PDF (1 page)", data=pdf_bytes,
-                       file_name="leaderboard.pdf", mime="application/pdf",
-                       type="primary", use_container_width=True)
-    st.download_button("Download CSV", data=df.to_csv(index=False).encode("utf-8"),
-                       file_name="leaderboard.csv", mime="text/csv",
-                       use_container_width=True)
+    dl1, dl2 = st.columns(2)
+    dl1.download_button("Download print-ready PDF (1 page)", data=pdf_bytes,
+                        file_name="leaderboard.pdf", mime="application/pdf",
+                        type="primary", use_container_width=True)
+    dl2.download_button("Download CSV", data=df.to_csv(index=False).encode("utf-8"),
+                        file_name="leaderboard.csv", mime="text/csv",
+                        use_container_width=True)
+
+    # ---- Save end-of-day data (only at End of day) ----
+    if break_point == "End of day":
+        st.markdown("**Save this day's data**")
+        if not _gsheets_configured():
+            st.info(
+                "Storage isn't set up yet, so saving is disabled. Add your Google "
+                "Sheets credentials in the app's Secrets to turn this on "
+                "(one-time setup — steps are in the chat)."
+            )
+        else:
+            sd1, sd2 = st.columns([1, 1])
+            save_date = sd1.date_input("Date for this save",
+                                       value=central_now().date(), key="save_date")
+            if sd2.button("Save data for this day", type="primary",
+                          use_container_width=True):
+                try:
+                    n = save_day(str(save_date), df, day_of_week or "", day_type or "")
+                    st.success(
+                        f"Saved {n} worker record(s) for {save_date}. "
+                        "Any previous save for that date was overwritten."
+                    )
+                except Exception as e:
+                    st.error(f"Save failed: {e}")
+            st.caption("Only workers with hours above 0 are saved. "
+                       "Re-saving the same date overwrites it.")
+    else:
+        st.caption("Select **End of day** above to enable saving this day's data.")
 
 
 # =============================================================================
@@ -606,4 +732,92 @@ if "picker_df" in st.session_state:
         lambda n: float(st.session_state.get(f"hrs::{n}", 0.0) or 0.0)
     )
     work = compute_rates(work)
-    render_leaderboard(work, report_title, report_subtitle)
+    render_leaderboard(work, report_title, report_subtitle,
+                       day_of_week=selected_day, day_type=day_type, break_point=break_point)
+
+
+# =============================================================================
+# Saved-history views: per-worker history + 5-day block leaderboard
+# =============================================================================
+st.divider()
+st.subheader("Saved history")
+
+if not _gsheets_configured():
+    st.info(
+        "Connect Google Sheets to save and review history. Until then, the daily "
+        "leaderboard above works normally — nothing is stored."
+    )
+else:
+    history = load_history()
+    if history.empty:
+        st.caption("No data saved yet. Build a leaderboard, select **End of day**, "
+                   "and click **Save data for this day** to start your history.")
+    else:
+        with st.expander("Per-worker history", expanded=False):
+            workers = sorted(history["worker_id"].unique())
+            w = st.selectbox("Worker", workers, key="hist_worker")
+            wdf = history[history["worker_id"] == w].sort_values("date").copy()
+
+            tot_c = float(wdf["cases"].sum())
+            tot_h = float(wdf["hours"].sum())
+            overall = (tot_c / tot_h) if tot_h > 0 else float("nan")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Saved days", len(wdf))
+            m2.metric("Overall rate", f"{overall:,.0f}/hr" if tot_h > 0 else "—")
+            m3.metric("Total cases", f"{int(tot_c):,}")
+
+            try:
+                import altair as alt
+                line = alt.Chart(wdf).mark_line(point=True).encode(
+                    x=alt.X("date:N", title="Date"),
+                    y=alt.Y("rate:Q", title="Cases / hr"),
+                    tooltip=["date", "day_of_week", "cases", "hours", "rate"],
+                )
+                std = alt.Chart(pd.DataFrame({"y": [STANDARD_RATE]})).mark_rule(
+                    color="#e03131", strokeDash=[4, 4]).encode(y="y:Q")
+                st.altair_chart((line + std).properties(height=260),
+                                use_container_width=True)
+            except Exception:
+                st.line_chart(wdf.set_index("date")["rate"])
+
+            st.dataframe(
+                wdf[["date", "day_of_week", "cases", "hours", "rate"]].reset_index(drop=True),
+                use_container_width=True,
+            )
+            st.caption("Overall rate = total cases ÷ total hours across all saved days "
+                       "(dashed line = 185/hr standard).")
+
+        with st.expander("5-day block leaderboard", expanded=True):
+            blocks = saved_dates_in_blocks(history, block_size=5)
+            labels = [
+                f"Block {i + 1}: {b[0]} → {b[-1]}  ({len(b)}/5 days)"
+                for i, b in enumerate(blocks)
+            ]
+            idx = st.selectbox(
+                "Block (each = 5 saved days)",
+                list(range(len(blocks))),
+                index=len(blocks) - 1,
+                format_func=lambda i: labels[i],
+                key="block_sel",
+            )
+            block_dates = blocks[idx]
+            bdf = history[history["date"].isin(block_dates)]
+
+            agg = (bdf.groupby("worker_id", as_index=False)
+                      .agg(cases=("cases", "sum"), hours=("hours", "sum")))
+            agg = agg.rename(columns={"worker_id": "name"})
+            total_cases = float(agg["cases"].sum())
+            agg["pct"] = (agg["cases"] / total_cases * 100.0) if total_cases else 0.0
+            agg = compute_rates(agg)
+
+            render_rate_view(agg)
+            st.download_button(
+                "Download this block's CSV",
+                data=agg.to_csv(index=False).encode("utf-8"),
+                file_name=f"block_{idx + 1}.csv", mime="text/csv",
+                use_container_width=True,
+            )
+            st.caption(
+                f"Block rate = total cases ÷ total hours across {len(block_dates)} "
+                "saved day(s). A heavier day counts proportionally more."
+            )
