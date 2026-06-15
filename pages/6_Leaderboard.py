@@ -131,6 +131,27 @@ def ocr_image(file_bytes: bytes) -> str:
 # =============================================================================
 STANDARD_RATE = 185   # cases/hr; at/above = OK, below = red flag
 
+# Predetermined hours worked at each point in the shift, by day type.
+# SUPERVISORS: change these numbers if the schedule changes — nothing else needs editing.
+# Picking these in the app pre-fills every worker's hours; you can still adjust
+# individuals (e.g. someone moved off picking early or came in late).
+DEFAULT_HOURS = {
+    "Weekday": {
+        "1st break":   3.0,
+        "Lunch":       5.75,
+        "2nd break":   7.75,
+        "End of day":  9.5,
+    },
+    "Weekend": {
+        "1st break":   3.25,
+        "Lunch":       6.5,
+        "2nd break":   9.25,
+        "End of day":  11.25,
+    },
+}
+DAY_TYPES = ["Weekday", "Weekend"]
+BREAK_POINTS = ["1st break", "Lunch", "2nd break", "End of day"]
+
 
 def compute_rates(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -501,19 +522,44 @@ if st.button("Build leaderboard", type="primary", use_container_width=True):
         else:
             # Store only the parsed identity + cases; hours are entered below.
             st.session_state["picker_df"] = parsed[["rank", "name", "cases", "pct"]].copy()
+            # New roster -> let the hours section re-apply the predetermined default.
+            st.session_state.pop("applied_combo", None)
 
 # ---- Hours entry + rate leaderboard -----------------------------------------
 if "picker_df" in st.session_state:
     base_df = st.session_state["picker_df"]
     cases_map = dict(zip(base_df["name"], base_df["cases"]))
+    names = base_df["name"].tolist()
 
     st.subheader("Enter hours each person picked")
-    st.caption("Type the hours each person actually spent PICKING today. "
-               "Rate = cases ÷ hours. Leave at 0 if unknown — that person shows no rate. "
-               "Fill them all in, then hit Calculate rates.")
+
+    # --- Shift settings -> predetermined hours for everyone ---
+    sc1, sc2 = st.columns(2)
+    day_type = sc1.selectbox("Day type", DAY_TYPES, key="day_type")
+    break_point = sc2.selectbox("Point in shift", BREAK_POINTS, key="break_point")
+    default_hours = float(DEFAULT_HOURS[day_type][break_point])
+
+    st.caption(
+        f"Predetermined hours for **{day_type} · {break_point} = {default_hours} h** are filled in "
+        "automatically. Lower anyone who was moved off picking or came in late. "
+        "Leave at 0 to show no rate for that person."
+    )
+
+    # Make sure every worker's hours key exists before the form is built.
+    for nm in names:
+        st.session_state.setdefault(f"hrs::{nm}", 0.0)
+
+    # Auto-apply: fill everyone with the predetermined hours, but ONLY when the
+    # day-type/break-point selection changes (or on first load / new roster).
+    # This must run BEFORE the form widgets are instantiated so it sets their values.
+    # Re-applying on every rerun would wipe per-worker edits, so we gate on the combo.
+    combo = (day_type, break_point)
+    if st.session_state.get("applied_combo") != combo:
+        for nm in names:
+            st.session_state[f"hrs::{nm}"] = default_hours
+        st.session_state["applied_combo"] = combo
 
     with st.form("hours_form"):
-        names = base_df["name"].tolist()
         ncols = 3
         for i in range(0, len(names), ncols):
             chunk = names[i:i + ncols]
@@ -521,7 +567,7 @@ if "picker_df" in st.session_state:
             for col, nm in zip(cols, chunk):
                 col.number_input(
                     f"{nm}  ({int(cases_map[nm]):,} cs)",
-                    min_value=0.0, max_value=24.0, step=0.5, value=0.0,
+                    min_value=0.0, max_value=24.0, step=0.25,
                     key=f"hrs::{nm}",
                 )
         st.form_submit_button("Calculate rates", type="primary", use_container_width=True)
