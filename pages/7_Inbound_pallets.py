@@ -1,4 +1,3 @@
-import json
 import re
 from copy import copy
 from datetime import date
@@ -15,9 +14,8 @@ st.set_page_config(page_title="Inbound Pallets", layout="wide")
 st.title("Pallets per Trailer")
 
 st.write(
-    "Upload your inbound report throughout the day. Each LPN counts as one pallet. "
-    "The app saves one row per trailer last 3 for the selected day and keeps the "
-    "highest pallet count found for that trailer."
+    "Upload your inbound report. Each LPN counts as one pallet. "
+    "This version does not save previous uploads. Every upload is treated as a fresh run."
 )
 
 # -------------------------------------------------------------------
@@ -39,11 +37,6 @@ ROOT_DIR = APP_DIR.parent if APP_DIR.name == "pages" else APP_DIR
 
 TRANSFER_LOG_TEMPLATE = ROOT_DIR / "Transfer Log New 8-2025.xlsx"
 
-# Runtime storage.
-# This remembers uploaded loads by selected day while the Streamlit app instance is running.
-# It may reset if Streamlit Cloud restarts or redeploys the app.
-HISTORY_FILE = Path("/tmp/inbound_pallets_daily_history.json")
-
 # Transfer Log columns based on the template:
 # C = Trailer Num.
 # L = Total Pallets in this Trailer
@@ -63,30 +56,6 @@ LPN_COL = 7
 
 HEADER_ROWS = 3       # first 3 rows are headers
 THRESHOLD = 9         # loads with 9 or fewer pallets get flagged for research
-
-
-# -------------------------------------------------------------------
-# Storage helpers
-# -------------------------------------------------------------------
-def load_history():
-    """Load saved daily trailer history from the app runtime."""
-    if HISTORY_FILE.exists():
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    return {}
-
-
-def save_history(history):
-    """Save daily trailer history to the app runtime."""
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
-    except Exception:
-        pass
 
 
 # -------------------------------------------------------------------
@@ -254,205 +223,169 @@ def build_current_report_result(uploaded_file):
     return result
 
 
-def next_order_for_day(day_records):
-    """Return the next order number for the selected day."""
-    if not day_records:
-        return 1
+def filter_by_trailer(df, search_text):
+    """Filter preview table by trailer last 3 or full trailer number."""
+    if df.empty:
+        return df
 
-    return max(int(record.get("Order", 0)) for record in day_records.values()) + 1
+    search_text = str(search_text).strip()
 
+    if search_text == "":
+        return df
 
-def merge_report_into_day_history(day_key, current_result):
-    """
-    Save current upload into the selected day.
+    search_digits = "".join(re.findall(r"\d", search_text))
+    search_value = search_digits if search_digits else search_text.lower()
 
-    Logic:
-    - Key = Trailer Last 3.
-    - If trailer already exists for that selected day, keep only one row.
-    - Pallets = the highest pallet count found so far that day.
-    """
-    history = st.session_state["daily_history"]
-    day_records = history.setdefault(day_key, {})
-
-    # If the same Trailer Last 3 appears multiple times in the same upload,
-    # keep the largest pallet count from that upload.
-    current_grouped = (
-        current_result
-        .sort_values("Pallets", ascending=False)
-        .groupby("Trailer Last 3", as_index=False)
-        .agg(
-            Pallets=("Pallets", "max"),
-            Full_Trailers=("Trailer", lambda x: sorted(set(str(v) for v in x))),
+    if "Full Trailers" in df.columns:
+        mask = (
+            df["Trailer Last 3"].astype(str).str.contains(search_value, case=False, na=False)
+            | df["Full Trailers"].astype(str).str.contains(search_value, case=False, na=False)
         )
-    )
+    else:
+        mask = df["Trailer Last 3"].astype(str).str.contains(search_value, case=False, na=False)
 
-    for _, row_data in current_grouped.iterrows():
-        trailer_last3 = str(row_data["Trailer Last 3"])
-        new_pallets = int(row_data["Pallets"])
-        new_full_trailers = row_data["Full_Trailers"]
-
-        if trailer_last3 not in day_records:
-            day_records[trailer_last3] = {
-                "Trailer Last 3": trailer_last3,
-                "Pallets": new_pallets,
-                "Full Trailers": new_full_trailers,
-                "Order": next_order_for_day(day_records),
-            }
-        else:
-            existing = day_records[trailer_last3]
-
-            existing["Pallets"] = max(int(existing.get("Pallets", 0)), new_pallets)
-
-            existing_full_trailers = set(existing.get("Full Trailers", []))
-            existing_full_trailers.update(new_full_trailers)
-            existing["Full Trailers"] = sorted(existing_full_trailers)
-
-    save_history(history)
-
-
-def get_day_df(day_key):
-    """Return saved daily trailer data as a DataFrame."""
-    records = st.session_state["daily_history"].get(day_key, {})
-
-    rows = []
-    for record in records.values():
-        rows.append(
-            {
-                "Order": int(record.get("Order", 0)),
-                "Trailer Last 3": str(record.get("Trailer Last 3", "")),
-                "Pallets": int(record.get("Pallets", 0)),
-                "Full Trailers": ", ".join(record.get("Full Trailers", [])),
-            }
-        )
-
-    if not rows:
-        return pd.DataFrame(columns=["Order", "Trailer Last 3", "Pallets", "Full Trailers"])
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values("Order")
-        .reset_index(drop=True)
-    )
+    return df[mask].copy()
 
 
 # -------------------------------------------------------------------
-# App state
+# App
 # -------------------------------------------------------------------
-if "daily_history" not in st.session_state:
-    st.session_state["daily_history"] = load_history()
-
-
 selected_day = st.date_input("Select day", value=date.today())
 day_key = selected_day.strftime("%Y-%m-%d")
 
-col_a, col_b = st.columns([3, 1])
-
-with col_a:
-    uploaded = st.file_uploader("Upload your inbound report", type=["xlsx", "xlsm"])
-
-with col_b:
-    st.write("")
-    st.write("")
-    clear_day = st.button("Clear selected day")
-
-if clear_day:
-    st.session_state["daily_history"].pop(day_key, None)
-    save_history(st.session_state["daily_history"])
-    st.success(f"Cleared saved loads for {day_key}.")
-    st.rerun()
-
+uploaded = st.file_uploader("Upload your inbound report", type=["xlsx", "xlsm"])
 
 if uploaded is not None:
     try:
         current_result = build_current_report_result(uploaded)
-        merge_report_into_day_history(day_key, current_result)
 
-        st.success(
-            f"Upload processed for {day_key}. "
-            "If a trailer was already saved for this day, the app kept the highest pallet count."
+        # If the same Trailer Last 3 appears multiple times in the uploaded report,
+        # keep the largest pallet count from that upload.
+        day_df = (
+            current_result
+            .sort_values("Pallets", ascending=False)
+            .groupby("Trailer Last 3", as_index=False)
+            .agg(
+                Pallets=("Pallets", "max"),
+                Full_Trailers=("Trailer", lambda x: ", ".join(sorted(set(str(v) for v in x)))),
+            )
+            .sort_values("Pallets", ascending=False)
+            .reset_index(drop=True)
         )
+
+        transfer_ready = day_df[day_df["Pallets"] > THRESHOLD].copy()
+        research_ready = day_df[day_df["Pallets"] <= THRESHOLD].copy()
+
+        transfer_log_output = transfer_ready[["Trailer Last 3", "Pallets"]].copy()
+
+        research_display = research_ready[["Trailer Last 3", "Pallets", "Full_Trailers"]].copy()
+        research_display = research_display.rename(columns={"Full_Trailers": "Full Trailers"})
+
+        if not research_display.empty:
+            research_display["Status"] = "research"
+
+        transfer_preview = transfer_ready[["Trailer Last 3", "Pallets", "Full_Trailers"]].copy()
+        transfer_preview = transfer_preview.rename(columns={"Full_Trailers": "Full Trailers"})
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Trailers in current upload", len(day_df))
+        c2.metric(f"Transfer Log rows over {THRESHOLD}", len(transfer_ready))
+        c3.metric(f"Research rows {THRESHOLD} or less", len(research_ready))
+
+        # -------------------------------------------------------------------
+        # Transfer Log
+        # -------------------------------------------------------------------
+        st.subheader("Transfer Log")
+
+        if transfer_log_output.empty:
+            st.info("No non-research loads found in this upload.")
+        else:
+            duplicate_last3 = transfer_log_output[
+                transfer_log_output["Trailer Last 3"].duplicated(keep=False)
+            ]
+
+            if not duplicate_last3.empty:
+                st.warning(
+                    "Warning: at least two trailers have the same last 3 digits. "
+                    "Review the Transfer Log before using it."
+                )
+
+            st.write(
+                "This fills only Trailer Num. and Total Pallets in this Trailer "
+                "in the Excel template, using the highest pallet count found in the uploaded report."
+            )
+
+            search_col, download_col = st.columns([2, 1])
+
+            with search_col:
+                transfer_search = st.text_input(
+                    "Search trailer in preview",
+                    placeholder="Type trailer last 3 or full trailer number",
+                    key="transfer_search",
+                )
+
+            with download_col:
+                try:
+                    transfer_log_file = create_transfer_log_excel(transfer_log_output)
+
+                    st.write("")
+                    st.download_button(
+                        "Download completed Transfer Log",
+                        data=transfer_log_file,
+                        file_name=f"completed_transfer_log_{day_key}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+                except FileNotFoundError as e:
+                    st.error(str(e))
+                    st.info(
+                        "Fix: upload 'Transfer Log New 8-2025.xlsx' to your GitHub repo root folder. "
+                        "If this page is inside /pages, the code already looks one folder up."
+                    )
+
+            filtered_transfer_preview = filter_by_trailer(transfer_preview, transfer_search)
+
+            st.dataframe(
+                filtered_transfer_preview,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # -------------------------------------------------------------------
+        # Research Loads
+        # -------------------------------------------------------------------
+        st.subheader(f"Research loads with {THRESHOLD} or fewer pallets")
+
+        if research_display.empty:
+            st.success("No short loads found in this upload.")
+        else:
+            research_search_col, research_download_col = st.columns([2, 1])
+
+            with research_search_col:
+                research_search = st.text_input(
+                    "Search research trailer",
+                    placeholder="Type trailer last 3 or full trailer number",
+                    key="research_search",
+                )
+
+            with research_download_col:
+                research_excel_file = create_research_excel(research_display)
+
+                st.write("")
+                st.download_button(
+                    "Download research list",
+                    data=research_excel_file,
+                    file_name=f"loads_to_research_{day_key}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+            filtered_research_display = filter_by_trailer(research_display, research_search)
+            styled = filtered_research_display.style.apply(flag_red, axis=1).hide(axis="index")
+
+            st.dataframe(styled, use_container_width=True)
 
     except Exception as e:
         st.error(f"Could not process the uploaded report: {e}")
 
-
-day_df = get_day_df(day_key)
-
-transfer_ready = day_df[day_df["Pallets"] > THRESHOLD].copy()
-research_ready = day_df[day_df["Pallets"] <= THRESHOLD].copy()
-
-# Transfer Log output only needs trailer last 3 and pallets.
-transfer_log_output = transfer_ready[["Trailer Last 3", "Pallets"]].copy()
-
-# Research display keeps the full trailer info so you can investigate.
-research_display = research_ready[["Trailer Last 3", "Pallets", "Full Trailers"]].copy()
-if not research_display.empty:
-    research_display["Status"] = "research"
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Saved trailers for selected day", len(day_df))
-c2.metric(f"Transfer Log rows over {THRESHOLD}", len(transfer_ready))
-c3.metric(f"Research rows {THRESHOLD} or less", len(research_ready))
-
-# -------------------------------------------------------------------
-# Transfer Log
-# -------------------------------------------------------------------
-st.subheader("Transfer Log")
-
-if transfer_log_output.empty:
-    st.info("No non-research loads saved for this selected day yet.")
 else:
-    duplicate_last3 = transfer_log_output[
-        transfer_log_output["Trailer Last 3"].duplicated(keep=False)
-    ]
-
-    if not duplicate_last3.empty:
-        st.warning(
-            "Warning: at least two saved trailers have the same last 3 digits. "
-            "Review the Transfer Log before using it."
-        )
-
-    st.write(
-        "This fills only Trailer Num. and Total Pallets in this Trailer "
-        "in the Excel template, using the highest pallet count found during the selected day."
-    )
-
-    st.dataframe(transfer_log_output, use_container_width=True, hide_index=True)
-
-    try:
-        transfer_log_file = create_transfer_log_excel(transfer_log_output)
-
-        st.download_button(
-            "Download completed Transfer Log",
-            data=transfer_log_file,
-            file_name=f"completed_transfer_log_{day_key}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    except FileNotFoundError as e:
-        st.error(str(e))
-        st.info(
-            "Fix: upload 'Transfer Log New 8-2025.xlsx' to your GitHub repo root folder. "
-            "If this page is inside /pages, the code already looks one folder up."
-        )
-
-# -------------------------------------------------------------------
-# Research Loads
-# -------------------------------------------------------------------
-st.subheader(f"Research loads with {THRESHOLD} or fewer pallets")
-
-if research_display.empty:
-    st.success("No short loads saved for this selected day.")
-else:
-    styled = research_display.style.apply(flag_red, axis=1).hide(axis="index")
-
-    st.dataframe(styled, use_container_width=True)
-
-    research_excel_file = create_research_excel(research_display)
-
-    st.download_button(
-        "Download research list",
-        data=research_excel_file,
-        file_name=f"loads_to_research_{day_key}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    st.info("Waiting for an inbound report.")
