@@ -4358,7 +4358,7 @@ def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, cr
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     alert_count = len(oc_load_matches or []) + len(crossdock_matches or []) + len(tt4_matches or [])
 
-    if due_not_RTL > 2 or loaded_short > 0 or net_gap <= -3:
+    if due_not_RTL > 2 or loaded_short > 0 or net_gap <= -5:
         return "HIGH", "Past-due/short exposure or a major actual staffing gap is present."
     if picking_short > 2 or net_gap < 0 or alert_count > 0:
         return "MEDIUM", "Execution is controllable, but staffing gaps or customer/load alerts require follow-up."
