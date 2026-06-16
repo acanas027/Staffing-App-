@@ -22,7 +22,11 @@ st.write(
 # Put this Excel file in your GitHub repository, in the same folder as app.py.
 # -------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-TRANSFER_LOG_TEMPLATE = APP_DIR / "Transfer Log New 8-2025.xlsx"
+
+# If this Streamlit page is inside /pages, go one folder up to the repo root.
+ROOT_DIR = APP_DIR.parent if APP_DIR.name == "pages" else APP_DIR
+
+TRANSFER_LOG_TEMPLATE = ROOT_DIR / "Transfer Log New 8-2025.xlsx"
 
 # Transfer Log columns based on the template:
 # C = Trailer Num.
