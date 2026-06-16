@@ -383,9 +383,51 @@ def get_day_df(day_key):
 # -------------------------------------------------------------------
 # Manual unloader log logic
 # -------------------------------------------------------------------
-def build_manual_log_result(uploaded_manual_file):
+def empty_manual_df():
+    """Return an empty manual log DataFrame with the expected columns."""
+    return pd.DataFrame(
+        columns=[
+            "Trailer Last 3",
+            "Manual Unloaded",
+            "Manual Trailer Raw",
+            "Manual Duplicate Count",
+        ]
+    )
+
+
+def finalize_manual_rows(rows):
     """
-    Read the manual unloader log.
+    Convert extracted manual rows into the grouped manual-log DataFrame.
+
+    The app groups by trailer last 3 so it can match the system logic.
+    If the same last 3 appears more than once in the manual log, the app SUMS
+    the manual pallets and shows a warning.
+    """
+    if not rows:
+        return empty_manual_df()
+
+    manual_df = pd.DataFrame(rows)
+
+    grouped = (
+        manual_df
+        .groupby("Trailer Last 3", as_index=False)
+        .agg(
+            **{
+                "Manual Unloaded": ("Manual Unloaded", "sum"),
+                "Manual Trailer Raw": ("Manual Trailer Raw", lambda x: ", ".join(sorted(set(str(v) for v in x)))),
+                "Manual Duplicate Count": ("Trailer Last 3", "size"),
+            }
+        )
+        .sort_values("Trailer Last 3")
+        .reset_index(drop=True)
+    )
+
+    return grouped
+
+
+def build_manual_log_result_from_spreadsheet(uploaded_manual_file):
+    """
+    Read manual log from Excel or CSV.
 
     Expected format:
     - C = Trailer Num.
@@ -427,29 +469,236 @@ def build_manual_log_result(uploaded_manual_file):
             }
         )
 
-    if not rows:
-        return pd.DataFrame(columns=["Trailer Last 3", "Manual Unloaded", "Manual Trailer Raw", "Manual Duplicate Count"])
+    return finalize_manual_rows(rows)
 
-    manual_df = pd.DataFrame(rows)
 
-    # Group by last 3 so it can match the system logic.
-    # If the same last 3 appears more than once in the manual log, we SUM the manual pallets
-    # and show a warning in the app.
-    grouped = (
-        manual_df
-        .groupby("Trailer Last 3", as_index=False)
-        .agg(
-            **{
-                "Manual Unloaded": ("Manual Unloaded", "sum"),
-                "Manual Trailer Raw": ("Manual Trailer Raw", lambda x: ", ".join(sorted(set(str(v) for v in x)))),
-                "Manual Duplicate Count": ("Trailer Last 3", "size"),
+def normalize_pdf_cell(value):
+    """Clean a PDF table cell."""
+    if value is None:
+        return ""
+
+    return str(value).replace("\n", " ").strip()
+
+
+def find_pdf_table_columns(table):
+    """
+    Try to find the trailer and manual-unloaded columns from a PDF-extracted table.
+
+    First choice:
+    - Detect headers containing Trailer and Unloaded/Pallets.
+
+    Fallback:
+    - If the table has enough columns, use the same Excel positions:
+      C = index 2, K = index 10.
+    """
+    for row_idx, row in enumerate(table[:15]):
+        cells = [normalize_pdf_cell(cell).lower() for cell in row]
+        joined = " ".join(cells)
+
+        trailer_idx = None
+        manual_idx = None
+
+        for idx, cell in enumerate(cells):
+            if "trailer" in cell and ("num" in cell or "number" in cell or cell.strip() == "trailer"):
+                trailer_idx = idx
+                break
+
+        for idx, cell in enumerate(cells):
+            if "unloaded" in cell:
+                manual_idx = idx
+                break
+
+            if "pallet" in cell and "unload" in joined:
+                manual_idx = idx
+                break
+
+        if trailer_idx is not None and manual_idx is not None:
+            return trailer_idx, manual_idx, row_idx + 1
+
+    max_cols = max(len(row) for row in table) if table else 0
+
+    if max_cols > max(MANUAL_LOG_TRAILER_COL, MANUAL_LOG_UNLOADED_COL):
+        return MANUAL_LOG_TRAILER_COL, MANUAL_LOG_UNLOADED_COL, 0
+
+    return None, None, 0
+
+
+def extract_manual_rows_from_pdf_table(table):
+    """Extract manual trailer rows from one PDF table."""
+    if not table:
+        return []
+
+    trailer_idx, manual_idx, start_idx = find_pdf_table_columns(table)
+
+    if trailer_idx is None or manual_idx is None:
+        return []
+
+    rows = []
+    for row in table[start_idx:]:
+        if len(row) <= max(trailer_idx, manual_idx):
+            continue
+
+        trailer_value = normalize_pdf_cell(row[trailer_idx])
+        manual_unloaded = parse_pallet_count(normalize_pdf_cell(row[manual_idx]))
+        trailer_last3 = get_last_3_numbers(trailer_value)
+
+        if trailer_last3 == "" or manual_unloaded is None:
+            continue
+
+        rows.append(
+            {
+                "Trailer Last 3": trailer_last3,
+                "Manual Unloaded": int(manual_unloaded),
+                "Manual Trailer Raw": trailer_value,
             }
         )
-        .sort_values("Trailer Last 3")
-        .reset_index(drop=True)
-    )
 
-    return grouped
+    return rows
+
+
+def extract_manual_rows_from_pdf_text(text):
+    """
+    Fallback parser for PDFs where table extraction fails.
+
+    This is less reliable than a true table. It looks for lines that contain:
+    - a trailer number or trailer last 3
+    - a pallet count on the same line
+
+    Best results come from a PDF exported from Excel, not a scanned picture PDF.
+    """
+    rows = []
+
+    for line in str(text).splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        lower_line = line.lower()
+        if "trailer" in lower_line or "pallet" in lower_line or "unloaded" in lower_line:
+            continue
+
+        # Capture numeric tokens such as 175, 24, 24.0.
+        number_matches = list(re.finditer(r"\b\d+(?:\.\d+)?\b", line))
+
+        if len(number_matches) < 2:
+            continue
+
+        number_texts = [match.group() for match in number_matches]
+
+        # Trailer candidate: first number with at least 3 digits.
+        trailer_candidate = None
+        for num in number_texts:
+            integer_part = num.split(".")[0]
+            if len(integer_part) >= 3:
+                trailer_candidate = integer_part
+                break
+
+        if trailer_candidate is None:
+            continue
+
+        # Pallet candidate: use the last numeric value in the line that is not the trailer.
+        pallet_candidate = None
+        for num in reversed(number_texts):
+            if num == trailer_candidate:
+                continue
+
+            parsed = parse_pallet_count(num)
+
+            # Most inbound pallet counts should be a reasonable warehouse pallet count.
+            # This filter avoids grabbing dates/page numbers when possible.
+            if parsed is not None and 0 <= parsed <= 200:
+                pallet_candidate = parsed
+                break
+
+        if pallet_candidate is None:
+            continue
+
+        trailer_last3 = get_last_3_numbers(trailer_candidate)
+
+        if trailer_last3 == "":
+            continue
+
+        rows.append(
+            {
+                "Trailer Last 3": trailer_last3,
+                "Manual Unloaded": int(pallet_candidate),
+                "Manual Trailer Raw": trailer_candidate,
+            }
+        )
+
+    return rows
+
+
+def build_manual_log_result_from_pdf(uploaded_manual_file):
+    """
+    Read manual unloader log from a PDF.
+
+    Best PDF format:
+    - PDF exported from the same Transfer Log Excel template.
+    - Trailer Num. in column C.
+    - Total Pallets UNLOADED in column K.
+
+    Note:
+    - Text-based/exported PDFs work best.
+    - Scanned image PDFs may not work because this app does not perform OCR.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        raise ValueError(
+            "PDF support requires pdfplumber. Add 'pdfplumber' to requirements.txt, "
+            "commit the change, and redeploy the Streamlit app."
+        )
+
+    pdf_bytes = BytesIO(uploaded_manual_file.getvalue())
+    rows = []
+
+    with pdfplumber.open(pdf_bytes) as pdf:
+        # First try true table extraction.
+        for page in pdf.pages:
+            tables = page.extract_tables() or []
+
+            for table in tables:
+                rows.extend(extract_manual_rows_from_pdf_table(table))
+
+        # If no rows were found, try a text-line fallback.
+        if not rows:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                rows.extend(extract_manual_rows_from_pdf_text(text))
+
+    if not rows:
+        raise ValueError(
+            "Could not read trailer/pallet rows from the PDF. Use a text-based PDF exported "
+            "from Excel, or upload the manual log as Excel/CSV. Scanned picture PDFs are not supported."
+        )
+
+    return finalize_manual_rows(rows)
+
+
+def build_manual_log_result(uploaded_manual_file):
+    """
+    Read the manual unloader log.
+
+    Supported formats:
+    - Excel: .xlsx, .xlsm
+    - CSV: .csv
+    - PDF: .pdf
+
+    For Excel/CSV, the app reads:
+    - C = Trailer Num.
+    - K = Total Pallets UNLOADED
+    - starting row = 8
+
+    For PDF, the app tries to extract the same table from a text-based/exported PDF.
+    """
+    file_name = uploaded_manual_file.name.lower()
+
+    if file_name.endswith(".pdf"):
+        return build_manual_log_result_from_pdf(uploaded_manual_file)
+
+    return build_manual_log_result_from_spreadsheet(uploaded_manual_file)
 
 
 def merge_manual_log_into_history(day_key, manual_result):
@@ -653,7 +902,7 @@ with col_a:
 with col_b:
     manual_uploaded = st.file_uploader(
         "Upload manual unloader log at end of day",
-        type=["xlsx", "xlsm", "csv"],
+        type=["xlsx", "xlsm", "csv", "pdf"],
         key="manual_unloader_log",
     )
 
