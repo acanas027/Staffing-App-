@@ -10,8 +10,6 @@ st.title("Expected Pallets by Trailer")
 
 st.write(
     "Upload your inbound report. Each LPN counts as one pallet. "
-    "The trailer number is built from columns C, D, E, F and G. "
-    "Loads with 9 or fewer pallets are highlighted in red."
 )
 
 # Inbound report column positions, 0-indexed:
