@@ -15,9 +15,9 @@ st.set_page_config(page_title="Inbound Pallets", layout="wide")
 st.title("📦 Pallets per Trailer")
 
 st.write(
-    "Upload your inbound report throughout the day. Each **LPN** counts as one pallet. "
-    "The app saves one row per trailer number for the selected day and keeps the "
-    "**largest pallet count found** for that trailer."
+    "Upload your inbound report throughout the day. The app keeps the **highest pallet count "
+    "seen by the system** for each trailer last 3. At the end of the day, upload the manual "
+    "unloader log and the app will match the manual unloaded pallets against the system highest."
 )
 
 # -------------------------------------------------------------------
@@ -43,13 +43,16 @@ TRANSFER_LOG_TEMPLATE = ROOT_DIR / "Transfer Log New 8-2025.xlsx"
 # This remembers uploaded loads by selected day while the Streamlit app instance is running.
 # It may reset if Streamlit Cloud restarts or redeploys the app.
 HISTORY_FILE = Path("/tmp/inbound_pallets_daily_history.json")
+MANUAL_HISTORY_FILE = Path("/tmp/inbound_pallets_manual_history.json")
 
 # Transfer Log columns based on the template:
 # C = Trailer Num.
-# L = Total Pallets in this Trailer
+# K = Total Pallets UNLOADED      -> Manual unloader count
+# L = Total Pallets in this Trailer -> Highest system-recorded count
 TRANSFER_LOG_START_ROW = 8
 TRANSFER_LOG_TRAILER_COL = "C"
-TRANSFER_LOG_PALLETS_COL = "L"
+TRANSFER_LOG_MANUAL_UNLOADED_COL = "K"
+TRANSFER_LOG_SYSTEM_HIGHEST_COL = "L"
 
 # Clear body columns A:N so everything else stays blank.
 TRANSFER_LOG_FIRST_COL = 1
@@ -61,15 +64,25 @@ TRANSFER_LOG_LAST_COL = 14
 TRAILER_COLS = [2, 3, 4, 5, 6]
 LPN_COL = 7
 
-HEADER_ROWS = 3       # first 3 rows are headers
-THRESHOLD = 9         # loads with 9 or fewer pallets get flagged for research
+# Manual log column positions, 0-indexed, based on the Transfer Log template:
+# C = Trailer Num.
+# K = Total Pallets UNLOADED
+MANUAL_LOG_START_ROW = 8
+MANUAL_LOG_TRAILER_COL = 2
+MANUAL_LOG_UNLOADED_COL = 10
+
+HEADER_ROWS = 3       # first 3 rows are headers in the inbound report
+THRESHOLD = 9         # system loads with 9 or fewer pallets get flagged for research
 
 
-def load_history():
-    """Load saved daily trailer history from the app runtime."""
-    if HISTORY_FILE.exists():
+# -------------------------------------------------------------------
+# Storage helpers
+# -------------------------------------------------------------------
+def load_json_file(path):
+    """Load saved JSON history from the app runtime."""
+    if path.exists():
         try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -77,15 +90,18 @@ def load_history():
     return {}
 
 
-def save_history(history):
-    """Save daily trailer history to the app runtime."""
+def save_json_file(path, data):
+    """Save JSON history to the app runtime."""
     try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
     except Exception:
         pass
 
 
+# -------------------------------------------------------------------
+# Cleaning helpers
+# -------------------------------------------------------------------
 def clean_excel_value(value):
     """Clean Excel values so numbers like 123.0 become 123."""
     if pd.isna(value):
@@ -97,8 +113,34 @@ def clean_excel_value(value):
     return str(value).strip()
 
 
+def parse_pallet_count(value):
+    """Return an integer pallet count, or None if the value is blank/not usable."""
+    if pd.isna(value):
+        return None
+
+    if isinstance(value, int):
+        return int(value)
+
+    if isinstance(value, float):
+        if pd.isna(value):
+            return None
+        return int(round(value))
+
+    text = str(value).strip()
+
+    if text == "":
+        return None
+
+    # Accept values like "24", "24 pallets", "24.0".
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+
+    return int(round(float(match.group())))
+
+
 def build_trailer(row):
-    """Concatenate trailer parts from columns C through G."""
+    """Concatenate trailer parts from columns C through G in the inbound report."""
     return "".join(clean_excel_value(row[c]) for c in TRAILER_COLS)
 
 
@@ -116,6 +158,19 @@ def flag_red(row):
     return ["background-color: #ffb3b3; color: #800000; font-weight: bold"] * len(row)
 
 
+def flag_variance(row):
+    """Highlight variance rows in the comparison table."""
+    status = str(row.get("Match Status", ""))
+
+    if "Mismatch" in status or "Missing" in status or "Manual only" in status or "System only" in status:
+        return ["background-color: #fff2cc; color: #7a4f00; font-weight: bold"] * len(row)
+
+    return [""] * len(row)
+
+
+# -------------------------------------------------------------------
+# Excel output helpers
+# -------------------------------------------------------------------
 def copy_row_style(ws, source_row, target_row):
     """Copy formatting from one row to another row."""
     for col_idx in range(TRANSFER_LOG_FIRST_COL, TRANSFER_LOG_LAST_COL + 1):
@@ -146,13 +201,14 @@ def copy_row_style(ws, source_row, target_row):
     ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
 
 
-def create_transfer_log_excel(transfer_ready_df):
+def create_transfer_log_excel(transfer_output_df):
     """
     Create a completed Transfer Log from the repository template.
 
     Fills only:
-    - Trailer Num. column
-    - Total Pallets in this Trailer column
+    - C: Trailer Num.
+    - K: Total Pallets UNLOADED / manual unloader count
+    - L: Highest system-recorded pallet count
 
     Everything else in the body rows is blank.
     """
@@ -165,7 +221,7 @@ def create_transfer_log_excel(transfer_ready_df):
     wb = load_workbook(TRANSFER_LOG_TEMPLATE)
     ws = wb.active
 
-    required_rows = len(transfer_ready_df)
+    required_rows = len(transfer_output_df)
     required_end_row = TRANSFER_LOG_START_ROW + max(required_rows, 1) - 1
 
     # If the template does not have enough rows, extend it and copy row formatting.
@@ -187,11 +243,20 @@ def create_transfer_log_excel(transfer_ready_df):
         for cell in row:
             cell.value = None
 
-    # Fill only Trailer Num. and Total Pallets in this Trailer.
-    for offset, (_, row_data) in enumerate(transfer_ready_df.iterrows()):
+    # Fill only Trailer Num., manual unloaded pallets, and system highest pallets.
+    for offset, (_, row_data) in enumerate(transfer_output_df.iterrows()):
         excel_row = TRANSFER_LOG_START_ROW + offset
+
         ws[f"{TRANSFER_LOG_TRAILER_COL}{excel_row}"] = row_data["Trailer Last 3"]
-        ws[f"{TRANSFER_LOG_PALLETS_COL}{excel_row}"] = int(row_data["Pallets"])
+
+        manual_value = row_data.get("Manual Unloaded", None)
+        system_value = row_data.get("System Highest", None)
+
+        if pd.notna(manual_value):
+            ws[f"{TRANSFER_LOG_MANUAL_UNLOADED_COL}{excel_row}"] = int(manual_value)
+
+        if pd.notna(system_value):
+            ws[f"{TRANSFER_LOG_SYSTEM_HIGHEST_COL}{excel_row}"] = int(system_value)
 
     output = BytesIO()
     wb.save(output)
@@ -200,6 +265,9 @@ def create_transfer_log_excel(transfer_ready_df):
     return output.getvalue()
 
 
+# -------------------------------------------------------------------
+# Inbound system report logic
+# -------------------------------------------------------------------
 def build_current_report_result(uploaded_file):
     """
     Read the uploaded inbound report and return one row per trailer.
@@ -284,11 +352,11 @@ def merge_report_into_day_history(day_key, current_result):
             existing_full_trailers.update(new_full_trailers)
             existing["Full Trailers"] = sorted(existing_full_trailers)
 
-    save_history(history)
+    save_json_file(HISTORY_FILE, history)
 
 
 def get_day_df(day_key):
-    """Return saved daily trailer data as a DataFrame."""
+    """Return saved daily system trailer data as a DataFrame."""
     records = st.session_state["daily_history"].get(day_key, {})
 
     rows = []
@@ -297,13 +365,13 @@ def get_day_df(day_key):
             {
                 "Order": int(record.get("Order", 0)),
                 "Trailer Last 3": str(record.get("Trailer Last 3", "")),
-                "Pallets": int(record.get("Pallets", 0)),
+                "System Highest": int(record.get("Pallets", 0)),
                 "Full Trailers": ", ".join(record.get("Full Trailers", [])),
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=["Order", "Trailer Last 3", "Pallets", "Full Trailers"])
+        return pd.DataFrame(columns=["Order", "Trailer Last 3", "System Highest", "Full Trailers"])
 
     return (
         pd.DataFrame(rows)
@@ -313,29 +381,293 @@ def get_day_df(day_key):
 
 
 # -------------------------------------------------------------------
+# Manual unloader log logic
+# -------------------------------------------------------------------
+def build_manual_log_result(uploaded_manual_file):
+    """
+    Read the manual unloader log.
+
+    Expected format:
+    - C = Trailer Num.
+    - K = Total Pallets UNLOADED
+
+    The app starts reading at row 8, matching the Transfer Log template.
+    """
+    file_name = uploaded_manual_file.name.lower()
+
+    if file_name.endswith(".csv"):
+        raw = pd.read_csv(uploaded_manual_file, header=None)
+    else:
+        raw = pd.read_excel(uploaded_manual_file, header=None)
+
+    if raw.shape[1] <= max(MANUAL_LOG_TRAILER_COL, MANUAL_LOG_UNLOADED_COL):
+        raise ValueError(
+            "Manual log does not have enough columns. Expected Trailer Num. in column C "
+            "and Total Pallets UNLOADED in column K."
+        )
+
+    # Excel row 8 is pandas index 7.
+    body = raw.iloc[MANUAL_LOG_START_ROW - 1:].copy()
+
+    rows = []
+    for _, row in body.iterrows():
+        trailer_value = clean_excel_value(row[MANUAL_LOG_TRAILER_COL])
+        manual_unloaded = parse_pallet_count(row[MANUAL_LOG_UNLOADED_COL])
+
+        trailer_last3 = get_last_3_numbers(trailer_value)
+
+        if trailer_last3 == "" or manual_unloaded is None:
+            continue
+
+        rows.append(
+            {
+                "Trailer Last 3": trailer_last3,
+                "Manual Unloaded": int(manual_unloaded),
+                "Manual Trailer Raw": trailer_value,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["Trailer Last 3", "Manual Unloaded", "Manual Trailer Raw", "Manual Duplicate Count"])
+
+    manual_df = pd.DataFrame(rows)
+
+    # Group by last 3 so it can match the system logic.
+    # If the same last 3 appears more than once in the manual log, we SUM the manual pallets
+    # and show a warning in the app.
+    grouped = (
+        manual_df
+        .groupby("Trailer Last 3", as_index=False)
+        .agg(
+            **{
+                "Manual Unloaded": ("Manual Unloaded", "sum"),
+                "Manual Trailer Raw": ("Manual Trailer Raw", lambda x: ", ".join(sorted(set(str(v) for v in x)))),
+                "Manual Duplicate Count": ("Trailer Last 3", "size"),
+            }
+        )
+        .sort_values("Trailer Last 3")
+        .reset_index(drop=True)
+    )
+
+    return grouped
+
+
+def merge_manual_log_into_history(day_key, manual_result):
+    """
+    Save the manual unloader log for the selected day.
+
+    Logic:
+    - Key = Trailer Last 3.
+    - Manual unloaded pallets are replaced by the latest manual upload.
+    """
+    manual_history = st.session_state["manual_history"]
+    day_records = manual_history.setdefault(day_key, {})
+
+    for _, row_data in manual_result.iterrows():
+        trailer_last3 = str(row_data["Trailer Last 3"])
+
+        day_records[trailer_last3] = {
+            "Trailer Last 3": trailer_last3,
+            "Manual Unloaded": int(row_data["Manual Unloaded"]),
+            "Manual Trailer Raw": str(row_data.get("Manual Trailer Raw", "")),
+            "Manual Duplicate Count": int(row_data.get("Manual Duplicate Count", 1)),
+        }
+
+    save_json_file(MANUAL_HISTORY_FILE, manual_history)
+
+
+def get_manual_df(day_key):
+    """Return saved manual unloader data as a DataFrame."""
+    records = st.session_state["manual_history"].get(day_key, {})
+
+    rows = []
+    for record in records.values():
+        rows.append(
+            {
+                "Trailer Last 3": str(record.get("Trailer Last 3", "")),
+                "Manual Unloaded": int(record.get("Manual Unloaded", 0)),
+                "Manual Trailer Raw": str(record.get("Manual Trailer Raw", "")),
+                "Manual Duplicate Count": int(record.get("Manual Duplicate Count", 1)),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["Trailer Last 3", "Manual Unloaded", "Manual Trailer Raw", "Manual Duplicate Count"]
+        )
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Trailer Last 3")
+        .reset_index(drop=True)
+    )
+
+
+# -------------------------------------------------------------------
+# Comparison logic
+# -------------------------------------------------------------------
+def build_comparison_df(system_df, manual_df):
+    """
+    Build one comparison table:
+    - System Highest = highest count recorded by snapshots
+    - Manual Unloaded = number the unloader manually logged
+    - Difference = Manual Unloaded - System Highest
+    """
+    if system_df.empty and manual_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Order",
+                "Trailer Last 3",
+                "Manual Unloaded",
+                "System Highest",
+                "Difference",
+                "Match Status",
+                "Full Trailers",
+                "Manual Trailer Raw",
+            ]
+        )
+
+    system_small = system_df.copy()
+    manual_small = manual_df.copy()
+
+    if system_small.empty:
+        system_small = pd.DataFrame(columns=["Order", "Trailer Last 3", "System Highest", "Full Trailers"])
+
+    if manual_small.empty:
+        manual_small = pd.DataFrame(columns=["Trailer Last 3", "Manual Unloaded", "Manual Trailer Raw", "Manual Duplicate Count"])
+
+    comparison = pd.merge(
+        system_small,
+        manual_small,
+        on="Trailer Last 3",
+        how="outer",
+    )
+
+    # Keep manual-log rows first when manual exists, otherwise system order.
+    comparison["Sort Order"] = comparison["Order"].fillna(999999).astype(int)
+    comparison = comparison.sort_values(["Sort Order", "Trailer Last 3"]).reset_index(drop=True)
+
+    def calc_difference(row):
+        manual = row.get("Manual Unloaded")
+        system = row.get("System Highest")
+
+        if pd.isna(manual) or pd.isna(system):
+            return None
+
+        return int(manual) - int(system)
+
+    def calc_status(row):
+        manual = row.get("Manual Unloaded")
+        system = row.get("System Highest")
+
+        if pd.isna(manual) and pd.isna(system):
+            return "No data"
+
+        if pd.isna(manual):
+            return "Missing manual count"
+
+        if pd.isna(system):
+            return "Manual only - not seen by system"
+
+        diff = int(manual) - int(system)
+
+        if diff == 0:
+            return "Matched"
+
+        return "Mismatch"
+
+    comparison["Difference"] = comparison.apply(calc_difference, axis=1)
+    comparison["Match Status"] = comparison.apply(calc_status, axis=1)
+
+    wanted_cols = [
+        "Order",
+        "Trailer Last 3",
+        "Manual Unloaded",
+        "System Highest",
+        "Difference",
+        "Match Status",
+        "Full Trailers",
+        "Manual Trailer Raw",
+        "Manual Duplicate Count",
+    ]
+
+    for col in wanted_cols:
+        if col not in comparison.columns:
+            comparison[col] = None
+
+    return comparison[wanted_cols]
+
+
+def build_transfer_output(comparison_df):
+    """
+    Build rows for the Excel Transfer Log.
+
+    If a manual log has been uploaded, include:
+    - all manual rows
+    - plus any system non-research rows missing from the manual log
+
+    If no manual log exists yet, include only system non-research rows.
+    """
+    if comparison_df.empty:
+        return pd.DataFrame(columns=["Trailer Last 3", "Manual Unloaded", "System Highest"])
+
+    has_any_manual = comparison_df["Manual Unloaded"].notna().any()
+
+    if has_any_manual:
+        output = comparison_df[
+            comparison_df["Manual Unloaded"].notna()
+            | (comparison_df["System Highest"].fillna(0) > THRESHOLD)
+        ].copy()
+    else:
+        output = comparison_df[
+            comparison_df["System Highest"].fillna(0) > THRESHOLD
+        ].copy()
+
+    output = output[["Trailer Last 3", "Manual Unloaded", "System Highest"]].copy()
+
+    return output.reset_index(drop=True)
+
+
+# -------------------------------------------------------------------
 # App state
 # -------------------------------------------------------------------
 if "daily_history" not in st.session_state:
-    st.session_state["daily_history"] = load_history()
+    st.session_state["daily_history"] = load_json_file(HISTORY_FILE)
+
+if "manual_history" not in st.session_state:
+    st.session_state["manual_history"] = load_json_file(MANUAL_HISTORY_FILE)
 
 
 selected_day = st.date_input("Select day", value=date.today())
 day_key = selected_day.strftime("%Y-%m-%d")
 
-col_a, col_b = st.columns([3, 1])
+col_a, col_b, col_c = st.columns([3, 3, 1.3])
 
 with col_a:
-    uploaded = st.file_uploader("Upload your inbound report", type=["xlsx", "xlsm"])
+    uploaded = st.file_uploader(
+        "Upload system inbound report",
+        type=["xlsx", "xlsm"],
+        key="system_inbound_report",
+    )
 
 with col_b:
+    manual_uploaded = st.file_uploader(
+        "Upload manual unloader log at end of day",
+        type=["xlsx", "xlsm", "csv"],
+        key="manual_unloader_log",
+    )
+
+with col_c:
     st.write("")
     st.write("")
     clear_day = st.button("Clear selected day")
 
 if clear_day:
     st.session_state["daily_history"].pop(day_key, None)
-    save_history(st.session_state["daily_history"])
-    st.success(f"Cleared saved loads for {day_key}.")
+    st.session_state["manual_history"].pop(day_key, None)
+    save_json_file(HISTORY_FILE, st.session_state["daily_history"])
+    save_json_file(MANUAL_HISTORY_FILE, st.session_state["manual_history"])
+    st.success(f"Cleared saved system and manual loads for {day_key}.")
     st.rerun()
 
 
@@ -345,64 +677,113 @@ if uploaded is not None:
         merge_report_into_day_history(day_key, current_result)
 
         st.success(
-            f"Upload processed for {day_key}. "
+            f"System report processed for {day_key}. "
             "If a trailer was already saved for this day, the app kept the bigger pallet count."
         )
 
     except Exception as e:
-        st.error(f"Could not process the uploaded report: {e}")
+        st.error(f"Could not process the uploaded system report: {e}")
 
 
-day_df = get_day_df(day_key)
+if manual_uploaded is not None:
+    try:
+        manual_result = build_manual_log_result(manual_uploaded)
+        merge_manual_log_into_history(day_key, manual_result)
 
-transfer_ready = day_df[day_df["Pallets"] > THRESHOLD].copy()
-research_ready = day_df[day_df["Pallets"] <= THRESHOLD].copy()
-
-# Only the Transfer Log output needs these two columns.
-transfer_log_output = transfer_ready[["Trailer Last 3", "Pallets"]].copy()
-
-# Research display keeps the full trailer info so you can investigate.
-research_display = research_ready[["Trailer Last 3", "Pallets", "Full Trailers"]].copy()
-if not research_display.empty:
-    research_display["Status"] = "research"
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Saved trailers for selected day", len(day_df))
-c2.metric(f"Transfer Log rows over {THRESHOLD}", len(transfer_ready))
-c3.metric(f"Research rows {THRESHOLD} or less", len(research_ready))
-
-# -------------------------------------------------------------------
-# Transfer Log
-# -------------------------------------------------------------------
-st.subheader("📋 Transfer Log")
-
-if transfer_log_output.empty:
-    st.info("No non-research loads saved for this selected day yet.")
-else:
-    duplicate_last3 = transfer_log_output[
-        transfer_log_output["Trailer Last 3"].duplicated(keep=False)
-    ]
-
-    if not duplicate_last3.empty:
-        st.warning(
-            "Warning: at least two saved trailers have the same last 3 digits. "
-            "Review the Transfer Log before using it."
+        st.success(
+            f"Manual unloader log processed for {day_key}. "
+            "Manual counts were matched by trailer last 3."
         )
 
+        duplicate_manual = manual_result[manual_result["Manual Duplicate Count"] > 1]
+        if not duplicate_manual.empty:
+            st.warning(
+                "The manual log has duplicate trailer last-3 numbers. The app summed the manual pallets "
+                "for those duplicate last-3 numbers. Please review before using the final log."
+            )
+
+    except Exception as e:
+        st.error(f"Could not process the manual unloader log: {e}")
+
+
+system_df = get_day_df(day_key)
+manual_df = get_manual_df(day_key)
+comparison_df = build_comparison_df(system_df, manual_df)
+transfer_output = build_transfer_output(comparison_df)
+
+# Research rows based on system highest <= threshold.
+research_display = comparison_df[
+    comparison_df["System Highest"].notna()
+    & (comparison_df["System Highest"] <= THRESHOLD)
+].copy()
+
+if not research_display.empty:
+    research_display = research_display[
+        [
+            "Trailer Last 3",
+            "Manual Unloaded",
+            "System Highest",
+            "Difference",
+            "Match Status",
+            "Full Trailers",
+        ]
+    ].copy()
+    research_display["Status"] = "research"
+
+
+# -------------------------------------------------------------------
+# Metrics
+# -------------------------------------------------------------------
+matched_count = len(comparison_df[comparison_df["Match Status"] == "Matched"]) if not comparison_df.empty else 0
+mismatch_count = len(comparison_df[comparison_df["Match Status"] == "Mismatch"]) if not comparison_df.empty else 0
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("System trailers saved", len(system_df))
+c2.metric("Manual trailers saved", len(manual_df))
+c3.metric("Matched exactly", matched_count)
+c4.metric("Mismatches", mismatch_count)
+
+
+# -------------------------------------------------------------------
+# Transfer Log / Comparison
+# -------------------------------------------------------------------
+st.subheader("📋 Transfer Log comparison")
+
+if transfer_output.empty:
+    st.info("No Transfer Log rows for this selected day yet.")
+else:
     st.write(
-        "This is the saved daily log. It fills only **Trailer Num.** and "
-        "**Total Pallets in this Trailer** in the Excel template."
+        "The Excel log fills only **Trailer Num.**, **Total Pallets UNLOADED** "
+        "and **Total Pallets in this Trailer**. In this version, **Total Pallets UNLOADED** "
+        "comes from the manual unloader log, and **Total Pallets in this Trailer** comes from "
+        "the highest system count recorded during the day."
     )
 
-    st.dataframe(transfer_log_output, use_container_width=True, hide_index=True)
+    display_cols = [
+        "Trailer Last 3",
+        "Manual Unloaded",
+        "System Highest",
+        "Difference",
+        "Match Status",
+        "Full Trailers",
+        "Manual Trailer Raw",
+    ]
+
+    display_df = comparison_df[
+        comparison_df["Trailer Last 3"].isin(transfer_output["Trailer Last 3"])
+    ][display_cols].copy()
+
+    styled_comparison = display_df.style.apply(flag_variance, axis=1).hide(axis="index")
+
+    st.dataframe(styled_comparison, use_container_width=True)
 
     try:
-        transfer_log_file = create_transfer_log_excel(transfer_log_output)
+        transfer_log_file = create_transfer_log_excel(transfer_output)
 
         st.download_button(
-            "⬇️ Download completed Transfer Log",
+            "⬇️ Download completed Transfer Log comparison",
             data=transfer_log_file,
-            file_name=f"completed_transfer_log_{day_key}.xlsx",
+            file_name=f"completed_transfer_log_comparison_{day_key}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -413,17 +794,18 @@ else:
             "If this page is inside /pages, the code already looks one folder up."
         )
 
+
 # -------------------------------------------------------------------
 # Research Loads
 # -------------------------------------------------------------------
-st.subheader(f"🚨 Research loads with {THRESHOLD} or fewer pallets")
+st.subheader(f"🚨 Research loads with system highest of {THRESHOLD} or fewer pallets")
 
 if research_display.empty:
-    st.success("No short loads saved for this selected day.")
+    st.success("No short system loads saved for this selected day.")
 else:
-    styled = research_display.style.apply(flag_red, axis=1).hide(axis="index")
+    styled_research = research_display.style.apply(flag_red, axis=1).hide(axis="index")
 
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(styled_research, use_container_width=True)
 
     st.download_button(
         "⬇️ Download research list (CSV)",
