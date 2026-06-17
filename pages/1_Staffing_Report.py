@@ -2144,19 +2144,43 @@ def format_minutes_for_pacing(minutes):
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+# Unpaid break inside a shift. hours_remaining is entered as WORKING hours
+# (breaks excluded), but clock time keeps moving during the break. The break is
+# modeled as a single block that is FINISHED by SHIFT_BREAK_DONE_BY (clock time):
+#   - Before the break, the whole break is still ahead, so clock-time-left =
+#     working-left + break. (1st shift: 8.5 working left = 07:00.)
+#   - After the break, working time and clock time run 1:1, so zero working left
+#     = the exact shift end (16:30).
+# This keeps all three points exact -- 9.5 -> 06:00, 8.5 -> 07:00, 0 -> 16:30 --
+# with clean whole/half-hour readings in between.
+SHIFT_BREAK_HOURS = 1.0
+
+
 def estimated_current_minutes_from_shift(shift, hours_remaining):
-    """Estimate current clock time from shift end and hours remaining."""
+    """Estimate current clock time from WORKING hours remaining (breaks excluded)."""
     try:
-        remaining_minutes = int(round(float(hours_remaining or 0) * 60))
+        working_remaining = max(0.0, float(hours_remaining or 0))
     except Exception:
         return None
 
+    break_minutes = int(round(SHIFT_BREAK_HOURS * 60))
+    remaining_minutes = int(round(working_remaining * 60))
+
     shift_lower = str(shift or "").lower()
     if "1" in shift_lower:
-        end_minutes = 16 * 60 + 30    # 1st shift: 06:00-16:30
+        end_minutes = 16 * 60 + 30        # 1st shift ends 16:30
+        break_done_by = 12 * 60           # breaks finished by 12:00
     else:
-        end_minutes = 23 * 60 + 30    # 2nd shift estimate
+        end_minutes = 23 * 60 + 30        # 2nd shift estimate
+        break_done_by = 19 * 60           # breaks finished by 19:00
 
+    # Working hours still left at the moment the break is finished.
+    working_left_at_break_done = end_minutes - break_done_by
+
+    if remaining_minutes > working_left_at_break_done:
+        # Before the break: the full break is still ahead of you.
+        return max(0, end_minutes - remaining_minutes - break_minutes)
+    # After the break: working time and clock time run 1:1 to the shift end.
     return max(0, end_minutes - remaining_minutes)
 
 
