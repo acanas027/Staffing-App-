@@ -336,6 +336,4 @@ if run_btn:
         with tab4:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
 else:
-    st.info("Upload both files in the sidebar, then click **Run Analysis**.")unmatched_df, ["Target Date"]), use_container_width=True)
-else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
