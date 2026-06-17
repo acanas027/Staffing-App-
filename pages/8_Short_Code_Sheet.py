@@ -16,9 +16,10 @@ with st.expander("How this works"):
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
         "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
-        "- **EMAIL / RESEARCH**: one row per Item + Location for fully-covered "
-        "order lines where that location does not start with RC2 — shows total "
-        "quantity needed from that location, earliest delivery date, and the "
+        "- **EMAIL / RESEARCH**: one row per Item + Location Zone (first 3 "
+        "characters of the location, e.g. RC3, RF2) for fully-covered "
+        "order lines where that zone does not start with RC2 — shows total "
+        "quantity needed from that zone, earliest delivery date, and the "
         "previous location(s) involved, so you can send one email per product.\n"
         "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
         "or before the cutoff date (default today)."
@@ -225,12 +226,16 @@ def build_sku_to_code(wms_df, cutoff):
 
 def build_email_summary(email_df):
     """Collapse the detailed EMAIL/RESEARCH rows into one row per
-    Item + Location, suitable for writing one email per product."""
+    Item + Location Zone (first 3 characters of Location, e.g. RC3, RF2),
+    suitable for writing one email per product/zone."""
     if email_df.empty:
         return pd.DataFrame(columns=[
-            "Item", "Location", "Total Quantity Needed", "Earliest Delivery Date",
+            "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
             "Previous Locations", "Orders Affected"
         ])
+
+    email_df = email_df.copy()
+    email_df["Location Zone"] = email_df["Location"].astype(str).str[:3]
 
     def agg_group(g):
         return pd.Series({
@@ -240,7 +245,7 @@ def build_email_summary(email_df):
             "Orders Affected": g["Order"].nunique(),
         })
 
-    summary = email_df.groupby(["Item", "Location"], as_index=False).apply(agg_group, include_groups=False)
+    summary = email_df.groupby(["Item", "Location Zone"], as_index=False).apply(agg_group, include_groups=False)
     summary = summary.sort_values(["Item", "Earliest Delivery Date"]).reset_index(drop=True)
     return summary
 
@@ -260,7 +265,7 @@ def to_excel_bytes(short_df, email_summary_df, sku_df):
         if not summary_out.empty:
             summary_out["Earliest Delivery Date"] = pd.to_datetime(summary_out["Earliest Delivery Date"]).dt.date
         (summary_out if not summary_out.empty else pd.DataFrame(columns=[
-            "Item", "Location", "Total Quantity Needed", "Earliest Delivery Date",
+            "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
             "Previous Locations", "Orders Affected"
         ])).to_excel(writer, sheet_name="EMAIL_RESEARCH", index=False)
 
@@ -330,5 +335,7 @@ if run_btn:
             st.dataframe(date_only(sku_df, ["Consumer Priority Date"]), use_container_width=True)
         with tab4:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
+else:
+    st.info("Upload both files in the sidebar, then click **Run Analysis**.")unmatched_df, ["Target Date"]), use_container_width=True)
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
