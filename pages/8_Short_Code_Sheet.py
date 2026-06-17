@@ -16,8 +16,10 @@ with st.expander("How this works"):
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
         "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
-        "- **EMAIL / RESEARCH**: fully-covered order lines where at least one "
-        "source location does not start with RC2.\n"
+        "- **EMAIL / RESEARCH**: one row per Item + Location for fully-covered "
+        "order lines where that location does not start with RC2 — shows total "
+        "quantity needed from that location, earliest delivery date, and the "
+        "previous location(s) involved, so you can send one email per product.\n"
         "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
         "or before the cutoff date (default today)."
     )
@@ -201,6 +203,7 @@ def run_allocation(orders_df, wms_df):
                         "Item": order["Item"],
                         "Customer": order.get("Customer", ""),
                         "Order": order.get("Order", ""),
+                        "Quantity Needed": need,
                         "Delivery Date": order["Delivery Date"],
                         "Location": s["Location"],
                         "Previous Location": s["Previous Location"],
@@ -220,20 +223,51 @@ def build_sku_to_code(wms_df, cutoff):
     return aged.reset_index(drop=True)
 
 
-def to_excel_bytes(short_df, email_df, sku_df):
+def build_email_summary(email_df):
+    """Collapse the detailed EMAIL/RESEARCH rows into one row per
+    Item + Location, suitable for writing one email per product."""
+    if email_df.empty:
+        return pd.DataFrame(columns=[
+            "Item", "Location", "Total Quantity Needed", "Earliest Delivery Date",
+            "Previous Locations", "Orders Affected"
+        ])
+
+    def agg_group(g):
+        return pd.Series({
+            "Total Quantity Needed": g["Quantity from this location"].sum(),
+            "Earliest Delivery Date": g["Delivery Date"].min(),
+            "Previous Locations": ", ".join(sorted(set(g["Previous Location"].astype(str)))),
+            "Orders Affected": g["Order"].nunique(),
+        })
+
+    summary = email_df.groupby(["Item", "Location"], as_index=False).apply(agg_group, include_groups=False)
+    summary = summary.sort_values(["Item", "Earliest Delivery Date"]).reset_index(drop=True)
+    return summary
+
+
+def to_excel_bytes(short_df, email_summary_df, sku_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        (short_df if not short_df.empty else pd.DataFrame(columns=[
+        short_out = short_df.copy()
+        if not short_out.empty:
+            short_out["Target Date"] = pd.to_datetime(short_out["Target Date"]).dt.date
+        (short_out if not short_out.empty else pd.DataFrame(columns=[
             "Item", "Quantity Needed", "Quantity Available (qualifying)", "Short By",
             "Target Date", "Customer", "Order"
         ])).to_excel(writer, sheet_name="SHORT SHEET", index=False)
 
-        (email_df if not email_df.empty else pd.DataFrame(columns=[
-            "Item", "Customer", "Order", "Delivery Date", "Location",
-            "Previous Location", "Quantity from this location"
+        summary_out = email_summary_df.copy()
+        if not summary_out.empty:
+            summary_out["Earliest Delivery Date"] = pd.to_datetime(summary_out["Earliest Delivery Date"]).dt.date
+        (summary_out if not summary_out.empty else pd.DataFrame(columns=[
+            "Item", "Location", "Total Quantity Needed", "Earliest Delivery Date",
+            "Previous Locations", "Orders Affected"
         ])).to_excel(writer, sheet_name="EMAIL_RESEARCH", index=False)
 
-        (sku_df if not sku_df.empty else pd.DataFrame(columns=[
+        sku_out = sku_df.copy()
+        if not sku_out.empty:
+            sku_out["Consumer Priority Date"] = pd.to_datetime(sku_out["Consumer Priority Date"]).dt.date
+        (sku_out if not sku_out.empty else pd.DataFrame(columns=[
             "SKU Number", "Quantity", "Consumer Priority Date"
         ])).to_excel(writer, sheet_name="SKU TO CODE", index=False)
 
@@ -251,6 +285,7 @@ if run_btn:
                 wms_df = load_short_code_file(short_file)
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
                 sku_df = build_sku_to_code(wms_df, cutoff_date)
+                email_summary_df = build_email_summary(email_df)
         except KeyError as e:
             st.error(f"The orders file is missing an expected column: {e}. "
                      f"Expected columns: Item, Target Date, Delivery Date, Quantity Ordered.")
@@ -267,10 +302,10 @@ if run_btn:
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Short order lines", len(short_df))
-        col2.metric("Email/Research lines", len(email_df))
+        col2.metric("Email/Research items+locations", len(email_summary_df))
         col3.metric("Aged SKU rows (cutoff or earlier)", len(sku_df))
 
-        excel_bytes = to_excel_bytes(short_df, email_df, sku_df)
+        excel_bytes = to_excel_bytes(short_df, email_summary_df, sku_df)
         st.download_button(
             "Download results (Excel)",
             data=excel_bytes,
@@ -279,14 +314,21 @@ if run_btn:
             type="primary",
         )
 
+        def date_only(df, cols):
+            df = df.copy()
+            for c in cols:
+                if c in df.columns:
+                    df[c] = pd.to_datetime(df[c]).dt.date
+            return df
+
         tab1, tab2, tab3, tab4 = st.tabs(["SHORT SHEET", "EMAIL / RESEARCH", "SKU TO CODE", "Unmatched Items"])
         with tab1:
-            st.dataframe(short_df, use_container_width=True)
+            st.dataframe(date_only(short_df, ["Target Date"]), use_container_width=True)
         with tab2:
-            st.dataframe(email_df, use_container_width=True)
+            st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
         with tab3:
-            st.dataframe(sku_df, use_container_width=True)
+            st.dataframe(date_only(sku_df, ["Consumer Priority Date"]), use_container_width=True)
         with tab4:
-            st.dataframe(unmatched_df, use_container_width=True)
+            st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
