@@ -4213,8 +4213,17 @@ def run_full_generation(
 
     # Tool's recommended placement, captured BEFORE any supervisor override below
     # reassigns the same crew. This is shown on screen as the comparison board.
-    # build_summary() already returns a fresh copy, but copy() makes the intent explicit.
-    recommended_present_board = present_recommendations.copy()
+    # Use the load-maximizing allocation chosen in Phase 1 (recommended_counts) so
+    # the Recommended Staffing Board matches the Recommended Allocation (e.g. shows
+    # 3 loaders when 3 control more loads), not the raw per-shift need. Falls back
+    # to the need-based board when no Phase-1 recommendation was passed in.
+    if recommended_counts:
+        rec_targets = cap_allocation_to_available_skills(recommended_counts, staff)
+        rec_board_staff = generate_recommendations(staff.copy(), rec_targets)
+        recommended_present_board, _ = build_summary(rec_board_staff, needed)
+        recommended_present_board = recommended_present_board.copy()
+    else:
+        recommended_present_board = present_recommendations.copy()
     ai_recommended = None
     ai_reason = None
 
