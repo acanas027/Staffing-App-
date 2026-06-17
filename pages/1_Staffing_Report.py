@@ -4113,13 +4113,41 @@ def compute_recommended_allocation(
                 completed_or_loaded_now=completed_or_loaded_now,
             )
 
-            # The optimized model can estimate the best flow, but named recommendations must
-            # be grounded in who is actually present and what skills they actually have.
-            # Keep the true Needed column from calculate_needed(), assign only skill-qualified
-            # workers, and then set the Recommended Allocation from the actual named assignments.
-            staff = generate_recommendations(staff, needed)
-            present_recommendations, summary_table = build_summary(staff, needed)
-            recommended_counts = assigned_counts_from_summary(summary_table)
+            # Build two skill-grounded candidates and KEEP WHICHEVER CONTROLS MORE
+            # selected-day loads, using the same appointment-control logic used
+            # everywhere else. Both are realized by generate_recommendations(), which
+            # only ever assigns a worker to a function they are actually skilled for,
+            # so a candidate can never recommend a loader/picker/etc. we don't have.
+            #   A) the per-shift staffing NEED from calculate_needed()
+            #   B) the throughput-optimal split, capped to the skills actually present
+            def _named_counts_for_targets(targets):
+                trial = generate_recommendations(staff.copy(), targets)
+                _present, _summary = build_summary(trial, needed)
+                return trial, _present, _summary, assigned_counts_from_summary(_summary)
+
+            optimal_capped = cap_allocation_to_available_skills(optimal, staff)
+
+            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed)
+            opt_staff, opt_present, opt_summary, opt_counts = _named_counts_for_targets(optimal_capped)
+
+            def _loads_controlled(counts):
+                return int(appointment_controlled_by_allocation(
+                    board_text_for_preview, day, shift, hours_remaining, counts,
+                ).get("loads_controlled", 0) or 0)
+
+            need_controlled = _loads_controlled(need_counts)
+            opt_controlled = _loads_controlled(opt_counts)
+
+            # Pick the allocation that controls more loads. Tie -> fewer total workers
+            # used, then fall back to the calculated need for stability.
+            if (opt_controlled, -sum(opt_counts.values())) > (need_controlled, -sum(need_counts.values())):
+                staff = opt_staff
+                present_recommendations, summary_table = opt_present, opt_summary
+                recommended_counts = opt_counts
+            else:
+                staff = need_staff
+                present_recommendations, summary_table = need_present, need_summary
+                recommended_counts = need_counts
 
             python_shift_goal_preview = compute_python_shift_goal_preview(
                 board_text=board_text_for_preview,
