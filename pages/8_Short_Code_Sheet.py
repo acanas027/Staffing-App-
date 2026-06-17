@@ -9,19 +9,15 @@ st.caption("Upload the orders file and the warehouse short code file to find sho
 
 with st.expander("How this works"):
     st.markdown(
-        "- Items starting with **S** are removed from the orders file.\n"
-        "- Item codes are matched to SKU Numbers using the first 7 characters "
-        "of the zero-padded code (e.g. `06795.48940` matches `6795.48`).\n"
+        "- Item codes are matched to SKU Numbers "
         "- Order lines are processed most-urgent-Target-Date first, allocating "
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
         "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
-        "- **EMAIL / RESEARCH**: one row per Item + Location Zone (first 3 "
-        "characters of the location, e.g. RC3, RF2) for fully-covered "
-        "order lines where that zone does not start with RC2 and the "
-        "Delivery Date falls within the chosen departure window — shows total "
-        "quantity needed from that zone, earliest delivery date, and the "
-        "previous location(s) involved, so you can send one email per product.\n"
+        "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
+        "order lines with the product somewhere else other than the DC "
+        "Delivery Date falls within the chosen departure window "
+        "so you can send one email per product.\n"
         "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
         "or before the cutoff date (default today)."
     )
