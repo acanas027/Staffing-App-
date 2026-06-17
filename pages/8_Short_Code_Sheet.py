@@ -9,15 +9,19 @@ st.caption("Upload the orders file and the warehouse short code file to find sho
 
 with st.expander("How this works"):
     st.markdown(
-        "- Item codes are matched to SKU Numbers "
+        "- Items starting with **S** are removed from the orders file.\n"
+        "- The full SKU Number is built directly from the short code file's "
+        "columns H and I (H gives the whole number plus the first 2 decimal "
+        "digits, I gives the remaining 3 decimal digits), then matched "
+        "exactly against the Item code.\n"
         "- Order lines are processed most-urgent-Target-Date first, allocating "
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
         "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
         "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
-        "order lines with the product somewhere else other than the DC "
-        "Delivery Date falls within the chosen departure window "
-        "so you can send one email per product.\n"
+        "order lines where that zone does not start with RC2 and the "
+        "Delivery Date falls within the chosen departure window, so you can "
+        "send one email per product.\n"
         "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
         "or before the cutoff date (default today)."
     )
@@ -50,36 +54,40 @@ def cell_to_str(x):
     return str(x).strip()
 
 
-def sku_norm(x):
+def h_to_str(x):
+    """Column H: whole number + first 2 decimal digits (e.g. 77171.11)."""
     if pd.isna(x):
         return None
-    if isinstance(x, float):
-        if x == int(x):
-            return str(int(x))
-        return str(x)
+    if isinstance(x, float) and x == int(x):
+        return str(int(x))
     return str(x).strip()
 
 
-def make_key(s):
-    """Build a matching key between Item codes (data file) and SKU Number
-    (short code file). Two cases:
-    - Decimal codes (e.g. 06795.48940): zero-pad the whole-number part to
-      5 digits, keep the decimal part as-is, then take the first 7 characters.
-      This intentionally matches on the first 2 decimal digits only, since
-      the short code file truncates decimals to 2 places.
-    - Whole-number-only codes (e.g. 28005, no decimal at all): zero-pad to
-      5 digits and match directly against bare whole-number SKUs.
-    A whole-number SKU never matches a decimal Item code and vice versa."""
-    if s is None:
+def i_to_str(x):
+    """Column I: the remaining 3 decimal digits, zero-padded on the left
+    (e.g. 1 -> '001'). If missing, treated as '000'."""
+    if pd.isna(x):
+        return "000"
+    if isinstance(x, float) and x == int(x):
+        return str(int(x)).zfill(3)
+    return str(x).strip().zfill(3)
+
+
+def build_full_sku(h_val, i_val):
+    """Join columns H and I into the full-precision SKU, in the same
+    format as the orders file's Item code (5 digits . 5 digits).
+    Whole-number-only H values (no decimal at all) are zero-padded and
+    returned as-is -- they don't get an I suffix, since there's no
+    decimal portion to extend."""
+    if h_val is None:
         return None
-    s = str(s)
-    if "." in s:
-        whole, dec = s.split(".", 1)
+    if "." in h_val:
+        whole, dec = h_val.split(".", 1)
         whole = whole.zfill(5)
-        key = f"{whole}.{dec}"
-        return key[:7]
+        dec = dec.ljust(2, "0")[:2]
+        return f"{whole}.{dec}{i_val}"
     else:
-        return s.zfill(5)
+        return h_val.zfill(5)
 
 
 def load_data_file(file):
@@ -91,7 +99,7 @@ def load_data_file(file):
     df["Target Date"] = pd.to_datetime(df["Target Date"])
     df["Delivery Date"] = pd.to_datetime(df["Delivery Date"])
     df["Quantity Ordered"] = pd.to_numeric(df["Quantity Ordered"], errors="coerce").fillna(0)
-    df["match_key"] = df["Item"].apply(make_key)
+    df["match_key"] = df["Item"]
     df = df.reset_index(drop=True)
     df["order_line_id"] = df.index
     return df
@@ -103,7 +111,9 @@ def load_short_code_file(file):
     location = raw.iloc[:, 0:6].map(cell_to_str).agg("".join, axis=1)
     previous_location = raw.iloc[:, 10:16].map(cell_to_str).agg("".join, axis=1)
     lpn = raw.iloc[:, 6]
-    sku_raw = raw.iloc[:, 7]
+    sku_h = raw.iloc[:, 7].apply(h_to_str)
+    sku_i = raw.iloc[:, 8].apply(i_to_str)
+    full_sku = [build_full_sku(h, i) for h, i in zip(sku_h, sku_i)]
     quantity = pd.to_numeric(raw.iloc[:, 9], errors="coerce").fillna(0)
     priority_date_raw = raw.iloc[:, 27]
 
@@ -111,12 +121,12 @@ def load_short_code_file(file):
         "Location": location,
         "Previous Location": previous_location,
         "LPN #": lpn,
-        "SKU Number": sku_raw.apply(sku_norm),
+        "SKU Number": full_sku,
         "Quantity": quantity,
         "Consumer Priority Date": pd.to_datetime(priority_date_raw.astype(str), format="%Y%m%d", errors="coerce"),
     })
     out = out[out["SKU Number"].notna()].copy()
-    out["match_key"] = out["SKU Number"].apply(make_key)
+    out["match_key"] = out["SKU Number"]
     out = out.reset_index(drop=True)
     out["wms_row_id"] = out.index
     return out
