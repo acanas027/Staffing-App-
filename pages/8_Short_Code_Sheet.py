@@ -17,7 +17,9 @@ with st.expander("How this works"):
         "- Order lines are processed most-urgent-Target-Date first, allocating "
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
-        "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
+        "- **SHORT SHEET**: one row per Item/SKU that doesn't have enough "
+        "qualifying inventory, with the total quantity short across all "
+        "affected orders and the earliest Target Date among them.\n"
         "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
         "order lines where that zone does not start with RC2 and the "
         "Delivery Date falls within the chosen departure window, so you can "
@@ -238,6 +240,24 @@ def build_sku_to_code(wms_df, cutoff):
     return aged.reset_index(drop=True)
 
 
+def build_short_summary(short_df):
+    """Collapse the detailed SHORT SHEET rows (one per order line) into one
+    row per Item/SKU, with the total quantity short and the earliest Target
+    Date among the orders that are short for that item."""
+    if short_df.empty:
+        return pd.DataFrame(columns=["Item", "Total Short By", "Earliest Target Date"])
+
+    def agg_group(g):
+        return pd.Series({
+            "Total Short By": g["Short By"].sum(),
+            "Earliest Target Date": g["Target Date"].min(),
+        })
+
+    summary = short_df.groupby("Item", as_index=False).apply(agg_group, include_groups=False)
+    summary = summary.sort_values("Earliest Target Date").reset_index(drop=True)
+    return summary
+
+
 def build_email_summary(email_df, date_range=None):
     """Collapse the detailed EMAIL/RESEARCH rows into one row per
     Item + Location Zone (first 3 characters of Location, e.g. RC3, RF2),
@@ -280,15 +300,14 @@ def build_email_summary(email_df, date_range=None):
     return summary
 
 
-def to_excel_bytes(short_df, email_summary_df, sku_df):
+def to_excel_bytes(short_summary_df, email_summary_df, sku_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        short_out = short_df.copy()
+        short_out = short_summary_df.copy()
         if not short_out.empty:
-            short_out["Target Date"] = pd.to_datetime(short_out["Target Date"]).dt.date
+            short_out["Earliest Target Date"] = pd.to_datetime(short_out["Earliest Target Date"]).dt.date
         (short_out if not short_out.empty else pd.DataFrame(columns=[
-            "Item", "Quantity Needed", "Quantity Available (qualifying)", "Short By",
-            "Target Date", "Customer", "Order"
+            "Item", "Total Short By", "Earliest Target Date"
         ])).to_excel(writer, sheet_name="SHORT SHEET", index=False)
 
         summary_out = email_summary_df.copy()
@@ -319,6 +338,7 @@ if run_btn:
                 orders_df = load_data_file(data_file)
                 wms_df = load_short_code_file(short_file)
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
+                short_summary_df = build_short_summary(short_df)
                 sku_df = build_sku_to_code(wms_df, cutoff_date)
                 if isinstance(email_date_range, (tuple, list)) and len(email_date_range) == 2:
                     email_summary_df = build_email_summary(email_df, email_date_range)
@@ -341,11 +361,11 @@ if run_btn:
                        f"in the short code file (counted as fully short). See the 'Unmatched Items' tab.")
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Short order lines", len(short_df))
+        col1.metric("Short SKUs", len(short_summary_df))
         col2.metric("Email/Research items+locations", len(email_summary_df))
         col3.metric("Aged SKU rows (cutoff or earlier)", len(sku_df))
 
-        excel_bytes = to_excel_bytes(short_df, email_summary_df, sku_df)
+        excel_bytes = to_excel_bytes(short_summary_df, email_summary_df, sku_df)
         st.download_button(
             "Download results (Excel)",
             data=excel_bytes,
@@ -363,7 +383,7 @@ if run_btn:
 
         tab1, tab2, tab3, tab4 = st.tabs(["SHORT SHEET", "EMAIL / RESEARCH", "SKU TO CODE", "Unmatched Items"])
         with tab1:
-            st.dataframe(date_only(short_df, ["Target Date"]), use_container_width=True)
+            st.dataframe(date_only(short_summary_df, ["Earliest Target Date"]), use_container_width=True)
         with tab2:
             st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
         with tab3:
