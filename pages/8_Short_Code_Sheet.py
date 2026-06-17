@@ -18,7 +18,8 @@ with st.expander("How this works"):
         "- **SHORT SHEET**: order lines that don't have enough qualifying inventory.\n"
         "- **EMAIL / RESEARCH**: one row per Item + Location Zone (first 3 "
         "characters of the location, e.g. RC3, RF2) for fully-covered "
-        "order lines where that zone does not start with RC2 — shows total "
+        "order lines where that zone does not start with RC2 and the "
+        "Delivery Date falls within the chosen departure window — shows total "
         "quantity needed from that zone, earliest delivery date, and the "
         "previous location(s) involved, so you can send one email per product.\n"
         "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
@@ -32,6 +33,13 @@ with st.sidebar:
     st.divider()
     cutoff_date = st.date_input("SKU TO CODE cutoff date", value=datetime.now().date(),
                                  help="SKU TO CODE will include rows with a Consumer Priority Date on or before this date.")
+    st.divider()
+    today = datetime.now().date()
+    email_date_range = st.date_input(
+        "EMAIL / RESEARCH departure window",
+        value=(today, today + pd.Timedelta(days=3)),
+        help="Only include order lines whose Delivery Date falls in this range (inclusive)."
+    )
     st.divider()
     run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
@@ -224,10 +232,12 @@ def build_sku_to_code(wms_df, cutoff):
     return aged.reset_index(drop=True)
 
 
-def build_email_summary(email_df):
+def build_email_summary(email_df, date_range=None):
     """Collapse the detailed EMAIL/RESEARCH rows into one row per
     Item + Location Zone (first 3 characters of Location, e.g. RC3, RF2),
-    suitable for writing one email per product/zone."""
+    suitable for writing one email per product/zone. If date_range is
+    given (start, end), only rows whose Delivery Date falls within that
+    inclusive range are included."""
     if email_df.empty:
         return pd.DataFrame(columns=[
             "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
@@ -235,6 +245,20 @@ def build_email_summary(email_df):
         ])
 
     email_df = email_df.copy()
+
+    if date_range is not None and len(date_range) == 2:
+        start_ts = pd.Timestamp(date_range[0])
+        end_ts = pd.Timestamp(date_range[1])
+        email_df = email_df[
+            (email_df["Delivery Date"] >= start_ts) & (email_df["Delivery Date"] <= end_ts)
+        ]
+
+    if email_df.empty:
+        return pd.DataFrame(columns=[
+            "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
+            "Previous Locations", "Orders Affected"
+        ])
+
     email_df["Location Zone"] = email_df["Location"].astype(str).str[:3]
 
     def agg_group(g):
@@ -290,7 +314,12 @@ if run_btn:
                 wms_df = load_short_code_file(short_file)
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
                 sku_df = build_sku_to_code(wms_df, cutoff_date)
-                email_summary_df = build_email_summary(email_df)
+                if isinstance(email_date_range, (tuple, list)) and len(email_date_range) == 2:
+                    email_summary_df = build_email_summary(email_df, email_date_range)
+                else:
+                    st.warning("Please select both a start and end date for the EMAIL / RESEARCH "
+                               "departure window in the sidebar. Showing all dates for now.")
+                    email_summary_df = build_email_summary(email_df)
         except KeyError as e:
             st.error(f"The orders file is missing an expected column: {e}. "
                      f"Expected columns: Item, Target Date, Delivery Date, Quantity Ordered.")
