@@ -22,10 +22,14 @@ with st.expander("How this works"):
         "affected orders and the earliest Target Date among them.\n"
         "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
         "order lines where that zone does not start with RC2 and the "
-        "Delivery Date falls within the chosen departure window, so you can "
-        "send one email per product.\n"
-        "- **SKU TO CODE**: all warehouse rows with a Consumer Priority Date on "
-        "or before the cutoff date (default today)."
+        "Delivery Date falls within the chosen departure window.\n"
+        "- **SKU TO CODE**: aged inventory rows (Consumer Priority Date ≤ cutoff) "
+        "that are **new** — not seen in any previous run. One row per pallet, "
+        "showing Location and LPN #. Dedup key is SKU Number + Consumer Priority "
+        "Date combined, so the same SKU can reappear legitimately if it has a "
+        "different date.\n"
+        "- **SKU HISTORY**: every SKU+date pair ever flagged, accumulated across "
+        "all runs. Upload last run's Excel to carry the history forward."
     )
 
 with st.sidebar:
@@ -33,8 +37,20 @@ with st.sidebar:
     data_file = st.file_uploader("Data (orders) file", type=["xlsx"], key="data_file")
     short_file = st.file_uploader("Short code (WMS) file", type=["xlsx"], key="short_file")
     st.divider()
-    cutoff_date = st.date_input("SKU TO CODE cutoff date", value=datetime.now().date(),
-                                 help="SKU TO CODE will include rows with a Consumer Priority Date on or before this date.")
+    st.subheader("History (optional)")
+    history_file = st.file_uploader(
+        "Previous report (for dedup)",
+        type=["xlsx"],
+        key="history_file",
+        help="Upload the Excel downloaded from your last run. The app reads its "
+             "'SKU HISTORY' sheet to filter out SKU+date pairs already seen."
+    )
+    st.divider()
+    cutoff_date = st.date_input(
+        "SKU TO CODE cutoff date",
+        value=datetime.now().date(),
+        help="SKU TO CODE includes rows with a Consumer Priority Date on or before this date."
+    )
     st.divider()
     today = datetime.now().date()
     email_date_range = st.date_input(
@@ -46,7 +62,7 @@ with st.sidebar:
     run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
 
-# ---------- Normalization helpers ----------
+# ---------- helpers ----------
 
 def cell_to_str(x):
     if pd.isna(x):
@@ -57,7 +73,6 @@ def cell_to_str(x):
 
 
 def h_to_str(x):
-    """Column H: whole number + first 2 decimal digits (e.g. 77171.11)."""
     if pd.isna(x):
         return None
     if isinstance(x, float) and x == int(x):
@@ -66,8 +81,6 @@ def h_to_str(x):
 
 
 def i_to_str(x):
-    """Column I: the remaining 3 decimal digits, zero-padded on the left
-    (e.g. 1 -> '001'). If missing, treated as '000'."""
     if pd.isna(x):
         return "000"
     if isinstance(x, float) and x == int(x):
@@ -76,11 +89,6 @@ def i_to_str(x):
 
 
 def build_full_sku(h_val, i_val):
-    """Join columns H and I into the full-precision SKU, in the same
-    format as the orders file's Item code (5 digits . 5 digits).
-    Whole-number-only H values (no decimal at all) are zero-padded and
-    returned as-is -- they don't get an I suffix, since there's no
-    decimal portion to extend."""
     if h_val is None:
         return None
     if "." in h_val:
@@ -125,7 +133,9 @@ def load_short_code_file(file):
         "LPN #": lpn,
         "SKU Number": full_sku,
         "Quantity": quantity,
-        "Consumer Priority Date": pd.to_datetime(priority_date_raw.astype(str), format="%Y%m%d", errors="coerce"),
+        "Consumer Priority Date": pd.to_datetime(
+            priority_date_raw.astype(str), format="%Y%m%d", errors="coerce"
+        ),
     })
     out = out[out["SKU Number"].notna()].copy()
     out["match_key"] = out["SKU Number"]
@@ -134,11 +144,28 @@ def load_short_code_file(file):
     return out
 
 
-def run_allocation(orders_df, wms_df):
-    """Allocate WMS inventory to order lines, most urgent Target Date first.
-    Returns: short_df, email_df, unmatched_df (order lines whose Item has
-    zero matching SKU rows in the WMS file at all)."""
+def load_history(file):
+    """Read the SKU HISTORY sheet from a previous report.
+    Returns a set of (sku_number, date_str) tuples."""
+    if file is None:
+        return set()
+    try:
+        hist_df = pd.read_excel(file, sheet_name="SKU HISTORY")
+        hist_df["Consumer Priority Date"] = pd.to_datetime(
+            hist_df["Consumer Priority Date"], errors="coerce"
+        )
+        seen = set()
+        for _, row in hist_df.iterrows():
+            sku = str(row["SKU Number"]).strip()
+            dt = row["Consumer Priority Date"]
+            if pd.notna(dt):
+                seen.add((sku, str(dt.date())))
+        return seen
+    except Exception:
+        return set()
 
+
+def run_allocation(orders_df, wms_df):
     remaining = wms_df.set_index("wms_row_id")["Quantity"].astype(float).to_dict()
 
     by_key = {}
@@ -233,17 +260,52 @@ def run_allocation(orders_df, wms_df):
     return short_df, email_df, unmatched_df
 
 
-def build_sku_to_code(wms_df, cutoff):
+def build_sku_to_code(wms_df, cutoff, seen_pairs):
+    """Return aged WMS rows whose (SKU, date) pair has NOT been seen before.
+    One row per pallet, including Location and LPN #.
+    Also returns the set of new (sku, date_str) pairs to add to history."""
     cutoff_ts = pd.Timestamp(cutoff)
     aged = wms_df[wms_df["Consumer Priority Date"] <= cutoff_ts].copy()
-    aged = aged[["SKU Number", "Quantity", "Consumer Priority Date"]].sort_values("Consumer Priority Date")
-    return aged.reset_index(drop=True)
+    aged = aged[
+        ["SKU Number", "LPN #", "Location", "Quantity", "Consumer Priority Date"]
+    ].sort_values(["Consumer Priority Date", "SKU Number", "Location"])
+
+    def is_new(row):
+        sku = str(row["SKU Number"]).strip()
+        dt = row["Consumer Priority Date"]
+        if pd.isna(dt):
+            return False
+        return (sku, str(dt.date())) not in seen_pairs
+
+    aged["_is_new"] = aged.apply(is_new, axis=1)
+    new_rows = aged[aged["_is_new"]].drop(columns=["_is_new"]).reset_index(drop=True)
+
+    # Collect new unique SKU+date pairs to add to history
+    new_pairs = set()
+    for _, row in new_rows.iterrows():
+        dt = row["Consumer Priority Date"]
+        if pd.notna(dt):
+            new_pairs.add((str(row["SKU Number"]).strip(), str(dt.date())))
+
+    return new_rows, new_pairs
+
+
+def build_updated_history(seen_pairs, new_pairs, run_date):
+    """Merge old history + new pairs into a single history DataFrame."""
+    all_pairs = seen_pairs | new_pairs
+    rows = []
+    for sku, date_str in sorted(all_pairs):
+        rows.append({"SKU Number": sku, "Consumer Priority Date": date_str})
+    hist_df = pd.DataFrame(rows)
+    if not hist_df.empty:
+        hist_df["Consumer Priority Date"] = pd.to_datetime(
+            hist_df["Consumer Priority Date"], errors="coerce"
+        )
+        hist_df = hist_df.sort_values(["Consumer Priority Date", "SKU Number"]).reset_index(drop=True)
+    return hist_df
 
 
 def build_short_summary(short_df):
-    """Collapse the detailed SHORT SHEET rows (one per order line) into one
-    row per Item/SKU, with the total quantity short and the earliest Target
-    Date among the orders that are short for that item."""
     if short_df.empty:
         return pd.DataFrame(columns=["Item", "Total Short By", "Earliest Target Date"])
 
@@ -259,11 +321,6 @@ def build_short_summary(short_df):
 
 
 def build_email_summary(email_df, date_range=None):
-    """Collapse the detailed EMAIL/RESEARCH rows into one row per
-    Item + Location Zone (first 3 characters of Location, e.g. RC3, RF2),
-    suitable for writing one email per product/zone. If date_range is
-    given (start, end), only rows whose Delivery Date falls within that
-    inclusive range are included."""
     if email_df.empty:
         return pd.DataFrame(columns=[
             "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
@@ -295,39 +352,60 @@ def build_email_summary(email_df, date_range=None):
             "Orders Affected": g["Order"].nunique(),
         })
 
-    summary = email_df.groupby(["Item", "Location Zone"], as_index=False).apply(agg_group, include_groups=False)
+    summary = email_df.groupby(["Item", "Location Zone"], as_index=False).apply(
+        agg_group, include_groups=False
+    )
     summary = summary.sort_values(["Item", "Earliest Delivery Date"]).reset_index(drop=True)
     return summary
 
 
-def to_excel_bytes(short_summary_df, email_summary_df, sku_df):
+def to_excel_bytes(short_summary_df, email_summary_df, sku_df, history_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # SHORT SHEET
         short_out = short_summary_df.copy()
         if not short_out.empty:
             short_out["Earliest Target Date"] = pd.to_datetime(short_out["Earliest Target Date"]).dt.date
-        (short_out if not short_out.empty else pd.DataFrame(columns=[
-            "Item", "Total Short By", "Earliest Target Date"
-        ])).to_excel(writer, sheet_name="SHORT SHEET", index=False)
+        (short_out if not short_out.empty else pd.DataFrame(
+            columns=["Item", "Total Short By", "Earliest Target Date"]
+        )).to_excel(writer, sheet_name="SHORT SHEET", index=False)
 
+        # EMAIL_RESEARCH
         summary_out = email_summary_df.copy()
         if not summary_out.empty:
-            summary_out["Earliest Delivery Date"] = pd.to_datetime(summary_out["Earliest Delivery Date"]).dt.date
+            summary_out["Earliest Delivery Date"] = pd.to_datetime(
+                summary_out["Earliest Delivery Date"]
+            ).dt.date
         (summary_out if not summary_out.empty else pd.DataFrame(columns=[
             "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
             "Previous Locations", "Orders Affected"
         ])).to_excel(writer, sheet_name="EMAIL_RESEARCH", index=False)
 
+        # SKU TO CODE (new only, one row per pallet)
         sku_out = sku_df.copy()
         if not sku_out.empty:
-            sku_out["Consumer Priority Date"] = pd.to_datetime(sku_out["Consumer Priority Date"]).dt.date
-        (sku_out if not sku_out.empty else pd.DataFrame(columns=[
-            "SKU Number", "Quantity", "Consumer Priority Date"
-        ])).to_excel(writer, sheet_name="SKU TO CODE", index=False)
+            sku_out["Consumer Priority Date"] = pd.to_datetime(
+                sku_out["Consumer Priority Date"]
+            ).dt.date
+        (sku_out if not sku_out.empty else pd.DataFrame(
+            columns=["SKU Number", "LPN #", "Location", "Quantity", "Consumer Priority Date"]
+        )).to_excel(writer, sheet_name="SKU TO CODE", index=False)
+
+        # SKU HISTORY (cumulative)
+        hist_out = history_df.copy()
+        if not hist_out.empty:
+            hist_out["Consumer Priority Date"] = pd.to_datetime(
+                hist_out["Consumer Priority Date"]
+            ).dt.date
+        (hist_out if not hist_out.empty else pd.DataFrame(
+            columns=["SKU Number", "Consumer Priority Date"]
+        )).to_excel(writer, sheet_name="SKU HISTORY", index=False)
 
     output.seek(0)
     return output
 
+
+# ---------- main ----------
 
 if run_btn:
     if not data_file or not short_file:
@@ -337,18 +415,26 @@ if run_btn:
             with st.spinner("Processing..."):
                 orders_df = load_data_file(data_file)
                 wms_df = load_short_code_file(short_file)
+                seen_pairs = load_history(history_file)
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
                 short_summary_df = build_short_summary(short_df)
-                sku_df = build_sku_to_code(wms_df, cutoff_date)
+                sku_df, new_pairs = build_sku_to_code(wms_df, cutoff_date, seen_pairs)
+                history_df = build_updated_history(seen_pairs, new_pairs, today=datetime.now().date())
+
                 if isinstance(email_date_range, (tuple, list)) and len(email_date_range) == 2:
                     email_summary_df = build_email_summary(email_df, email_date_range)
                 else:
-                    st.warning("Please select both a start and end date for the EMAIL / RESEARCH "
-                               "departure window in the sidebar. Showing all dates for now.")
+                    st.warning(
+                        "Please select both a start and end date for the EMAIL / RESEARCH "
+                        "departure window. Showing all dates for now."
+                    )
                     email_summary_df = build_email_summary(email_df)
+
         except KeyError as e:
-            st.error(f"The orders file is missing an expected column: {e}. "
-                     f"Expected columns: Item, Target Date, Delivery Date, Quantity Ordered.")
+            st.error(
+                f"The orders file is missing an expected column: {e}. "
+                f"Expected columns: Item, Target Date, Delivery Date, Quantity Ordered."
+            )
             st.stop()
         except Exception as e:
             st.error(f"Something went wrong while processing the files: {e}")
@@ -356,20 +442,35 @@ if run_btn:
 
         st.success("Done.")
 
-        if not unmatched_df.empty:
-            st.warning(f"{unmatched_df['Item'].nunique()} item(s) on order have no matching SKU at all "
-                       f"in the short code file (counted as fully short). See the 'Unmatched Items' tab.")
+        # History context banner
+        if history_file:
+            st.info(
+                f"📋 History loaded: {len(seen_pairs):,} previously seen SKU+date pair(s). "
+                f"**{len(new_pairs):,}** new pair(s) found this run and added to history."
+            )
+        else:
+            st.warning(
+                "⚠️ No previous report uploaded — treating all aged SKUs as new. "
+                "Download this report and upload it next time to enable deduplication."
+            )
 
-        col1, col2, col3 = st.columns(3)
+        if not unmatched_df.empty:
+            st.warning(
+                f"{unmatched_df['Item'].nunique()} item(s) on order have no matching SKU at all "
+                f"in the short code file (counted as fully short). See the 'Unmatched Items' tab."
+            )
+
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Short SKUs", len(short_summary_df))
         col2.metric("Email/Research items+locations", len(email_summary_df))
-        col3.metric("Aged SKU rows (cutoff or earlier)", len(sku_df))
+        col3.metric("New SKU TO CODE rows", len(sku_df))
+        col4.metric("Total history pairs", len(history_df))
 
-        excel_bytes = to_excel_bytes(short_summary_df, email_summary_df, sku_df)
+        excel_bytes = to_excel_bytes(short_summary_df, email_summary_df, sku_df, history_df)
         st.download_button(
-            "Download results (Excel)",
+            "⬇️ Download results (Excel)",
             data=excel_bytes,
-            file_name="shortage_analysis.xlsx",
+            file_name=f"shortage_analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
@@ -378,17 +479,25 @@ if run_btn:
             df = df.copy()
             for c in cols:
                 if c in df.columns:
-                    df[c] = pd.to_datetime(df[c]).dt.date
+                    df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
             return df
 
-        tab1, tab2, tab3, tab4 = st.tabs(["SHORT SHEET", "EMAIL / RESEARCH", "SKU TO CODE", "Unmatched Items"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["SHORT SHEET", "EMAIL / RESEARCH", "SKU TO CODE (new)", "SKU HISTORY", "Unmatched Items"]
+        )
         with tab1:
             st.dataframe(date_only(short_summary_df, ["Earliest Target Date"]), use_container_width=True)
         with tab2:
             st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
         with tab3:
-            st.dataframe(date_only(sku_df, ["Consumer Priority Date"]), use_container_width=True)
+            if sku_df.empty:
+                st.info("No new SKU TO CODE rows this run — all aged SKUs were already in history.")
+            else:
+                st.dataframe(date_only(sku_df, ["Consumer Priority Date"]), use_container_width=True)
         with tab4:
+            st.caption("Every SKU + Consumer Priority Date pair ever flagged across all runs.")
+            st.dataframe(date_only(history_df, ["Consumer Priority Date"]), use_container_width=True)
+        with tab5:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
