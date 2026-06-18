@@ -290,7 +290,7 @@ def build_sku_to_code(wms_df, cutoff, seen_pairs):
     return new_rows, new_pairs
 
 
-def build_updated_history(seen_pairs, new_pairs, run_date):
+def build_updated_history(seen_pairs, new_pairs):
     """Merge old history + new pairs into a single history DataFrame."""
     all_pairs = seen_pairs | new_pairs
     rows = []
@@ -419,7 +419,7 @@ if run_btn:
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
                 short_summary_df = build_short_summary(short_df)
                 sku_df, new_pairs = build_sku_to_code(wms_df, cutoff_date, seen_pairs)
-                history_df = build_updated_history(seen_pairs, new_pairs, today=datetime.now().date())
+                history_df = build_updated_history(seen_pairs, new_pairs)
 
                 if isinstance(email_date_range, (tuple, list)) and len(email_date_range) == 2:
                     email_summary_df = build_email_summary(email_df, email_date_range)
