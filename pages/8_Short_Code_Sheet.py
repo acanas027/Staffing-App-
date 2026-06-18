@@ -85,11 +85,22 @@ def i_to_str(x):
 
 
 def normalize_sku(x):
-    """Consistent string form for dedup. Strips trailing '.0' added by pandas
-    for whole-number floats read from Excel."""
+    """Consistent string form for dedup comparisons.
+    - Strips leading zeros from the whole part (Excel drops them on read-back)
+    - Strips trailing zeros from the decimal part (Excel drops them on read-back)
+    - Handles pandas trailing '.0' artifact for whole-number floats
+    So '06795.48940', '6795.4894', and '6795.48940' all normalize to '6795.4894'."""
     s = str(x).strip()
+    # Whole-number float artifact from pandas: '79341.0' -> '79341'
     if s.endswith(".0") and s[:-2].isdigit():
         return s[:-2]
+    if "." in s:
+        whole, dec = s.split(".", 1)
+        # Strip leading zeros from whole part
+        whole = str(int(whole)) if whole.isdigit() else whole
+        # Strip trailing zeros from decimal part
+        dec = dec.rstrip("0")
+        return f"{whole}.{dec}" if dec else whole
     return s
 
 
