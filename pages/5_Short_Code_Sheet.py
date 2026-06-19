@@ -8,26 +8,6 @@ st.set_page_config(page_title="Inventory Shortage Checker", layout="wide")
 st.title("Inventory Shortage Checker")
 st.caption("Upload the orders file and the warehouse short code file to find shortages, expiration-date research items, and aged inventory.")
 
-with st.expander("How this works"):
-    st.markdown(
-        "- Items starting with **S** are removed from the orders file.\n"
-        "- **Whole-number SKUs (no decimal) are excluded from all output sheets.**\n"
-        "- The full SKU Number is built from the short code file's columns H and I, "
-        "then normalized and matched against the Item code so leading zeros/trailing decimal zeros do not create false shortages.\n"
-        "- Order lines are processed most-urgent-Target-Date first, allocating "
-        "inventory whose Consumer Priority Date is on or after the Target Date, "
-        "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
-        "- **SHORT SHEET**: new shortages only — one row per Item/SKU+Target Date not "
-        "seen in a previous run. Dedup key is SKU + Earliest Target Date.\n"
-        "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
-        "order lines where that zone does not start with RC2 and the "
-        "Delivery Date falls within the chosen departure window.\n"
-        "- **SKU TO CODE**: all aged inventory (Consumer Priority Date ≤ cutoff), "
-        "one row per pallet with Location and LPN #. Always shows everything — "
-        "no dedup, so missed items from a previous run will reappear.\n"
-        "- **SHORT HISTORY**: cumulative record of every Item + Earliest Target Date "
-        "pair ever flagged as short. Upload last run's Excel to carry it forward."
-    )
 
 with st.sidebar:
     st.header("Upload Files")
@@ -216,7 +196,7 @@ def prepare_short_sheet_output(short_summary_df):
     """Friendly SHORT SHEET view for Excel download and Streamlit display."""
     columns = [
         "Item", "Total Short By", "Customer Target Date",
-        "Date Compared to Customer Target", "Short By Days", "Partial Locations"
+        " WMS Date Compared to Customer Target", "Short By Days", "Partial Locations"
     ]
     if short_summary_df.empty:
         return pd.DataFrame(columns=columns)
@@ -227,13 +207,13 @@ def prepare_short_sheet_output(short_summary_df):
     # Earliest Target Date stays internal for SHORT HISTORY deduplication only.
     if "Customer Target Date" not in out.columns and "Earliest Target Date" in out.columns:
         out["Customer Target Date"] = out["Earliest Target Date"]
-    if "Date Compared to Customer Target" not in out.columns:
-        out["Date Compared to Customer Target"] = pd.NaT
+    if " WMS Date Compared to Customer Target" not in out.columns:
+        out[" WMS Date Compared to Customer Target"] = pd.NaT
     if "Short By Days" not in out.columns:
         out["Short By Days"] = out.apply(
             lambda row: short_by_days(
                 row.get("Customer Target Date"),
-                row.get("Date Compared to Customer Target")
+                row.get(" WMS Date Compared to Customer Target")
             ),
             axis=1
         )
@@ -314,7 +294,7 @@ def run_allocation(orders_df, wms_df):
                 "Target Date": order["Target Date"],
                 "Customer": order.get("Customer", ""),
                 "Order": order.get("Order", ""),
-                "Date Compared to Customer Target": comparison_date,
+                " WMS Date Compared to Customer Target": comparison_date,
                 "Partial Locations": partial_locations,
             })
         else:
@@ -344,7 +324,7 @@ def build_short_summary(short_df, seen_short_pairs):
 
     User-facing SHORT SHEET uses:
     - Customer Target Date = earliest customer target date for that matched short SKU
-    - Date Compared to Customer Target = best/latest WMS Consumer Priority Date available for that SKU
+    - WMS Date Compared to Customer Target = earliest WMS Consumer Priority Date available for that SKU
     - Short By Days = how many days the WMS date is before the customer target date
 
     Items with no WMS SKU match are excluded from this sheet and sent to Unmatched Items.
@@ -371,14 +351,14 @@ def build_short_summary(short_df, seen_short_pairs):
         customer_target_date = pd.to_datetime(g["Target Date"], errors="coerce").min()
         comparison_date = pd.to_datetime(
             g["Date Compared to Customer Target"], errors="coerce"
-        ).max() if "Date Compared to Customer Target" in g.columns else pd.NaT
+        ).max() if " WMS Date Compared to Customer Target" in g.columns else pd.NaT
 
         rows.append({
             "Item": item,
             "Total Short By": g["Short By"].sum(),
             "Earliest Target Date": customer_target_date,  # internal dedup/history key
             "Customer Target Date": customer_target_date,  # customer date you need to meet
-            "Date Compared to Customer Target": comparison_date,  # WMS Consumer Priority Date used for visual comparison
+            " WMS Date Compared to Customer Target": comparison_date,  # WMS Consumer Priority Date used for visual comparison
             "Short By Days": short_by_days(customer_target_date, comparison_date),
             "Partial Locations": ", ".join(sorted(all_locs)) if all_locs else "None",
         })
@@ -557,13 +537,13 @@ if run_btn:
 
         if history_file:
             st.info(
-                f"📋 History loaded — "
+                f" History loaded — "
                 f"SHORT SHEET: {len(seen_short_pairs):,} previously seen pair(s), "
                 f"**{len(new_short_pairs):,}** new this run."
             )
         else:
             st.warning(
-                "⚠️ No previous report uploaded — all short items treated as new. "
+                " No previous report uploaded — all short items treated as new. "
                 "Download this report and upload it next time to enable SHORT SHEET deduplication."
             )
 
@@ -584,7 +564,7 @@ if run_btn:
             short_summary_df, email_summary_df, sku_df, short_history_df
         )
         st.download_button(
-            "⬇️ Download results (Excel)",
+            "Download results (Excel)",
             data=excel_bytes,
             file_name=f"shortage_analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
