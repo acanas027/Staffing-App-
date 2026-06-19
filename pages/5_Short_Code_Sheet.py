@@ -12,7 +12,7 @@ with st.expander("How this works"):
         "- Items starting with **S** are removed from the orders file.\n"
         "- **Whole-number SKUs (no decimal) are excluded from all output sheets.**\n"
         "- The full SKU Number is built from the short code file's columns H and I, "
-        "then matched exactly against the Item code.\n"
+        "then normalized and matched against the Item code so leading zeros/trailing decimal zeros do not create false shortages.\n"
         "- Order lines are processed most-urgent-Target-Date first, allocating "
         "inventory whose Consumer Priority Date is on or after the Target Date, "
         "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
@@ -133,7 +133,7 @@ def load_data_file(file):
     df["Target Date"] = pd.to_datetime(df["Target Date"])
     df["Delivery Date"] = pd.to_datetime(df["Delivery Date"])
     df["Quantity Ordered"] = pd.to_numeric(df["Quantity Ordered"], errors="coerce").fillna(0)
-    df["match_key"] = df["Item"]
+    df["match_key"] = df["Item"].apply(normalize_sku)
     df = df.reset_index(drop=True)
     df["order_line_id"] = df.index
     return df
@@ -164,7 +164,7 @@ def load_short_code_file(file):
     out = out[out["SKU Number"].notna()].copy()
     # Drop whole-number SKUs (no decimal)
     out = out[out["SKU Number"].apply(has_decimal)].copy()
-    out["match_key"] = out["SKU Number"]
+    out["match_key"] = out["SKU Number"].apply(normalize_sku)
     out = out.reset_index(drop=True)
     out["wms_row_id"] = out.index
     return out
