@@ -6,12 +6,12 @@ from io import BytesIO
 
 st.set_page_config(page_title="Inventory Shortage Checker", layout="wide")
 st.title("Inventory Shortage Checker")
-st.caption("Upload the orders file and the warehouse short code file to find shortages, expiration-date research items, and aged inventory.")
+st.caption("Upload the orders file and the warehouse short code file to find shortages, expiration-date research items, and LPNs that need to be coded.")
 
 with st.expander("How this works"):
     st.markdown(
         "- Items starting with **S** are removed from the orders file.\n"
-        "- **Whole-number SKUs (no decimal) are excluded from all output sheets.**\n"
+        "- **Whole-number items in the orders file are excluded from shortage matching.**\n"
         "- The full SKU Number is built from the short code file's columns H and I, "
         "then normalized and matched against the Item code so leading zeros/trailing decimal zeros do not create false shortages.\n"
         "- Order lines are processed most-urgent-Target-Date first, allocating "
@@ -22,9 +22,8 @@ with st.expander("How this works"):
         "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
         "order lines where that zone does not start with RC2 and the "
         "Delivery Date falls within the chosen departure window.\n"
-        "- **SKU TO CODE**: all aged inventory (Consumer Priority Date ≤ cutoff), "
-        "one row per pallet with Location and LPN #. Always shows everything — "
-        "no dedup, so missed items from a previous run will reappear.\n"
+        "- **SKU TO CODE**: every LPN in the qPORT/WMS file with Consumer Priority Date on or before today. "
+        "This sheet is LPN-level and is not limited to SKUs from the Data/orders file.\n"
         "- **SHORT HISTORY**: cumulative record of every Item + Earliest Target Date "
         "pair ever flagged as short. Upload last run's Excel to carry it forward."
     )
@@ -43,19 +42,10 @@ with st.sidebar:
              "'SHORT HISTORY' sheet to skip already-reported shortages."
     )
     st.divider()
-    cutoff_date = st.date_input(
-        "SKU TO CODE cutoff date",
-        value=datetime.now().date(),
-        help="SKU TO CODE includes rows with a Consumer Priority Date on or before this date."
-    )
-    limit_sku_to_code_to_data = st.checkbox(
-        "SKU TO CODE: only include SKUs from Data file",
-        value=True,
-        help="Keeps SKU TO CODE focused on the SKUs that appear in your uploaded Data/orders file. "
-             "Turn this off if you want every aged LPN in the WMS file."
-    )
-    st.divider()
     today = datetime.now().date()
+    sku_to_code_cutoff_date = today
+    st.caption(f"SKU TO CODE cutoff: Consumer Priority Date on or before {sku_to_code_cutoff_date}")
+    st.divider()
     email_date_range = st.date_input(
         "EMAIL / RESEARCH departure window",
         value=(today, today + pd.Timedelta(days=3)),
@@ -201,8 +191,7 @@ def load_short_code_file(file):
     out["Previous Location Detail"] = out["Previous Normalized Location"].apply(location_detail)
 
     out = out[out["SKU Number"].notna()].copy()
-    # Drop whole-number SKUs (no decimal)
-    out = out[out["SKU Number"].apply(has_decimal)].copy()
+    # Keep every WMS SKU here so SKU TO CODE can list every eligible LPN in qPORT.
     out["match_key"] = out["SKU Number"].apply(normalize_sku)
     out = out.reset_index(drop=True)
     out["wms_row_id"] = out.index
@@ -593,42 +582,34 @@ def prepare_short_detail_output(short_df):
     return out[columns].sort_values(["Customer Target Date", "Item", "Order"]).reset_index(drop=True)
 
 
-def build_sku_to_code(wms_df, cutoff, orders_df=None, limit_to_data_skus=True):
-    """Return aged WMS rows at the LPN/pallet level.
+def build_sku_to_code(wms_df, cutoff):
+    """Return every qPORT/WMS LPN with Consumer Priority Date on or before cutoff.
 
     Important logic:
-    - Each LPN is kept as its own row because the same SKU can have multiple LPNs
-      with different Consumer Priority Dates.
-    - By default, the sheet is limited to SKUs that appear in the Data/orders file,
-      so the output stays focused on what you are actively reviewing.
-    - Turn off the sidebar checkbox to show every aged LPN in the WMS file.
+    - This is LPN-level: one row per LPN/pallet/date.
+    - This is NOT limited to SKUs from the Data/orders file.
+    - A row qualifies only when Consumer Priority Date is today or earlier.
     """
     cutoff_ts = pd.Timestamp(cutoff)
     aged = wms_df[wms_df["Consumer Priority Date"] <= cutoff_ts].copy()
 
-    data_item_map = {}
-    if orders_df is not None and not orders_df.empty and "match_key" in orders_df.columns:
-        for key, g in orders_df.groupby("match_key"):
-            data_item_map[key] = ", ".join(sorted(set(g["Item"].astype(str))))
-        if limit_to_data_skus:
-            aged = aged[aged["match_key"].isin(data_item_map.keys())].copy()
+    columns = [
+        "LPN #", "SKU Number", "Quantity on LPN",
+        "Consumer Priority Date", "Today Cutoff Date", "Days Past Today",
+        "Location", "Normalized Location", "Location Zone", "Location Detail",
+        "Previous Location", "Previous Normalized Location", "Previous Location Zone",
+        "Previous Location Detail", "Code Reason",
+    ]
 
     if aged.empty:
-        return pd.DataFrame(columns=[
-            "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
-            "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
-            "Location", "Normalized Location", "Location Zone", "Location Detail",
-            "Previous Location", "Previous Normalized Location", "Previous Location Zone",
-            "Previous Location Detail", "Code Reason",
-        ])
+        return pd.DataFrame(columns=columns)
 
-    aged["Data Item Match"] = aged["match_key"].map(data_item_map).fillna("")
     aged["Quantity on LPN"] = aged["Quantity"]
-    aged["Cutoff Date"] = cutoff_ts
-    aged["Days Past / Until Cutoff"] = (
+    aged["Today Cutoff Date"] = cutoff_ts
+    aged["Days Past Today"] = (
         cutoff_ts.normalize() - pd.to_datetime(aged["Consumer Priority Date"], errors="coerce").dt.normalize()
     ).dt.days
-    aged["Code Reason"] = "LPN Consumer Priority Date <= cutoff date"
+    aged["Code Reason"] = "LPN Consumer Priority Date is today or earlier"
 
     # Ensure normalized location fields exist even if an older edited file is used.
     if "Normalized Location" not in aged.columns:
@@ -644,17 +625,9 @@ def build_sku_to_code(wms_df, cutoff, orders_df=None, limit_to_data_skus=True):
     if "Previous Location Detail" not in aged.columns:
         aged["Previous Location Detail"] = aged["Previous Normalized Location"].apply(location_detail)
 
-    columns = [
-        "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
-        "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
-        "Location", "Normalized Location", "Location Zone", "Location Detail",
-        "Previous Location", "Previous Normalized Location", "Previous Location Zone",
-        "Previous Location Detail", "Code Reason",
-    ]
     return aged[columns].sort_values(
-        ["Consumer Priority Date", "Data Item Match", "SKU Number", "LPN #"]
+        ["Consumer Priority Date", "SKU Number", "LPN #"]
     ).reset_index(drop=True)
-
 
 def build_updated_history(seen_pairs, new_pairs, key_cols):
     """Merge old + new pairs into a history DataFrame with given column names."""
@@ -739,14 +712,14 @@ def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df,
         # SKU TO CODE (LPN-level: one row per LPN/pallet/date)
         sku_out = sku_df.copy()
         if not sku_out.empty:
-            for date_col in ["Consumer Priority Date", "Cutoff Date"]:
+            for date_col in ["Consumer Priority Date", "Today Cutoff Date"]:
                 if date_col in sku_out.columns:
                     sku_out[date_col] = pd.to_datetime(
                         sku_out[date_col], errors="coerce"
                     ).dt.date
         (sku_out if not sku_out.empty else pd.DataFrame(columns=[
-            "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
-            "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
+            "LPN #", "SKU Number", "Quantity on LPN",
+            "Consumer Priority Date", "Today Cutoff Date", "Days Past Today",
             "Location", "Normalized Location", "Location Zone", "Location Detail",
             "Previous Location", "Previous Normalized Location", "Previous Location Zone",
             "Previous Location Detail", "Code Reason",
@@ -782,7 +755,7 @@ if run_btn:
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
 
                 short_summary_df, new_short_pairs = build_short_summary(short_df, seen_short_pairs)
-                sku_df = build_sku_to_code(wms_df, cutoff_date, orders_df, limit_sku_to_code_to_data)
+                sku_df = build_sku_to_code(wms_df, sku_to_code_cutoff_date)
 
                 short_history_df = build_updated_history(
                     seen_short_pairs, new_short_pairs,
@@ -812,13 +785,13 @@ if run_btn:
 
         if history_file:
             st.info(
-                f"📋 History loaded — "
+                f"History loaded - "
                 f"SHORT SHEET: {len(seen_short_pairs):,} previously seen pair(s), "
                 f"**{len(new_short_pairs):,}** new this run."
             )
         else:
             st.warning(
-                "⚠️ No previous report uploaded — all short items treated as new. "
+                "No previous report uploaded - all short items treated as new. "
                 "Download this report and upload it next time to enable SHORT SHEET deduplication."
             )
 
@@ -839,7 +812,7 @@ if run_btn:
             short_summary_df, email_summary_df, sku_df, short_history_df, short_df
         )
         st.download_button(
-            "⬇️ Download results (Excel)",
+            "Download results (Excel)",
             data=excel_bytes,
             file_name=f"shortage_analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -878,7 +851,7 @@ if run_btn:
             if sku_df.empty:
                 st.info("No aged SKU TO CODE rows found for this cutoff date.")
             else:
-                st.dataframe(date_only(sku_df, ["Consumer Priority Date", "Cutoff Date"]), use_container_width=True)
+                st.dataframe(date_only(sku_df, ["Consumer Priority Date", "Today Cutoff Date"]), use_container_width=True)
         with tab5:
             st.caption("Every Item + Earliest Target Date pair ever flagged as short across all runs.")
             st.dataframe(date_only(short_history_df, ["Earliest Target Date"]), use_container_width=True)
