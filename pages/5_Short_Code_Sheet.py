@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -142,8 +143,8 @@ def load_data_file(file):
 def load_short_code_file(file):
     raw = pd.read_excel(file, sheet_name=0, header=None, skiprows=3)
 
-    location = raw.iloc[:, 0:6].map(cell_to_str).agg("".join, axis=1)
-    previous_location = raw.iloc[:, 10:16].map(cell_to_str).agg("".join, axis=1)
+    location = raw.iloc[:, 0:6].apply(lambda col: col.map(cell_to_str)).agg("".join, axis=1)
+    previous_location = raw.iloc[:, 10:16].apply(lambda col: col.map(cell_to_str)).agg("".join, axis=1)
     lpn = raw.iloc[:, 6]
     sku_h = raw.iloc[:, 7].apply(h_to_str)
     sku_i = raw.iloc[:, 8].apply(i_to_str)
@@ -348,28 +349,32 @@ def build_short_summary(short_df, seen_short_pairs):
 
     Items with no WMS SKU match are excluded from this sheet and sent to Unmatched Items.
     """
+    base_columns = [
+        "Item", "Total Short By", "Earliest Target Date",
+        "Customer Target Date", "Date Compared to Customer Target",
+        "Short By Days", "Partial Locations"
+    ]
     if short_df.empty:
-        return pd.DataFrame(columns=[
-            "Item", "Total Short By", "Earliest Target Date",
-            "Customer Target Date", "Date Compared to Customer Target",
-            "Short By Days", "Partial Locations"
-        ]), set()
+        return pd.DataFrame(columns=base_columns), set()
 
-    def agg_group(g):
+    rows = []
+    for item, g in short_df.groupby("Item", dropna=False):
         # Collect all non-empty locations across order lines for this SKU
         all_locs = set()
-        for loc_str in g["Partial Locations"]:
-            if loc_str:
-                for loc in loc_str.split(", "):
-                    if loc.strip():
-                        all_locs.add(loc.strip())
+        if "Partial Locations" in g.columns:
+            for loc_str in g["Partial Locations"].fillna(""):
+                if loc_str:
+                    for loc in str(loc_str).split(", "):
+                        if loc.strip():
+                            all_locs.add(loc.strip())
 
-        customer_target_date = g["Target Date"].min()
+        customer_target_date = pd.to_datetime(g["Target Date"], errors="coerce").min()
         comparison_date = pd.to_datetime(
-            g.get("Date Compared to Customer Target"), errors="coerce"
-        ).max()
+            g["Date Compared to Customer Target"], errors="coerce"
+        ).max() if "Date Compared to Customer Target" in g.columns else pd.NaT
 
-        return pd.Series({
+        rows.append({
+            "Item": item,
             "Total Short By": g["Short By"].sum(),
             "Earliest Target Date": customer_target_date,  # internal dedup/history key
             "Customer Target Date": customer_target_date,  # customer date you need to meet
@@ -378,7 +383,7 @@ def build_short_summary(short_df, seen_short_pairs):
             "Partial Locations": ", ".join(sorted(all_locs)) if all_locs else "None",
         })
 
-    summary = short_df.groupby("Item", as_index=False).apply(agg_group, include_groups=False)
+    summary = pd.DataFrame(rows, columns=base_columns)
     summary = summary.sort_values("Earliest Target Date").reset_index(drop=True)
 
     def is_new(row):
@@ -398,7 +403,6 @@ def build_short_summary(short_df, seen_short_pairs):
             new_short_pairs.add((normalize_sku(row["Item"]), str(pd.Timestamp(dt).date())))
 
     return new_summary, new_short_pairs
-
 
 def build_sku_to_code(wms_df, cutoff):
     """Return all aged WMS rows (Consumer Priority Date <= cutoff).
@@ -423,11 +427,12 @@ def build_updated_history(seen_pairs, new_pairs, key_cols):
 
 
 def build_email_summary(email_df, date_range=None):
+    columns = [
+        "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
+        "Previous Locations", "Orders Affected"
+    ]
     if email_df.empty:
-        return pd.DataFrame(columns=[
-            "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
-            "Previous Locations", "Orders Affected"
-        ])
+        return pd.DataFrame(columns=columns)
 
     email_df = email_df.copy()
 
@@ -439,27 +444,24 @@ def build_email_summary(email_df, date_range=None):
         ]
 
     if email_df.empty:
-        return pd.DataFrame(columns=[
-            "Item", "Location Zone", "Total Quantity Needed", "Earliest Delivery Date",
-            "Previous Locations", "Orders Affected"
-        ])
+        return pd.DataFrame(columns=columns)
 
     email_df["Location Zone"] = email_df["Location"].astype(str).str[:3]
 
-    def agg_group(g):
-        return pd.Series({
+    rows = []
+    for (item, zone), g in email_df.groupby(["Item", "Location Zone"], dropna=False):
+        rows.append({
+            "Item": item,
+            "Location Zone": zone,
             "Total Quantity Needed": g["Quantity from this location"].sum(),
-            "Earliest Delivery Date": g["Delivery Date"].min(),
+            "Earliest Delivery Date": pd.to_datetime(g["Delivery Date"], errors="coerce").min(),
             "Previous Locations": ", ".join(sorted(set(g["Previous Location"].astype(str)))),
             "Orders Affected": g["Order"].nunique(),
         })
 
-    summary = email_df.groupby(["Item", "Location Zone"], as_index=False).apply(
-        agg_group, include_groups=False
-    )
+    summary = pd.DataFrame(rows, columns=columns)
     summary = summary.sort_values(["Item", "Earliest Delivery Date"]).reset_index(drop=True)
     return summary
-
 
 def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df):
     output = BytesIO()
@@ -566,8 +568,9 @@ if run_btn:
             )
 
         if not unmatched_df.empty:
+            unmatched_count = unmatched_df["Item"].nunique()
             st.warning(
-                f"{unmatched_df['Item'].nunique()} item(s) on order have no matching SKU at all "
+                f"{unmatched_count} item(s) on order have no matching SKU at all "
                 f"in the short code file. They are listed only in the 'Unmatched Items' tab, "
                 f"not in SHORT SHEET."
             )
@@ -620,7 +623,5 @@ if run_btn:
             st.dataframe(date_only(short_history_df, ["Earliest Target Date"]), use_container_width=True)
         with tab5:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
-else:
-    st.info("Upload both files in the sidebar, then click **Run Analysis**.")
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
