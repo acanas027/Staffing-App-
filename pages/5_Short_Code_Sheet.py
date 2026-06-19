@@ -199,25 +199,44 @@ def days_until_or_past_target(target_date):
     return (target - today).days
 
 
+def short_by_days(customer_target_date, comparison_date):
+    """How many days the compared WMS date misses the customer target date.
+    Positive = WMS date is before target date. Zero = date meets/exceeds target or no date gap.
+    Blank = no comparison date available.
+    """
+    if pd.isna(customer_target_date) or pd.isna(comparison_date):
+        return None
+    customer_target = pd.Timestamp(customer_target_date).date()
+    compared = pd.Timestamp(comparison_date).date()
+    return max((customer_target - compared).days, 0)
+
+
 def prepare_short_sheet_output(short_summary_df):
     """Friendly SHORT SHEET view for Excel download and Streamlit display."""
     columns = [
-        "Item", "Total Short By", "Earliest Target Date", "Customer Target Date",
-        "Days Until / Past Target", "Partial Locations"
+        "Item", "Total Short By", "Customer Target Date",
+        "Date Compared to Customer Target", "Short By Days", "Partial Locations"
     ]
     if short_summary_df.empty:
         return pd.DataFrame(columns=columns)
 
     out = short_summary_df.copy()
-    if "Earliest Target Date" not in out.columns and "Customer Target Date" in out.columns:
-        out["Earliest Target Date"] = out["Customer Target Date"]
+
+    # Keep the user-facing customer target date and the WMS date being compared to it.
+    # Earliest Target Date stays internal for SHORT HISTORY deduplication only.
     if "Customer Target Date" not in out.columns and "Earliest Target Date" in out.columns:
         out["Customer Target Date"] = out["Earliest Target Date"]
-    if "Days Until / Past Target" not in out.columns:
-        out["Days Until / Past Target"] = out["Customer Target Date"].apply(days_until_or_past_target)
+    if "Date Compared to Customer Target" not in out.columns:
+        out["Date Compared to Customer Target"] = pd.NaT
+    if "Short By Days" not in out.columns:
+        out["Short By Days"] = out.apply(
+            lambda row: short_by_days(
+                row.get("Customer Target Date"),
+                row.get("Date Compared to Customer Target")
+            ),
+            axis=1
+        )
 
-    # Keep both dates visible in SHORT SHEET so the output can be visually compared.
-    # Earliest Target Date is also kept as the SHORT HISTORY dedup key.
     return out[columns]
 
 
@@ -258,9 +277,12 @@ def run_allocation(orders_df, wms_df):
                 "Target Date": order["Target Date"],
                 "Customer": order.get("Customer", ""),
                 "Order": order.get("Order", ""),
+                "Date Compared to Customer Target": pd.NaT,
                 "Partial Locations": "",
             })
             continue
+
+        comparison_date = candidates["Consumer Priority Date"].dropna().max()
 
         allocated_total = 0.0
         sources = []
@@ -299,6 +321,7 @@ def run_allocation(orders_df, wms_df):
                 "Target Date": order["Target Date"],
                 "Customer": order.get("Customer", ""),
                 "Order": order.get("Order", ""),
+                "Date Compared to Customer Target": comparison_date,
                 "Partial Locations": partial_locations,
             })
         else:
@@ -324,11 +347,18 @@ def run_allocation(orders_df, wms_df):
 
 def build_short_summary(short_df, seen_short_pairs):
     """Collapse to one row per Item, dedup against SHORT HISTORY.
-    Dedup key: SKU + Earliest Target Date."""
+    Dedup key: SKU + Earliest Target Date.
+
+    User-facing SHORT SHEET uses:
+    - Customer Target Date = earliest customer target date for that short SKU
+    - Date Compared to Customer Target = best/latest WMS Consumer Priority Date available for that SKU
+    - Short By Days = how many days the WMS date is before the customer target date
+    """
     if short_df.empty:
         return pd.DataFrame(columns=[
             "Item", "Total Short By", "Earliest Target Date",
-            "Customer Target Date", "Days Until / Past Target", "Partial Locations"
+            "Customer Target Date", "Date Compared to Customer Target",
+            "Short By Days", "Partial Locations"
         ]), set()
 
     def agg_group(g):
@@ -339,12 +369,18 @@ def build_short_summary(short_df, seen_short_pairs):
                 for loc in loc_str.split(", "):
                     if loc.strip():
                         all_locs.add(loc.strip())
+
         customer_target_date = g["Target Date"].min()
+        comparison_date = pd.to_datetime(
+            g.get("Date Compared to Customer Target"), errors="coerce"
+        ).max()
+
         return pd.Series({
             "Total Short By": g["Short By"].sum(),
             "Earliest Target Date": customer_target_date,  # internal dedup/history key
-            "Customer Target Date": customer_target_date,  # user-facing SHORT SHEET date
-            "Days Until / Past Target": days_until_or_past_target(customer_target_date),
+            "Customer Target Date": customer_target_date,  # customer date you need to meet
+            "Date Compared to Customer Target": comparison_date,  # WMS Consumer Priority Date used for visual comparison
+            "Short By Days": short_by_days(customer_target_date, comparison_date),
             "Partial Locations": ", ".join(sorted(all_locs)) if all_locs else "None",
         })
 
@@ -437,10 +473,11 @@ def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df)
         # SHORT SHEET (new only)
         short_out = prepare_short_sheet_output(short_summary_df)
         if not short_out.empty:
-            for date_col in ["Earliest Target Date", "Customer Target Date"]:
-                short_out[date_col] = pd.to_datetime(
-                    short_out[date_col], errors="coerce"
-                ).dt.date
+            for date_col in ["Customer Target Date", "Date Compared to Customer Target"]:
+                if date_col in short_out.columns:
+                    short_out[date_col] = pd.to_datetime(
+                        short_out[date_col], errors="coerce"
+                    ).dt.date
         short_out.to_excel(writer, sheet_name="SHORT SHEET", index=False)
 
         # EMAIL_RESEARCH
@@ -573,7 +610,7 @@ if run_btn:
             else:
                 short_display_df = prepare_short_sheet_output(short_summary_df)
                 st.dataframe(
-                    date_only(short_display_df, ["Earliest Target Date", "Customer Target Date"]),
+                    date_only(short_display_df, ["Customer Target Date", "Date Compared to Customer Target"]),
                     use_container_width=True
                 )
         with tab2:
