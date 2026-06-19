@@ -61,10 +61,6 @@ def load_oc_customer_list():
     Cached so it only reads once per app session.
     """
     if not os.path.exists(OC_FILE):
-        st.error(
-            f"OC customer list file not found: '{OC_FILE}'. "
-            "Make sure it is in the same folder as report.py."
-        )
         return []
 
     try:
