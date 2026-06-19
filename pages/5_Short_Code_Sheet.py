@@ -262,23 +262,15 @@ def run_allocation(orders_df, wms_df):
         candidates = by_key.get(key)
 
         if candidates is None:
+            # No SKU match in the WMS/short-code file.
+            # Keep this OUT of SHORT SHEET because it is not a true date/quantity shortage yet;
+            # it needs to be reviewed separately in the Unmatched Items tab.
             unmatched_rows.append({
                 "Item": order["Item"],
                 "Quantity Needed": need,
                 "Target Date": order["Target Date"],
                 "Customer": order.get("Customer", ""),
                 "Order": order.get("Order", ""),
-            })
-            short_rows.append({
-                "Item": order["Item"],
-                "Quantity Needed": need,
-                "Quantity Available (qualifying)": 0,
-                "Short By": need,
-                "Target Date": order["Target Date"],
-                "Customer": order.get("Customer", ""),
-                "Order": order.get("Order", ""),
-                "Date Compared to Customer Target": pd.NaT,
-                "Partial Locations": "",
             })
             continue
 
@@ -350,9 +342,11 @@ def build_short_summary(short_df, seen_short_pairs):
     Dedup key: SKU + Earliest Target Date.
 
     User-facing SHORT SHEET uses:
-    - Customer Target Date = earliest customer target date for that short SKU
+    - Customer Target Date = earliest customer target date for that matched short SKU
     - Date Compared to Customer Target = best/latest WMS Consumer Priority Date available for that SKU
     - Short By Days = how many days the WMS date is before the customer target date
+
+    Items with no WMS SKU match are excluded from this sheet and sent to Unmatched Items.
     """
     if short_df.empty:
         return pd.DataFrame(columns=[
@@ -574,7 +568,8 @@ if run_btn:
         if not unmatched_df.empty:
             st.warning(
                 f"{unmatched_df['Item'].nunique()} item(s) on order have no matching SKU at all "
-                f"in the short code file (counted as fully short). See the 'Unmatched Items' tab."
+                f"in the short code file. They are listed only in the 'Unmatched Items' tab, "
+                f"not in SHORT SHEET."
             )
 
         col1, col2, col3 = st.columns(3)
@@ -625,5 +620,7 @@ if run_btn:
             st.dataframe(date_only(short_history_df, ["Earliest Target Date"]), use_container_width=True)
         with tab5:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
+else:
+    st.info("Upload both files in the sidebar, then click **Run Analysis**.")
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
