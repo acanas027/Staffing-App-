@@ -8,6 +8,26 @@ st.set_page_config(page_title="Inventory Shortage Checker", layout="wide")
 st.title("Inventory Shortage Checker")
 st.caption("Upload the orders file and the warehouse short code file to find shortages, expiration-date research items, and aged inventory.")
 
+with st.expander("How this works"):
+    st.markdown(
+        "- Items starting with **S** are removed from the orders file.\n"
+        "- **Whole-number SKUs (no decimal) are excluded from all output sheets.**\n"
+        "- The full SKU Number is built from the short code file's columns H and I, "
+        "then normalized and matched against the Item code so leading zeros/trailing decimal zeros do not create false shortages.\n"
+        "- Order lines are processed most-urgent-Target-Date first, allocating "
+        "inventory whose Consumer Priority Date is on or after the Target Date, "
+        "soonest-qualifying-date first. Inventory is not double-counted across orders.\n"
+        "- **SHORT SHEET**: new shortages only — one row per Item/SKU+Target Date not "
+        "seen in a previous run. Dedup key is SKU + Earliest Target Date.\n"
+        "- **EMAIL / RESEARCH**: one row per Item + Location Zone for fully-covered "
+        "order lines where that zone does not start with RC2 and the "
+        "Delivery Date falls within the chosen departure window.\n"
+        "- **SKU TO CODE**: all aged inventory (Consumer Priority Date ≤ cutoff), "
+        "one row per pallet with Location and LPN #. Always shows everything — "
+        "no dedup, so missed items from a previous run will reappear.\n"
+        "- **SHORT HISTORY**: cumulative record of every Item + Earliest Target Date "
+        "pair ever flagged as short. Upload last run's Excel to carry it forward."
+    )
 
 with st.sidebar:
     st.header("Upload Files")
@@ -27,6 +47,12 @@ with st.sidebar:
         "SKU TO CODE cutoff date",
         value=datetime.now().date(),
         help="SKU TO CODE includes rows with a Consumer Priority Date on or before this date."
+    )
+    limit_sku_to_code_to_data = st.checkbox(
+        "SKU TO CODE: only include SKUs from Data file",
+        value=True,
+        help="Keeps SKU TO CODE focused on the SKUs that appear in your uploaded Data/orders file. "
+             "Turn this off if you want every aged LPN in the WMS file."
     )
     st.divider()
     today = datetime.now().date()
@@ -91,6 +117,31 @@ def has_decimal(sku_str):
     return "." in s
 
 
+def normalize_location(x):
+    """Clean location text so the same location is shown consistently.
+    Example: ' rc2 a30 x8 ' -> 'RC2A30X8'.
+    """
+    if pd.isna(x):
+        return ""
+    s = str(x).strip().upper()
+    # remove common separators/spaces created by Excel exports or manual typing
+    for ch in [" ", "-", "_", "."]:
+        s = s.replace(ch, "")
+    if s in {"", "NAN", "NONE", "NULL"}:
+        return ""
+    return s
+
+
+def location_zone(normalized_location):
+    loc = normalize_location(normalized_location)
+    return loc[:3] if loc else ""
+
+
+def location_detail(normalized_location):
+    loc = normalize_location(normalized_location)
+    return loc[3:] if len(loc) > 3 else ""
+
+
 def build_full_sku(h_val, i_val):
     if h_val is None:
         return None
@@ -142,6 +193,13 @@ def load_short_code_file(file):
             priority_date_raw.astype(str), format="%Y%m%d", errors="coerce"
         ),
     })
+    out["Normalized Location"] = out["Location"].apply(normalize_location)
+    out["Location Zone"] = out["Normalized Location"].apply(location_zone)
+    out["Location Detail"] = out["Normalized Location"].apply(location_detail)
+    out["Previous Normalized Location"] = out["Previous Location"].apply(normalize_location)
+    out["Previous Location Zone"] = out["Previous Normalized Location"].apply(location_zone)
+    out["Previous Location Detail"] = out["Previous Normalized Location"].apply(location_detail)
+
     out = out[out["SKU Number"].notna()].copy()
     # Drop whole-number SKUs (no decimal)
     out = out[out["SKU Number"].apply(has_decimal)].copy()
@@ -192,28 +250,82 @@ def short_by_days(customer_target_date, comparison_date):
     return max((customer_target - compared).days, 0)
 
 
+def fmt_qty(x):
+    """Format quantities cleanly for readable date breakdown text."""
+    try:
+        value = float(x)
+    except Exception:
+        return str(x)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:g}"
+
+
+def format_wms_date_qty_breakdown(candidate_remaining):
+    """Return all remaining WMS dates and quantities for the SKU at the time of the order-line check."""
+    if candidate_remaining.empty:
+        return ""
+
+    work = candidate_remaining[["Consumer Priority Date", "Remaining Quantity"]].copy()
+    work["Sort Date"] = pd.to_datetime(work["Consumer Priority Date"], errors="coerce")
+    work["Date Label"] = work["Sort Date"].apply(
+        lambda d: "No WMS date" if pd.isna(d) else str(pd.Timestamp(d).date())
+    )
+    work = work.sort_values(["Sort Date", "Date Label"], na_position="last")
+
+    rows = []
+    for label, g in work.groupby("Date Label", sort=False):
+        rows.append(f"{label}: {fmt_qty(g['Remaining Quantity'].sum())}")
+    return "; ".join(rows)
+
+
+WMS_COMPARE_COL = "WMS Date Compared to Customer Target Date"
+
+
 def prepare_short_sheet_output(short_summary_df):
     """Friendly SHORT SHEET view for Excel download and Streamlit display."""
     columns = [
-        "Item", "Total Short By", "Customer Target Date",
-        " WMS Date Compared to Customer Target", "Short By Days", "Partial Locations"
+        "Item",
+        "Total Short By",
+        "Product Short Cases",
+        "Date Short Cases",
+        "Customer Target Date",
+        WMS_COMPARE_COL,
+        "Short By Days",
+        "Earliest WMS Date",
+        "Latest WMS Date",
+        "Partial Locations",
     ]
     if short_summary_df.empty:
         return pd.DataFrame(columns=columns)
 
     out = short_summary_df.copy()
 
-    # Keep the user-facing customer target date and the WMS date being compared to it.
-    # Earliest Target Date stays internal for SHORT HISTORY deduplication only.
+    # Customer Target Date stays user-facing. Earliest Target Date stays internal for history/dedup.
     if "Customer Target Date" not in out.columns and "Earliest Target Date" in out.columns:
         out["Customer Target Date"] = out["Earliest Target Date"]
-    if " WMS Date Compared to Customer Target" not in out.columns:
-        out[" WMS Date Compared to Customer Target"] = pd.NaT
+
+    # Backward-compatible rename if an older history/run used the prior column name.
+    old_col = "Date Compared to Customer Target"
+    if WMS_COMPARE_COL not in out.columns and old_col in out.columns:
+        out[WMS_COMPARE_COL] = out[old_col]
+    if WMS_COMPARE_COL not in out.columns:
+        out[WMS_COMPARE_COL] = pd.NaT
+
+    for qty_col in ["Product Short Cases", "Date Short Cases"]:
+        if qty_col not in out.columns:
+            out[qty_col] = 0
+
+    if "Earliest WMS Date" not in out.columns:
+        out["Earliest WMS Date"] = pd.NaT
+    if "Latest WMS Date" not in out.columns:
+        out["Latest WMS Date"] = pd.NaT
+
     if "Short By Days" not in out.columns:
         out["Short By Days"] = out.apply(
             lambda row: short_by_days(
                 row.get("Customer Target Date"),
-                row.get(" WMS Date Compared to Customer Target")
+                row.get(WMS_COMPARE_COL),
             ),
             axis=1
         )
@@ -255,7 +367,38 @@ def run_allocation(orders_df, wms_df):
             })
             continue
 
-        comparison_date = candidates["Consumer Priority Date"].dropna().max()
+        # Look at remaining inventory for this SKU before allocating this order line.
+        # This lets us split the shortage into:
+        # 1) product shortage = not enough cases exist at all, regardless of date
+        # 2) date shortage = cases exist, but their WMS Consumer Priority Date is before the customer target date
+        candidate_remaining = candidates.copy()
+        candidate_remaining["Remaining Quantity"] = candidate_remaining["wms_row_id"].map(remaining).fillna(0).astype(float)
+        candidate_remaining = candidate_remaining[candidate_remaining["Remaining Quantity"] > 0].copy()
+
+        total_remaining_all_dates = candidate_remaining["Remaining Quantity"].sum()
+        good_date_cases_available = candidate_remaining.loc[
+            candidate_remaining["Consumer Priority Date"] >= target_date,
+            "Remaining Quantity"
+        ].sum()
+        bad_date_cases_available = candidate_remaining.loc[
+            candidate_remaining["Consumer Priority Date"] < target_date,
+            "Remaining Quantity"
+        ].sum()
+        no_wms_date_cases_available = candidate_remaining.loc[
+            candidate_remaining["Consumer Priority Date"].isna(),
+            "Remaining Quantity"
+        ].sum()
+        qualifying_remaining = good_date_cases_available
+
+        earliest_wms_date = candidate_remaining["Consumer Priority Date"].dropna().min()
+        latest_wms_date = candidate_remaining["Consumer Priority Date"].dropna().max()
+
+        failing_dates = candidate_remaining.loc[
+            candidate_remaining["Consumer Priority Date"] < target_date,
+            "Consumer Priority Date"
+        ].dropna()
+        closest_failing_wms_date = failing_dates.max() if not failing_dates.empty else pd.NaT
+        wms_date_qty_breakdown = format_wms_date_qty_breakdown(candidate_remaining)
 
         allocated_total = 0.0
         sources = []
@@ -283,6 +426,18 @@ def run_allocation(orders_df, wms_df):
         short_qty = need - allocated_total
 
         if short_qty > 0.0001:
+            product_short_cases = min(short_qty, max(need - total_remaining_all_dates, 0))
+            date_short_cases = max(short_qty - product_short_cases, 0)
+
+            # For the single visual date comparison:
+            # - If there is a date shortage, show the closest WMS date that failed the target.
+            # - Otherwise, show the latest WMS date available for that SKU.
+            # The case split above still uses ALL WMS dates and quantities.
+            if date_short_cases > 0 and pd.notna(closest_failing_wms_date):
+                wms_comparison_date = closest_failing_wms_date
+            else:
+                wms_comparison_date = latest_wms_date
+
             partial_locations = ", ".join(
                 sorted(set(s["Location"] for s in sources))
             ) if sources else ""
@@ -291,10 +446,21 @@ def run_allocation(orders_df, wms_df):
                 "Quantity Needed": need,
                 "Quantity Available (qualifying)": allocated_total,
                 "Short By": short_qty,
+                "Product Short Cases": product_short_cases,
+                "Date Short Cases": date_short_cases,
                 "Target Date": order["Target Date"],
                 "Customer": order.get("Customer", ""),
                 "Order": order.get("Order", ""),
-                " WMS Date Compared to Customer Target": comparison_date,
+                WMS_COMPARE_COL: wms_comparison_date,
+                "Short By Days": short_by_days(order["Target Date"], wms_comparison_date),
+                "Earliest WMS Date": earliest_wms_date,
+                "Latest WMS Date": latest_wms_date,
+                "Total Remaining All WMS Dates": total_remaining_all_dates,
+                "Good-Date Cases Available": good_date_cases_available,
+                "Bad-Date Cases Available": bad_date_cases_available,
+                "No WMS Date Cases Available": no_wms_date_cases_available,
+                "Remaining Qty Meeting Customer Target Date": qualifying_remaining,
+                "WMS Date Qty Breakdown": wms_date_qty_breakdown,
                 "Partial Locations": partial_locations,
             })
         else:
@@ -324,15 +490,17 @@ def build_short_summary(short_df, seen_short_pairs):
 
     User-facing SHORT SHEET uses:
     - Customer Target Date = earliest customer target date for that matched short SKU
-    - WMS Date Compared to Customer Target = earliest WMS Consumer Priority Date available for that SKU
-    - Short By Days = how many days the WMS date is before the customer target date
+    - Product Short Cases = cases missing because not enough cases exist in WMS at all
+    - Date Short Cases = cases existing in WMS but not qualifying because the WMS date is before the customer target date
+    - WMS Date Compared to Customer Target Date = closest failing WMS date when date-short, otherwise latest WMS date
+    - Short By Days = how many days that comparison date is before the customer target date
 
     Items with no WMS SKU match are excluded from this sheet and sent to Unmatched Items.
     """
     base_columns = [
-        "Item", "Total Short By", "Earliest Target Date",
-        "Customer Target Date", "Date Compared to Customer Target",
-        "Short By Days", "Partial Locations"
+        "Item", "Total Short By", "Product Short Cases", "Date Short Cases",
+        "Earliest Target Date", "Customer Target Date", WMS_COMPARE_COL,
+        "Short By Days", "Earliest WMS Date", "Latest WMS Date", "Partial Locations"
     ]
     if short_df.empty:
         return pd.DataFrame(columns=base_columns), set()
@@ -349,17 +517,34 @@ def build_short_summary(short_df, seen_short_pairs):
                             all_locs.add(loc.strip())
 
         customer_target_date = pd.to_datetime(g["Target Date"], errors="coerce").min()
-        comparison_date = pd.to_datetime(
-            g["Date Compared to Customer Target"], errors="coerce"
-        ).max() if " WMS Date Compared to Customer Target" in g.columns else pd.NaT
+        comparison_series = pd.to_datetime(
+            g[WMS_COMPARE_COL], errors="coerce"
+        ) if WMS_COMPARE_COL in g.columns else pd.Series(dtype="datetime64[ns]")
+
+        # Prefer the comparison date from the row with the largest day miss, so the summary shows
+        # the most urgent date issue. If there is no day miss, use the latest WMS date for visual reference.
+        if "Short By Days" in g.columns and g["Short By Days"].notna().any():
+            idx = g["Short By Days"].fillna(-1).astype(float).idxmax()
+            comparison_date = pd.to_datetime(g.loc[idx, WMS_COMPARE_COL], errors="coerce") if WMS_COMPARE_COL in g.columns else pd.NaT
+            max_short_by_days = g["Short By Days"].max()
+        else:
+            comparison_date = comparison_series.max() if not comparison_series.empty else pd.NaT
+            max_short_by_days = short_by_days(customer_target_date, comparison_date)
+
+        earliest_wms_date = pd.to_datetime(g["Earliest WMS Date"], errors="coerce").min() if "Earliest WMS Date" in g.columns else pd.NaT
+        latest_wms_date = pd.to_datetime(g["Latest WMS Date"], errors="coerce").max() if "Latest WMS Date" in g.columns else pd.NaT
 
         rows.append({
             "Item": item,
             "Total Short By": g["Short By"].sum(),
+            "Product Short Cases": g["Product Short Cases"].sum() if "Product Short Cases" in g.columns else 0,
+            "Date Short Cases": g["Date Short Cases"].sum() if "Date Short Cases" in g.columns else 0,
             "Earliest Target Date": customer_target_date,  # internal dedup/history key
             "Customer Target Date": customer_target_date,  # customer date you need to meet
-            " WMS Date Compared to Customer Target": comparison_date,  # WMS Consumer Priority Date used for visual comparison
-            "Short By Days": short_by_days(customer_target_date, comparison_date),
+            WMS_COMPARE_COL: comparison_date,
+            "Short By Days": max_short_by_days,
+            "Earliest WMS Date": earliest_wms_date,
+            "Latest WMS Date": latest_wms_date,
             "Partial Locations": ", ".join(sorted(all_locs)) if all_locs else "None",
         })
 
@@ -384,15 +569,91 @@ def build_short_summary(short_df, seen_short_pairs):
 
     return new_summary, new_short_pairs
 
-def build_sku_to_code(wms_df, cutoff):
-    """Return all aged WMS rows (Consumer Priority Date <= cutoff).
-    One row per pallet, including Location and LPN #. No dedup — always shows everything."""
+
+def prepare_short_detail_output(short_df):
+    """Detailed shortage view: one row per short order line, including all WMS date/qty buckets."""
+    columns = [
+        "Item", "Order", "Customer", "Quantity Needed", "Quantity Available (qualifying)",
+        "Short By", "Product Short Cases", "Date Short Cases", "Customer Target Date",
+        WMS_COMPARE_COL, "Short By Days", "Earliest WMS Date", "Latest WMS Date",
+        "Total Remaining All WMS Dates", "Good-Date Cases Available",
+        "Bad-Date Cases Available", "No WMS Date Cases Available",
+        "Remaining Qty Meeting Customer Target Date",
+        "WMS Date Qty Breakdown", "Partial Locations",
+    ]
+    if short_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = short_df.copy()
+    if "Target Date" in out.columns:
+        out["Customer Target Date"] = out["Target Date"]
+    for col in columns:
+        if col not in out.columns:
+            out[col] = None
+    return out[columns].sort_values(["Customer Target Date", "Item", "Order"]).reset_index(drop=True)
+
+
+def build_sku_to_code(wms_df, cutoff, orders_df=None, limit_to_data_skus=True):
+    """Return aged WMS rows at the LPN/pallet level.
+
+    Important logic:
+    - Each LPN is kept as its own row because the same SKU can have multiple LPNs
+      with different Consumer Priority Dates.
+    - By default, the sheet is limited to SKUs that appear in the Data/orders file,
+      so the output stays focused on what you are actively reviewing.
+    - Turn off the sidebar checkbox to show every aged LPN in the WMS file.
+    """
     cutoff_ts = pd.Timestamp(cutoff)
     aged = wms_df[wms_df["Consumer Priority Date"] <= cutoff_ts].copy()
-    aged = aged[
-        ["SKU Number", "LPN #", "Location", "Quantity", "Consumer Priority Date"]
-    ].sort_values(["Consumer Priority Date", "SKU Number", "Location"]).reset_index(drop=True)
-    return aged
+
+    data_item_map = {}
+    if orders_df is not None and not orders_df.empty and "match_key" in orders_df.columns:
+        for key, g in orders_df.groupby("match_key"):
+            data_item_map[key] = ", ".join(sorted(set(g["Item"].astype(str))))
+        if limit_to_data_skus:
+            aged = aged[aged["match_key"].isin(data_item_map.keys())].copy()
+
+    if aged.empty:
+        return pd.DataFrame(columns=[
+            "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
+            "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
+            "Location", "Normalized Location", "Location Zone", "Location Detail",
+            "Previous Location", "Previous Normalized Location", "Previous Location Zone",
+            "Previous Location Detail", "Code Reason",
+        ])
+
+    aged["Data Item Match"] = aged["match_key"].map(data_item_map).fillna("")
+    aged["Quantity on LPN"] = aged["Quantity"]
+    aged["Cutoff Date"] = cutoff_ts
+    aged["Days Past / Until Cutoff"] = (
+        cutoff_ts.normalize() - pd.to_datetime(aged["Consumer Priority Date"], errors="coerce").dt.normalize()
+    ).dt.days
+    aged["Code Reason"] = "LPN Consumer Priority Date <= cutoff date"
+
+    # Ensure normalized location fields exist even if an older edited file is used.
+    if "Normalized Location" not in aged.columns:
+        aged["Normalized Location"] = aged["Location"].apply(normalize_location)
+    if "Location Zone" not in aged.columns:
+        aged["Location Zone"] = aged["Normalized Location"].apply(location_zone)
+    if "Location Detail" not in aged.columns:
+        aged["Location Detail"] = aged["Normalized Location"].apply(location_detail)
+    if "Previous Normalized Location" not in aged.columns:
+        aged["Previous Normalized Location"] = aged["Previous Location"].apply(normalize_location)
+    if "Previous Location Zone" not in aged.columns:
+        aged["Previous Location Zone"] = aged["Previous Normalized Location"].apply(location_zone)
+    if "Previous Location Detail" not in aged.columns:
+        aged["Previous Location Detail"] = aged["Previous Normalized Location"].apply(location_detail)
+
+    columns = [
+        "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
+        "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
+        "Location", "Normalized Location", "Location Zone", "Location Detail",
+        "Previous Location", "Previous Normalized Location", "Previous Location Zone",
+        "Previous Location Detail", "Code Reason",
+    ]
+    return aged[columns].sort_values(
+        ["Consumer Priority Date", "Data Item Match", "SKU Number", "LPN #"]
+    ).reset_index(drop=True)
 
 
 def build_updated_history(seen_pairs, new_pairs, key_cols):
@@ -443,18 +704,26 @@ def build_email_summary(email_df, date_range=None):
     summary = summary.sort_values(["Item", "Earliest Delivery Date"]).reset_index(drop=True)
     return summary
 
-def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df):
+def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df, short_detail_df=None):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         # SHORT SHEET (new only)
         short_out = prepare_short_sheet_output(short_summary_df)
         if not short_out.empty:
-            for date_col in ["Customer Target Date", "Date Compared to Customer Target"]:
+            for date_col in ["Customer Target Date", WMS_COMPARE_COL, "Earliest WMS Date", "Latest WMS Date"]:
                 if date_col in short_out.columns:
                     short_out[date_col] = pd.to_datetime(
                         short_out[date_col], errors="coerce"
                     ).dt.date
         short_out.to_excel(writer, sheet_name="SHORT SHEET", index=False)
+
+        # SHORT DETAIL (one row per short order line, including all WMS date/qty buckets)
+        detail_out = prepare_short_detail_output(short_detail_df if short_detail_df is not None else pd.DataFrame())
+        if not detail_out.empty:
+            for date_col in ["Customer Target Date", WMS_COMPARE_COL, "Earliest WMS Date", "Latest WMS Date"]:
+                if date_col in detail_out.columns:
+                    detail_out[date_col] = pd.to_datetime(detail_out[date_col], errors="coerce").dt.date
+        detail_out.to_excel(writer, sheet_name="SHORT DETAIL", index=False)
 
         # EMAIL_RESEARCH
         summary_out = email_summary_df.copy()
@@ -467,15 +736,21 @@ def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df)
             "Previous Locations", "Orders Affected"
         ])).to_excel(writer, sheet_name="EMAIL_RESEARCH", index=False)
 
-        # SKU TO CODE (new only, one row per pallet)
+        # SKU TO CODE (LPN-level: one row per LPN/pallet/date)
         sku_out = sku_df.copy()
         if not sku_out.empty:
-            sku_out["Consumer Priority Date"] = pd.to_datetime(
-                sku_out["Consumer Priority Date"]
-            ).dt.date
-        (sku_out if not sku_out.empty else pd.DataFrame(
-            columns=["SKU Number", "LPN #", "Location", "Quantity", "Consumer Priority Date"]
-        )).to_excel(writer, sheet_name="SKU TO CODE", index=False)
+            for date_col in ["Consumer Priority Date", "Cutoff Date"]:
+                if date_col in sku_out.columns:
+                    sku_out[date_col] = pd.to_datetime(
+                        sku_out[date_col], errors="coerce"
+                    ).dt.date
+        (sku_out if not sku_out.empty else pd.DataFrame(columns=[
+            "LPN #", "Data Item Match", "SKU Number", "Quantity on LPN",
+            "Consumer Priority Date", "Cutoff Date", "Days Past / Until Cutoff",
+            "Location", "Normalized Location", "Location Zone", "Location Detail",
+            "Previous Location", "Previous Normalized Location", "Previous Location Zone",
+            "Previous Location Detail", "Code Reason",
+        ])).to_excel(writer, sheet_name="SKU TO CODE", index=False)
 
         # SHORT HISTORY (cumulative)
         short_hist_out = short_history_df.copy()
@@ -507,7 +782,7 @@ if run_btn:
                 short_df, email_df, unmatched_df = run_allocation(orders_df, wms_df)
 
                 short_summary_df, new_short_pairs = build_short_summary(short_df, seen_short_pairs)
-                sku_df = build_sku_to_code(wms_df, cutoff_date)
+                sku_df = build_sku_to_code(wms_df, cutoff_date, orders_df, limit_sku_to_code_to_data)
 
                 short_history_df = build_updated_history(
                     seen_short_pairs, new_short_pairs,
@@ -537,13 +812,13 @@ if run_btn:
 
         if history_file:
             st.info(
-                f" History loaded — "
+                f"📋 History loaded — "
                 f"SHORT SHEET: {len(seen_short_pairs):,} previously seen pair(s), "
                 f"**{len(new_short_pairs):,}** new this run."
             )
         else:
             st.warning(
-                " No previous report uploaded — all short items treated as new. "
+                "⚠️ No previous report uploaded — all short items treated as new. "
                 "Download this report and upload it next time to enable SHORT SHEET deduplication."
             )
 
@@ -558,13 +833,13 @@ if run_btn:
         col1, col2, col3 = st.columns(3)
         col1.metric("New Short SKUs", len(short_summary_df))
         col2.metric("Email/Research items+locations", len(email_summary_df))
-        col3.metric("SKU TO CODE rows", len(sku_df))
+        col3.metric("SKU TO CODE LPN rows", len(sku_df))
 
         excel_bytes = to_excel_bytes(
-            short_summary_df, email_summary_df, sku_df, short_history_df
+            short_summary_df, email_summary_df, sku_df, short_history_df, short_df
         )
         st.download_button(
-            "Download results (Excel)",
+            "⬇️ Download results (Excel)",
             data=excel_bytes,
             file_name=f"shortage_analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -578,8 +853,8 @@ if run_btn:
                     df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
             return df
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "SHORT SHEET", "EMAIL / RESEARCH", "SKU TO CODE",
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "SHORT SHEET", "SHORT DETAIL", "EMAIL / RESEARCH", "SKU TO CODE",
             "SHORT HISTORY", "Unmatched Items"
         ])
         with tab1:
@@ -588,20 +863,26 @@ if run_btn:
             else:
                 short_display_df = prepare_short_sheet_output(short_summary_df)
                 st.dataframe(
-                    date_only(short_display_df, ["Customer Target Date", "Date Compared to Customer Target"]),
+                    date_only(short_display_df, ["Customer Target Date", WMS_COMPARE_COL, "Earliest WMS Date", "Latest WMS Date"]),
                     use_container_width=True
                 )
         with tab2:
-            st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
+            detail_display_df = prepare_short_detail_output(short_df)
+            st.dataframe(
+                date_only(detail_display_df, ["Customer Target Date", WMS_COMPARE_COL, "Earliest WMS Date", "Latest WMS Date"]),
+                use_container_width=True
+            )
         with tab3:
+            st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
+        with tab4:
             if sku_df.empty:
                 st.info("No aged SKU TO CODE rows found for this cutoff date.")
             else:
-                st.dataframe(date_only(sku_df, ["Consumer Priority Date"]), use_container_width=True)
-        with tab4:
+                st.dataframe(date_only(sku_df, ["Consumer Priority Date", "Cutoff Date"]), use_container_width=True)
+        with tab5:
             st.caption("Every Item + Earliest Target Date pair ever flagged as short across all runs.")
             st.dataframe(date_only(short_history_df, ["Earliest Target Date"]), use_container_width=True)
-        with tab5:
+        with tab6:
             st.dataframe(date_only(unmatched_df, ["Target Date"]), use_container_width=True)
 else:
     st.info("Upload both files in the sidebar, then click **Run Analysis**.")
