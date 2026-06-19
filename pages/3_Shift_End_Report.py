@@ -424,62 +424,6 @@ def _score_opendock_service(status, arrival_date, arrival_time, departure_date, 
             "service_result": f"Delayed service (over {SERVICE_TARGET_MINUTES} min)",
             "departed": departed}
 
-def _loads_short_of_cutoff(service_rows, goal_cutoff_min, shift_group="1st"):
-    """
-    Count loads DUE by the goal cutoff that were not controlled (did not depart on
-    time), in this shift group. This is the honest 'loads short of the cutoff goal'
-    number: it counts misses sitting BEHIND the cutoff line, not the distance to it.
-
-    What counts as a miss here (controllable, not-shipped-on-time):
-      - departed late (result_type 'delayed'), OR
-      - arrived but no departure recorded (result_type 'no_departure').
-        NOTE: counting no_departure as a miss ASSUMES departures are logged reliably.
-        If a no-departure is just a forgotten scan, this over-counts. The no-departure
-        count is surfaced separately on the report so that assumption stays auditable.
-    What is excluded (not the warehouse's miss, same rule used elsewhere):
-      - no_show, cancelled  -> carrier/customer, never scored
-      - drops that departed late -> carrier pickup timing (see _drop_late_note)
-
-    Returns (count, detail_rows). detail_rows are the offending loads for display.
-    """
-    if goal_cutoff_min is None:
-        return 0, []
-    short = []
-    for r in service_rows or []:
-        if str(r.get("shift_group", "")).strip() != shift_group:
-            continue
-        appt = _appt_minutes(r.get("appt_time"))
-        if appt is None or appt > goal_cutoff_min:
-            continue  # only loads DUE by the goal cutoff
-        rt = r.get("result_type")
-        is_drop = "DROP" in str(r.get("load_type", "")).upper()
-        # Drops are never a controllable miss: a drop's departure is the carrier's
-        # pickup, and a no-departure on a drop is "carrier hasn't grabbed it / not
-        # logged," not "we failed to load it." Late drops were already excluded;
-        # this also excludes no-departure drops so the two are treated consistently.
-        # Unlogged drops still surface on the no-departure compliance line below.
-        if is_drop:
-            continue
-        if rt in ("delayed", "no_departure"):
-            short.append(r)   
-    return len(short), short
-
-def _no_departure_loads(service_rows, shift_group="1st"):
-    """
-    Loads that arrived but have no departure recorded, for this shift group.
-    This is a DATA-QUALITY / logging-compliance signal, not a warehouse miss: a
-    supervisor uses the list to have the OpenDock clerk log the missing departure.
-    Returns the list of rows (use len() for the count).
-    """
-    return [
-        r for r in service_rows or []
-        if str(r.get("shift_group", "")).strip() == shift_group
-        and r.get("result_type") == "no_departure"
-    ]
-
-
-
-
 def _dedupe_opendock_loads_prefer_completed(work, status_col):
     """
     If OpenDock has duplicate rows for the same load reference, keep only one.
@@ -708,96 +652,6 @@ def _combine_reasons(*parts):
     """Join non-empty reason strings without losing either manual or OpenDock context."""
     clean = [str(p).strip() for p in parts if str(p or "").strip()]
     return " | ".join(dict.fromkeys(clean))
-
-
-def _goal_predicted_cutoff(shift_goal):
-    """
-    Pull the predicted appointment cutoff out of the morning goal text, which reads
-    '...through appointment 14:00 (...) by shift end 16:30.' We want the appointment
-    cutoff, never the shift-end time, so we only match the time right after the word
-    'appointment'. Returns minutes since midnight, or None if there's no real cutoff
-    (e.g. the goal said 'none - before first appt').
-    """
-    import re
-    m = re.search(r"appointment\s+(\d{1,2}):(\d{2})", str(shift_goal or ""), flags=re.IGNORECASE)
-    if not m:
-        return None
-    return int(m.group(1)) * 60 + int(m.group(2))
-
-
-def _cutoff_variance(shift_goal, actual_cutoff):
-    """
-    Compare predicted cutoff (from the goal) to the actual cutoff controlled to.
-    Later actual = controlled further into the day = AHEAD of plan; earlier = BEHIND.
-    Returns a dict (predicted/actual/delta/direction/message) or None if either time
-    is missing or unparseable.
-    """
-    predicted = _goal_predicted_cutoff(shift_goal)
-    actual = _appt_minutes(actual_cutoff)
-    if predicted is None or actual is None:
-        return None
-    delta = actual - predicted  # + later = ahead, - earlier = behind
-    if delta > 0:
-        direction = "AHEAD"
-        message = (f"Controlled to {actual_cutoff} vs predicted {_fmt_minutes(predicted)} - "
-                   f"{delta} min ahead of plan.")
-    elif delta < 0:
-        direction = "BEHIND"
-        message = (f"Controlled to {actual_cutoff} vs predicted {_fmt_minutes(predicted)} - "
-                   f"{abs(delta)} min behind plan.")
-    else:
-        direction = "ON TARGET"
-        message = f"Controlled to {actual_cutoff}, exactly the predicted cutoff."
-    return {"predicted_min": predicted, "actual_min": actual,
-            "delta_min": delta, "direction": direction, "message": message}
-
-def _actual_departure_cutoff(service_rows, shift_group="1st"):
-    """
-    The actual appointment cutoff controlled to: the latest appointment time among
-    loads in this shift group that DEPARTED on time (real departure + service <= target).
-
-    The `departed` guard is load-bearing: result_type 'target_met' can occur on a row
-    that never departed (service value present, no departure recorded), and without
-    this guard a phantom 0-minute row with a late appointment could set the cutoff to
-    a time nothing actually left by. Requiring a real departure prevents that.
-    Returns 'HH:MM' or None when nothing qualifies.
-    """
-    times = []
-    for r in service_rows or []:
-        if str(r.get("shift_group", "")).strip() != shift_group:
-            continue
-        if not r.get("departed"):
-            continue
-        if r.get("result_type") != "target_met":
-            continue
-        m = _appt_minutes(r.get("appt_time"))
-        if m is not None:
-            times.append(m)
-    return _fmt_minutes(max(times)) if times else None
-
-
-def _drop_late_note(service_rows, shift_group="1st"):
-    """
-    One-line note for drop loads in this shift group that departed late
-    (service > target). Framed as carrier pickup timing, not a warehouse miss,
-    so a drop's late departure is never read as a staging failure.
-    Returns '' when there are none.
-    """
-    n = 0
-    for r in service_rows or []:
-        if str(r.get("shift_group", "")).strip() != shift_group:
-            continue
-        if not r.get("departed"):
-            continue
-        if "DROP" not in str(r.get("load_type", "")).upper():
-            continue
-        if r.get("result_type") == "delayed":
-            n += 1
-    if not n:
-        return ""
-    return (f"{n} drop load(s) departed more than {SERVICE_TARGET_MINUTES} min after "
-            f"appointment - status loaded; departure reflects carrier pickup timing, "
-            f"not warehouse control.")
 
 
 def _build_summary(outcome_rows, loads_completed, total_shorts, goal_met, shift_goal, notes,
@@ -1507,18 +1361,6 @@ if submitted:
         f"{daily_goal_pct if daily_goal_pct is not None else 'NA'}%."
     )
 
-    # --- Feedback loop: predicted vs actual cutoff (1st shift) ---
-    first_shift_commitments = shift_log.load_commitments(operating_date_str, "1st")
-    first_shift_goal = shift_log.get_shift_goal(first_shift_commitments)
-    goal_cutoff_min = _goal_predicted_cutoff(first_shift_goal)
-    actual_cutoff = _actual_departure_cutoff(opendock_service_rows, "1st")
-    cutoff_variance = _cutoff_variance(first_shift_goal, actual_cutoff)
-    loads_short, loads_short_rows = _loads_short_of_cutoff(
-        opendock_service_rows, goal_cutoff_min, "1st"
-    )
-    no_dep_loads = _no_departure_loads(opendock_service_rows, "1st")
-    no_dep_count = len(no_dep_loads)
-    
     summary = _build_summary(
         outcome_rows, loads_completed, total_shorts, goal_met, daily_goal_text, notes,
     )
@@ -1528,13 +1370,6 @@ if submitted:
     )
     try:
         result = shift_log.save_outcomes(operating_date_str, DAILY_SHIFT_KEY, outcome_rows, summary)
-        shift_log.save_forecast_accuracy(operating_date_str, "1st", {
-            "predicted_cutoff": _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else None,
-            "actual_cutoff": actual_cutoff,
-            "variance": cutoff_variance,
-            "loads_short": loads_short,
-            "no_departure_count": no_dep_count,
-        })
         pdf_bytes = build_report_pdf(
             operating_date_str, report_rows, misses, notes,
             service_rows=opendock_service_rows,
@@ -1547,20 +1382,6 @@ if submitted:
             "notes": notes,
             "service_rows": opendock_service_rows,
             "pdf": pdf_bytes,
-            "forecast": {
-                "predicted_cutoff": _fmt_minutes(goal_cutoff_min) if goal_cutoff_min is not None else None,
-                "actual_cutoff": actual_cutoff,
-                "variance": cutoff_variance,
-                "loads_short": loads_short,
-                "loads_short_rows": [
-                    {"load": r.get("load", ""), "appt_time": r.get("appt_time", "")}
-                    for r in loads_short_rows
-                ],
-                "no_dep_loads": [
-                    {"load": r.get("load", ""), "appt_time": r.get("appt_time", "")}
-                    for r in no_dep_loads
-                ],
-            },
         }
         st.success(
             f"Daily closeout saved — {result['outcomes_written']} commitment outcome(s) "
@@ -1576,24 +1397,6 @@ if report and report["date"] == operating_date_str and report["shift"] == DAILY_
     st.markdown("---")
     st.subheader("End-of-Day Report — Expectations vs Actual")
     render_report_table(report["rows"])
-    fc = report.get("forecast") or {}
-    if fc:
-        st.markdown("**Forecast Accuracy — 1st shift** (how well the morning plan predicted the day)")
-        pred = fc.get("predicted_cutoff") or "—"
-        act = fc.get("actual_cutoff") or "—"
-        var = fc.get("variance") or {}
-        st.write(
-            f"Predicted cutoff {pred} → actual {act}"
-            + (f"  ·  {var.get('direction','')}" if var else "")
-        )
-        st.write(f"Loads short of goal cutoff: **{fc.get('loads_short', 0)}**")
-        for r in fc.get("loads_short_rows", []):
-            st.write(f"   • load {r.get('load') or '(no #)'} — appt {r.get('appt_time') or '?'}")
-        nd = fc.get("no_dep_loads", [])
-        st.write(f"Loads with no departure logged (verify with OpenDock clerk): **{len(nd)}**")
-        for r in nd:
-            st.write(f"   • load {r.get('load') or '(no #)'} — appt {r.get('appt_time') or '?'}")
-
     if report["misses"]:
         st.markdown("**Controllable misses this day**")
         st.dataframe(
@@ -1728,5 +1531,4 @@ if score:
 
     _metric(m3, "CPU Service Target", score["cpu_on_time"], "met", "total")
     _metric(m4, "Daily Goal Met", score["shift_goal"], "met", "total")
-
 
