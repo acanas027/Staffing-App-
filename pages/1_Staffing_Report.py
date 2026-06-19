@@ -49,7 +49,7 @@ if not os.path.exists(TEMPLATE_FILE):
 #    E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
 #    H: Pictures (Y/N)   I: Other (Y/N)
 # ============================================================
-OC_FILE = "Resers DCs Opportunity Customer List.xlsx"
+OC_FILE = "OC Cusotmer List.xlsx"
 OC_SHEET = "OC Customer List"
 OC_DATA_START = 8
 
@@ -57,17 +57,18 @@ OC_DATA_START = 8
 @st.cache_data
 def load_oc_customer_list():
     """
-    Read the OC Excel file and return a list of customer dicts.
+    Read the OC Excel file and return a (customers_list, error_message) tuple.
     Cached so it only reads once per app session.
     """
     if not os.path.exists(OC_FILE):
-        return []
+        return [], None
 
     try:
         wb = load_workbook(OC_FILE, data_only=True)
         if OC_SHEET not in wb.sheetnames:
-            st.error(f"Sheet '{OC_SHEET}' not found in {OC_FILE}.")
-            return []
+            available = ', '.join(wb.sheetnames)
+            return [], f"Sheet '{OC_SHEET}' not found in {OC_FILE}. Available sheets: {available}"
+
 
         ws = wb[OC_SHEET]
         customers = []
@@ -132,15 +133,15 @@ def load_oc_customer_list():
                 "priority": priority,
             })
 
-        return customers
+        return customers, None
 
     except Exception as e:
-        st.error(f"Error loading OC customer list: {e}")
-        return []
+        return [], f"Error loading OC customer list: {e}"
+
 
 
 def find_oc_customers_in_board(board_text):
-    oc_list = load_oc_customer_list()
+    oc_list, _ = load_oc_customer_list()
     board_lower = board_text.lower()
     matches = []
     for customer in oc_list:
@@ -684,7 +685,7 @@ CASES_PER_PALLET = 75
 # divided by full-shift hours, or regenerating the report midday inflates every
 # need. hours_remaining is still used everywhere else (goal/handoff math) where
 # remaining work is measured against remaining time -- this does NOT touch those.
-SHIFT_LABOR_HOURS = 9.5
+SHIFT_LABOR_HOURS = 11
 
 
 def calculate_input_values(day, shift, total_cases):
@@ -721,14 +722,17 @@ def calculate_needed(
         inbound_pallets += 500
     if msb_open == "YES":
         inbound_pallets += 640
+    # 52% of the day's volume is the 1st-shift target for picks, pulls, and loading.
+    # Inbound (unloading/receiving/putaway) is sized for its full inbound volume — no partial target.
+    SHIFT_TARGET = 0.52
     raw_needed = {
         "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
         "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
         "Putaway":       (inbound_pallets / 2) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Picking":       cases_to_pick / (PICK_RATE * SHIFT_LABOR_HOURS),
-        "Replenishment": (cases_to_pick / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Full Pallets":  full_pallets / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Loading":       total_outbound_loads_actual / SHIFT_LABOR_HOURS,
+        "Picking":       (cases_to_pick * SHIFT_TARGET) / (PICK_RATE * SHIFT_LABOR_HOURS),
+        "Replenishment": ((cases_to_pick * SHIFT_TARGET) / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Full Pallets":  (full_pallets * SHIFT_TARGET) / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Loading":       (total_outbound_loads_actual * SHIFT_TARGET) / SHIFT_LABOR_HOURS,
     }
     needed = {
         "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
@@ -3432,7 +3436,7 @@ def appointment_cutoff_from_rows(rows):
 
 def find_oc_load_matches(board_rows, selected_day):
     """Load-level OC matches for the PDF report."""
-    oc_list = load_oc_customer_list()
+    oc_list, _ = load_oc_customer_list()
     selected_day = str(selected_day or "").strip().lower()
     matches = []
     seen = set()
@@ -4533,7 +4537,7 @@ if board_file:
             st.exception(e)
 
 with st.expander("View Opportunity Customer List (from Excel file)"):
-    oc_list_preview = load_oc_customer_list()
+    oc_list_preview, oc_load_error = load_oc_customer_list()
     if oc_list_preview:
         oc_preview_rows = []
         for c in oc_list_preview:
@@ -4548,8 +4552,10 @@ with st.expander("View Opportunity Customer List (from Excel file)"):
             })
         st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
         st.caption(f"Loaded {len(oc_list_preview)} customers from '{OC_FILE}'")
+    elif oc_load_error:
+        st.warning(oc_load_error)
     else:
-        st.warning(f"No customers loaded. Check that '{OC_FILE}' exists in the app folder.")
+        st.info(f"OC customer list not connected. Place '{OC_FILE}' in the app folder to enable this feature.")
 
 st.markdown("---")
 
