@@ -190,6 +190,37 @@ def load_short_history(file):
     except Exception:
         return set()
 
+def days_until_or_past_target(target_date):
+    """Positive = days remaining until target date. Negative = days past target date."""
+    if pd.isna(target_date):
+        return None
+    target = pd.Timestamp(target_date).date()
+    today = datetime.now().date()
+    return (target - today).days
+
+
+def prepare_short_sheet_output(short_summary_df):
+    """Friendly SHORT SHEET view for Excel download and Streamlit display."""
+    columns = [
+        "Item", "Total Short By", "Earliest Target Date", "Customer Target Date",
+        "Days Until / Past Target", "Partial Locations"
+    ]
+    if short_summary_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = short_summary_df.copy()
+    if "Earliest Target Date" not in out.columns and "Customer Target Date" in out.columns:
+        out["Earliest Target Date"] = out["Customer Target Date"]
+    if "Customer Target Date" not in out.columns and "Earliest Target Date" in out.columns:
+        out["Customer Target Date"] = out["Earliest Target Date"]
+    if "Days Until / Past Target" not in out.columns:
+        out["Days Until / Past Target"] = out["Customer Target Date"].apply(days_until_or_past_target)
+
+    # Keep both dates visible in SHORT SHEET so the output can be visually compared.
+    # Earliest Target Date is also kept as the SHORT HISTORY dedup key.
+    return out[columns]
+
+
 
 def run_allocation(orders_df, wms_df):
     remaining = wms_df.set_index("wms_row_id")["Quantity"].astype(float).to_dict()
@@ -295,7 +326,10 @@ def build_short_summary(short_df, seen_short_pairs):
     """Collapse to one row per Item, dedup against SHORT HISTORY.
     Dedup key: SKU + Earliest Target Date."""
     if short_df.empty:
-        return pd.DataFrame(columns=["Item", "Total Short By", "Earliest Target Date", "Partial Locations"]), set()
+        return pd.DataFrame(columns=[
+            "Item", "Total Short By", "Earliest Target Date",
+            "Customer Target Date", "Days Until / Past Target", "Partial Locations"
+        ]), set()
 
     def agg_group(g):
         # Collect all non-empty locations across order lines for this SKU
@@ -305,9 +339,12 @@ def build_short_summary(short_df, seen_short_pairs):
                 for loc in loc_str.split(", "):
                     if loc.strip():
                         all_locs.add(loc.strip())
+        customer_target_date = g["Target Date"].min()
         return pd.Series({
             "Total Short By": g["Short By"].sum(),
-            "Earliest Target Date": g["Target Date"].min(),
+            "Earliest Target Date": customer_target_date,  # internal dedup/history key
+            "Customer Target Date": customer_target_date,  # user-facing SHORT SHEET date
+            "Days Until / Past Target": days_until_or_past_target(customer_target_date),
             "Partial Locations": ", ".join(sorted(all_locs)) if all_locs else "None",
         })
 
@@ -398,12 +435,13 @@ def to_excel_bytes(short_summary_df, email_summary_df, sku_df, short_history_df)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         # SHORT SHEET (new only)
-        short_out = short_summary_df.copy()
+        short_out = prepare_short_sheet_output(short_summary_df)
         if not short_out.empty:
-            short_out["Earliest Target Date"] = pd.to_datetime(short_out["Earliest Target Date"]).dt.date
-        (short_out if not short_out.empty else pd.DataFrame(
-            columns=["Item", "Total Short By", "Earliest Target Date", "Partial Locations"]
-        )).to_excel(writer, sheet_name="SHORT SHEET", index=False)
+            for date_col in ["Earliest Target Date", "Customer Target Date"]:
+                short_out[date_col] = pd.to_datetime(
+                    short_out[date_col], errors="coerce"
+                ).dt.date
+        short_out.to_excel(writer, sheet_name="SHORT SHEET", index=False)
 
         # EMAIL_RESEARCH
         summary_out = email_summary_df.copy()
@@ -533,7 +571,11 @@ if run_btn:
             if short_summary_df.empty:
                 st.info("No new shortages this run — all were already in SHORT HISTORY.")
             else:
-                st.dataframe(date_only(short_summary_df, ["Earliest Target Date"]), use_container_width=True)
+                short_display_df = prepare_short_sheet_output(short_summary_df)
+                st.dataframe(
+                    date_only(short_display_df, ["Earliest Target Date", "Customer Target Date"]),
+                    use_container_width=True
+                )
         with tab2:
             st.dataframe(date_only(email_summary_df, ["Earliest Delivery Date"]), use_container_width=True)
         with tab3:
