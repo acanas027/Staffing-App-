@@ -669,15 +669,15 @@ def name_contains(row, text):
     return text.lower() in str(row["Name"]).lower()
 
 
-# Shift shares of TODAY'S TOTAL CASES, used to size the staffing NEED.
-# These set the minimum each shift is expected to handle out of the whole day,
-# so a single shift is never sized to clear the entire all-day board.
-#   cases:   share of total cases that shift is expected to pick
-#   pallets: share of total cases that shift is expected to pull, then / CASES_PER_PALLET
-FIRST_SHIFT_PICK_SHARE = 0.20
-SECOND_SHIFT_PICK_SHARE = 0.19
-FIRST_SHIFT_PALLET_SHARE = 0.33
-SECOND_SHIFT_PALLET_SHARE = 0.31
+# Staffing NEED is sized from TODAY'S TOTAL CASES using fixed day-level splits,
+# then multiplied by SHIFT_TARGET (0.52) inside calculate_needed().
+#   Picks need  = total_cases * 0.37 * 0.52
+#   Pulls need  = total_cases * 0.63 * 0.52  (converted to pallets via CASES_PER_PALLET)
+# When actual board picks/pulls (K2 / L2) are available they are used instead
+# to allocate against real remaining work — see cases_to_pick_override /
+# full_pallets_override in calculate_needed().
+PICK_SPLIT = 0.37   # share of total day cases that go through picking
+PULL_SPLIT = 0.63   # share of total day cases that go through full-pallet pulls
 CASES_PER_PALLET = 75
 
 # Full-shift working hours used ONLY to size the staffing NEED (breaks excluded).
@@ -689,14 +689,13 @@ SHIFT_LABOR_HOURS = 11
 
 
 def calculate_input_values(day, shift, total_cases):
-    # Flat per-shift shares of the day's total cases. `day` is kept in the
-    # signature for compatibility but no longer changes the result.
-    if shift == "1st":
-        cases_to_pick = total_cases * FIRST_SHIFT_PICK_SHARE
-        full_pallets = (total_cases * FIRST_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
-    else:
-        cases_to_pick = total_cases * SECOND_SHIFT_PICK_SHARE
-        full_pallets = (total_cases * SECOND_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
+    # Picks and pulls are sized from the full day's cases using fixed day-level splits.
+    # SHIFT_TARGET (0.52) is applied inside calculate_needed(), so the final need is:
+    #   Picks need  = total_cases * PICK_SPLIT * SHIFT_TARGET  (= total_cases * 0.37 * 0.52)
+    #   Pulls need  = total_cases * PULL_SPLIT * SHIFT_TARGET  (= total_cases * 0.63 * 0.52)
+    # `day` and `shift` are kept in the signature for API compatibility.
+    cases_to_pick = total_cases * PICK_SPLIT
+    full_pallets = (total_cases * PULL_SPLIT) / CASES_PER_PALLET
     return cases_to_pick, full_pallets
 
 
