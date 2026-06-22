@@ -28,8 +28,8 @@ except Exception:
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
 st.title("Staffing Report Generator")
-st.caption("v3.2 — loader cap fix active")
-st.error("⚡ v3.2 LOADED — if you see this, the new file is running")
+st.caption("v3.3 — loader hard cap in build_summary")
+st.error("⚡ v3.3 LOADED — if you see this, the new file is running")
 st.write("Enter daily inputs, select who is present, and generate the staffing report.")
 
 TEMPLATE_FILE = "staffing_template.xlsx"
@@ -1105,6 +1105,20 @@ def build_summary(staff, needed):
         staff["Present"].astype(str).str.strip().str.lower().eq("x")
         & staff["Recommended Task"].astype(str).str.strip().ne("")
     ].copy()
+
+    # Hard cap: if more workers ended up assigned to Loading than needed, move the
+    # excess to Picking (the typical bottleneck). This corrects any overspill from
+    # generate_recommendations regardless of how it occurred.
+    loading_needed = int(needed.get("Loading", 0))
+    loading_assigned_idx = present_recommendations.index[
+        present_recommendations["Recommended Task"] == "Loading"
+    ].tolist()
+    if len(loading_assigned_idx) > loading_needed:
+        excess_indexes = loading_assigned_idx[loading_needed:]
+        for idx in excess_indexes:
+            present_recommendations.at[idx, "Recommended Task"] = "Picking"
+            staff.at[idx, "Recommended Task"] = "Picking"
+
     needed_list   = pd.Series(needed, name="Needed")
     assigned_list = present_recommendations["Recommended Task"].value_counts().rename("Assigned")
     summary_table = pd.concat([needed_list, assigned_list], axis=1).fillna(0)
