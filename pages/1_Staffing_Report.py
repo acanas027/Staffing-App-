@@ -1,4 +1,6 @@
 
+LATEST APP !!!!
+
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
@@ -896,7 +898,11 @@ def generate_recommendations(staff, needed):
         skilled_tasks = [
             task for task, skill in final_skill_map.items()
             if has_skill(row, skill)
+            # Never overflow Receiving or Loading beyond need in the final pass.
+            # Receiving has a hard cap of 2. Loading has a hard cap of needed[Loading]
+            # so that a pure-L worker doesn't inflate loading when Picking is the bottleneck.
             and not (task == "Receiving" and assigned.get("Receiving", 0) >= needed.get("Receiving", 0))
+            and not (task == "Loading" and assigned.get("Loading", 0) >= needed.get("Loading", 0))
         ]
         if not skilled_tasks:
             return "Support"
@@ -2673,12 +2679,11 @@ def appointment_controlled_by_allocation(
         "base_loading_goal_loads": base_loading_goal_loads,
         "additional_loads_controlled": additional_controlled,
         "note": (
-            f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
-            f"RTL counts for appointment cutoff but still needs loader work. "
-            + (f"⚠️ {rs_count} R/S load(s) are short on product NOT available in the DC — "
-               f"they are counted as controlled for appointment cutoff but CANNOT ship until product arrives. "
-               if rs_count > 0 else
-               "No R/S (product-short) loads on today's board. ")
+            f"Already controlled: Completed/Loaded/RTL/R/S ({already_controlled}). "
+            f"RTL = picking done, staged on door, still needs loader work. "
+            + (f"R/S ({rs_count} load(s)): picking is done, load is waiting on product not yet in the DC. "
+               f"Counted as controlled since no pick work remains; status expected to resolve before departure. "
+               if rs_count > 0 else "")
             + f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
         ),
     }
@@ -2695,16 +2700,19 @@ def render_allocation_controls_preview(label, controlled):
     b.metric("Controlled through appt", controlled["cutoff"])
     c.metric("Bottleneck", controlled["binding"])
     rs_count = int(controlled.get("rs_count", 0) or 0)
-    if rs_count > 0:
-        st.warning(
-            f"⚠️ {rs_count} of the {controlled['loads_controlled']} controlled loads are R/S — "
-            f"product is NOT available in the DC and these loads cannot ship until it arrives. "
-            f"They are excluded from the actionable controlled count but included in the cutoff math."
-        )
+    rs_note = (
+        f" Note: {rs_count} of those are currently R/S (Ready/Short) — "
+        f"picking is done but product is not yet available in the DC to complete the load. "
+        f"These are counted as controlled because no further pick work is needed, "
+        f"but their status should resolve before departure as product arrives."
+        if rs_count > 0 else ""
+    )
     st.caption(
         f"Coverage — picking {int(controlled['pick_frac']*100)}%, "
         f"pulls {int(controlled['pull_frac']*100)}%, loading {int(controlled['load_frac']*100)}%. "
-        f"{controlled['note']}"
+        f"Already controlled: Completed/Loaded/RTL/R/S ({controlled.get('already_controlled_loads', 0)}). "
+        f"Loading goal = 52% of selected-day loads = {controlled.get('loading_target_loads', 0)}."
+        + rs_note
     )
 
 
@@ -2839,7 +2847,8 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     )
 
     rs_note = (
-        f" ⚠️ {rs_count} of those are R/S (short on product not in DC) and cannot ship until product arrives."
+        f" Note: {rs_count} of those are currently R/S — picking is done but product is not yet "
+        f"in the DC. Counted as controlled since no pick work remains; expected to resolve before departure."
         if rs_count > 0 else ""
     )
 
@@ -2935,7 +2944,7 @@ def render_python_shift_goal_preview(preview):
         f"Loads controlled in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
         f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
         f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
-        + (f"R/S (short on product — not DC-controllable): {preview.get('rs_count', 0)} | "
+        + (f"R/S (picking done, waiting on product): {preview.get('rs_count', 0)} | "
            if preview.get('rs_count', 0) > 0 else "")
         + f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
         f"(52% of day)"
@@ -3265,7 +3274,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2500,
+            max_completion_tokens=2850,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
