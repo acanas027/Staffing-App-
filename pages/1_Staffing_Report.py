@@ -4113,6 +4113,33 @@ def compute_recommended_allocation(
         crossroads_open, deer_creek_open, msb_open,
     )
 
+    # Read K2/L2 from the board now (before generate_recommendations) so the optimizer
+    # can cap needed['Loading'] using real pick/pull throughput.
+    # Without a board file, picks_left=0 is treated as unlimited — no cap benefit, no harm.
+    _early_picks_left = 0
+    _early_pulls_left = 0
+    if board_file is not None:
+        try:
+            board_file.seek(0)
+            _early_totals = read_board_today_totals_from_excel(board_file)
+            _early_picks_left = pdf_number(_early_totals.get("picks_left_today", 0))
+            _early_pulls_left = pdf_number(_early_totals.get("pulls_left_today", 0))
+            board_file.seek(0)
+        except Exception:
+            pass
+
+    # Run the optimizer with the actual present headcount to get the correct Loading cap.
+    # This must happen before generate_recommendations so Loading is never overfilled.
+    _early_present = len([n for n in present_workers if str(n).strip()])
+    _early_optimal = compute_throughput_optimal_allocation(
+        picks_left=_early_picks_left,
+        pulls_left=_early_pulls_left,
+        total_loads=int(total_outbound_loads_day),
+        hours_remaining=hours_remaining,
+        present_total=_early_present,
+    )
+    needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
+
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
     staff = pd.read_excel(TEMPLATE_FILE, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
     staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
@@ -4253,6 +4280,32 @@ def run_full_generation(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
     )
+
+    # Same early optimizer cap as Phase 1 — applied before generate_recommendations.
+    # board_text is read later, but we can read K2/L2 cheaply now just for this cap.
+    _early_picks_left = 0
+    _early_pulls_left = 0
+    if board_file is not None:
+        try:
+            board_file.seek(0)
+            _early_totals = read_board_today_totals_from_excel(board_file)
+            _early_picks_left = pdf_number(_early_totals.get("picks_left_today", 0))
+            _early_pulls_left = pdf_number(_early_totals.get("pulls_left_today", 0))
+            board_file.seek(0)
+        except Exception:
+            pass
+    _early_present = len([n for n in present_workers if str(n).strip()])
+    _early_optimal = compute_throughput_optimal_allocation(
+        picks_left=_early_picks_left,
+        pulls_left=_early_pulls_left,
+        total_loads=int(total_outbound_loads_day),
+        hours_remaining=hours_remaining,
+        present_total=_early_present,
+    )
+    needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
+    # Further refine using Phase 1 recommended_counts if available.
+    if recommended_counts and "Loading" in recommended_counts:
+        needed["Loading"] = min(needed["Loading"], recommended_counts["Loading"])
 
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
     staff = pd.read_excel(TEMPLATE_FILE, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
