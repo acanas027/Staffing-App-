@@ -28,7 +28,8 @@ except Exception:
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
 st.title("Staffing Report Generator")
-st.caption("v3.1 — loader cap fix active")
+st.caption("v3.2 — loader cap fix active")
+st.error("⚡ v3.2 LOADED — if you see this, the new file is running")
 st.write("Enter daily inputs, select who is present, and generate the staffing report.")
 
 TEMPLATE_FILE = "staffing_template.xlsx"
@@ -752,7 +753,12 @@ def calculate_needed(
         "Tasking":    whole_workers(
             raw_needed["Putaway"] + raw_needed["Replenishment"] + raw_needed["Full Pallets"]
         ),
-        "Loading":    whole_workers(raw_needed["Loading"]),
+        # Loading: use floor (int) not whole_workers (rounds up at +0.7).
+        # whole_workers(5.26) = 6 because 5.26+0.7=5.96 -> int=5... wait actually:
+        # whole_workers(5.59) = int(5.59+0.7) = int(6.29) = 6 — overshoots.
+        # We want the minimum loaders that can cover the goal, not the rounded-up version.
+        # The optimizer already accounts for pick throughput and will cap further if needed.
+        "Loading":    max(1, int(raw_needed["Loading"])),
     }
     return needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets
 
