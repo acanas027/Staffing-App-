@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
@@ -704,10 +705,12 @@ def calculate_needed(
     crossroads_open, deer_creek_open, msb_open,
     cases_to_pick_override=None, full_pallets_override=None,
 ):
-    # NOTE: hours_remaining is still accepted for signature compatibility, but the
-    # staffing NEED is sized off the FIXED full-shift length (SHIFT_LABOR_HOURS),
-    # not time-remaining. A full-shift quota divided by shrinking time-left would
-    # inflate the need every time the report is regenerated later in the shift.
+    # NOTE: Picking and Tasking NEED are sized off the FIXED full-shift length
+    # (SHIFT_LABOR_HOURS) so regenerating mid-shift doesn't inflate the need.
+    # Loading is DIFFERENT: its need is purely time-based (loaders * 1 trailer/hr * hrs_remaining).
+    # Using SHIFT_LABOR_HOURS for Loading would undercount loaders needed when hrs_remaining < 11
+    # (e.g., at 7 AM with 9.5 hrs left: 45-load target / (1 * 9.5) = 4.7 loaders needed,
+    # not 2 as SHIFT_LABOR_HOURS would produce). So Loading need always uses hours_remaining.
 
     # Old fallback: estimate picks/pulls from total cases.
     # New board flow: use exact board totals from Outbound!L2 and Outbound!K2.
@@ -724,6 +727,12 @@ def calculate_needed(
     # 52% of the day's volume is the 1st-shift target for picks, pulls, and loading.
     # Inbound (unloading/receiving/putaway) is sized for its full inbound volume — no partial target.
     SHIFT_TARGET = 0.52
+    # Safe hours_remaining for the Loading formula. Falls back to SHIFT_LABOR_HOURS only
+    # if hours_remaining was not provided (e.g. called without it).
+    try:
+        _hrs_for_loading = max(0.5, float(hours_remaining or SHIFT_LABOR_HOURS))
+    except Exception:
+        _hrs_for_loading = SHIFT_LABOR_HOURS
     raw_needed = {
         "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
         "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
@@ -731,7 +740,10 @@ def calculate_needed(
         "Picking":       (cases_to_pick * SHIFT_TARGET) / (PICK_RATE * SHIFT_LABOR_HOURS),
         "Replenishment": ((cases_to_pick * SHIFT_TARGET) / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
         "Full Pallets":  (full_pallets * SHIFT_TARGET) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Loading":       (total_outbound_loads_actual * SHIFT_TARGET) / SHIFT_LABOR_HOURS,
+        # Loading: how many loaders are needed to hit the loading goal in the actual hours left.
+        # total_outbound_loads_actual already equals day_loads * LOAD_TARGET_SHARE (the 52% goal).
+        # Dividing by (LOAD_RATE * hours_remaining) gives the correct real-time headcount.
+        "Loading":       total_outbound_loads_actual / (LOAD_RATE * _hrs_for_loading),
     }
     needed = {
         "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
@@ -2548,6 +2560,14 @@ def appointment_controlled_by_allocation(
     rtl_controlled = sum(
         1 for r in selected_rows if status_is_rtl(r.get("status"))
     )
+    # R/S loads: product not available in the DC. They count toward appointment cutoff
+    # (the pick wave is done or moot) but they are NOT DC-controllable — no loader or
+    # picker action will ship them until product arrives. Surfaced separately so the
+    # report never silently inflates the "controlled" number with unshippable loads.
+    rs_count = sum(
+        1 for r in selected_rows
+        if str(r.get("status") or "").strip().upper() in {"R/S", "READY/SHORT"}
+    )
     already_controlled = sum(
         1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
     )
@@ -2642,6 +2662,7 @@ def appointment_controlled_by_allocation(
         "already_controlled_loads": already_controlled,
         "completed_or_loaded_now": completed_or_loaded_now,
         "rtl_controlled_loads": rtl_controlled,
+        "rs_count": rs_count,
         "excluded_from_new_control_loads": excluded_from_new_control,
         "cutoff": cutoff,
         "binding": binding_name,
@@ -2653,8 +2674,12 @@ def appointment_controlled_by_allocation(
         "additional_loads_controlled": additional_controlled,
         "note": (
             f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
-            f"RTL counts for appointment cutoff but still needs loader work; R/S remains controlled but needs product follow-up. "
-            f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
+            f"RTL counts for appointment cutoff but still needs loader work. "
+            + (f"⚠️ {rs_count} R/S load(s) are short on product NOT available in the DC — "
+               f"they are counted as controlled for appointment cutoff but CANNOT ship until product arrives. "
+               if rs_count > 0 else
+               "No R/S (product-short) loads on today's board. ")
+            + f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
         ),
     }
 
@@ -2669,6 +2694,13 @@ def render_allocation_controls_preview(label, controlled):
              f"{controlled['loads_controlled']} / {controlled['selected_day_loads']}")
     b.metric("Controlled through appt", controlled["cutoff"])
     c.metric("Bottleneck", controlled["binding"])
+    rs_count = int(controlled.get("rs_count", 0) or 0)
+    if rs_count > 0:
+        st.warning(
+            f"⚠️ {rs_count} of the {controlled['loads_controlled']} controlled loads are R/S — "
+            f"product is NOT available in the DC and these loads cannot ship until it arrives. "
+            f"They are excluded from the actionable controlled count but included in the cutoff math."
+        )
     st.caption(
         f"Coverage — picking {int(controlled['pick_frac']*100)}%, "
         f"pulls {int(controlled['pull_frac']*100)}%, loading {int(controlled['load_frac']*100)}%. "
@@ -2790,6 +2822,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     already_controlled = int(controlled.get("already_controlled_loads", 0) or 0)
     completed_or_loaded_now = int(controlled.get("completed_or_loaded_now", 0) or 0)
     rtl_controlled = int(controlled.get("rtl_controlled_loads", 0) or 0)
+    rs_count = int(controlled.get("rs_count", 0) or 0)
     loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
     base_loading_goal_loads = int(controlled.get("base_loading_goal_loads", 0) or 0)
     cutoff = str(controlled.get("cutoff", "n/a"))
@@ -2805,17 +2838,22 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         f"({loads_controlled} of {total_loads} selected-day loads) by shift end {shift_end_label(shift)}."
     )
 
+    rs_note = (
+        f" ⚠️ {rs_count} of those are R/S (short on product not in DC) and cannot ship until product arrives."
+        if rs_count > 0 else ""
+    )
+
     if loads_controlled >= total_loads:
         reason = (
             f"This allocation can control the full selected-day board by shift end: "
-            f"{loads_controlled} of {total_loads} load(s). "
+            f"{loads_controlled} of {total_loads} load(s).{rs_note} "
             f"Already controlled now: {already_controlled} "
             f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled})."
         )
         suggested_adjustment = "Protect current pickers, taskers, and loaders until the full board is controlled."
     elif loads_controlled > 0:
         reason = (
-            f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end. "
+            f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end.{rs_note} "
             f"Already controlled now: {already_controlled} "
             f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled}). "
             f"The limiting stream is {bottleneck}."
@@ -2829,7 +2867,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         else:
             suggested_adjustment = "Protect current allocation until the controlled wave is complete."
     else:
-        reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}."
+        reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}.{rs_note}"
         suggested_adjustment = "Add labor to the bottleneck before generating the final report."
 
     return {
@@ -2853,6 +2891,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "already_controlled_loads": already_controlled,
         "completed_or_loaded_now": completed_or_loaded_now,
         "rtl_controlled_loads": rtl_controlled,
+        "rs_count": rs_count,
         "loading_target_loads": loading_target_loads,
         "base_loading_goal_loads": base_loading_goal_loads,
         "controlled_through_appt": cutoff,
@@ -2896,7 +2935,9 @@ def render_python_shift_goal_preview(preview):
         f"Loads controlled in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
         f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
         f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
-        f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
+        + (f"R/S (short on product — not DC-controllable): {preview.get('rs_count', 0)} | "
+           if preview.get('rs_count', 0) > 0 else "")
+        + f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
         f"(52% of day)"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
@@ -3224,7 +3265,7 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_completion_tokens=2850,
+            max_completion_tokens=2500,
             extra_body={"include_reasoning" : False},
         )
         return response.choices[0].message.content
