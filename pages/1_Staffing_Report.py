@@ -4173,7 +4173,16 @@ def compute_recommended_allocation(
 
             optimal_capped = cap_allocation_to_available_skills(optimal, staff)
 
-            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed)
+            # Cap needed['Loading'] at the optimizer's value.
+            # The optimizer accounts for what Picking/Tasking can actually feed to Loading.
+            # calculate_needed can produce a higher Loading need (e.g. 6 when hrs_remaining=8)
+            # because it doesn't know pick throughput. The optimizer always knows better —
+            # adding more loaders than freight can supply just overstaffs Loading while
+            # Picking stays understaffed. Capping here keeps both tables consistent.
+            needed_adj = dict(needed)
+            needed_adj["Loading"] = min(needed["Loading"], optimal_capped.get("Loading", needed["Loading"]))
+
+            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed_adj)
             opt_staff, opt_present, opt_summary, opt_counts = _named_counts_for_targets(optimal_capped)
 
             def _loads_controlled(counts):
