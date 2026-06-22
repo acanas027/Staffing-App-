@@ -4173,16 +4173,15 @@ def compute_recommended_allocation(
 
             optimal_capped = cap_allocation_to_available_skills(optimal, staff)
 
-            # Cap needed['Loading'] at the optimizer's value.
-            # The optimizer accounts for what Picking/Tasking can actually feed to Loading.
-            # calculate_needed can produce a higher Loading need (e.g. 6 when hrs_remaining=8)
-            # because it doesn't know pick throughput. The optimizer always knows better —
-            # adding more loaders than freight can supply just overstaffs Loading while
-            # Picking stays understaffed. Capping here keeps both tables consistent.
-            needed_adj = dict(needed)
-            needed_adj["Loading"] = min(needed["Loading"], optimal_capped.get("Loading", needed["Loading"]))
+            # Cap needed['Loading'] at the optimizer's value before anything else runs.
+            # The optimizer accounts for what Picking/Tasking can actually feed to loaders.
+            # calculate_needed can overshoot (e.g. Loading=6 when hrs=8) because it doesn't
+            # know pick throughput. Updating needed in-place here keeps generate_recommendations,
+            # build_summary, and the summary table all consistent — no contradictory "Overstaffed"
+            # next to Loading when Picking is the actual bottleneck.
+            needed["Loading"] = min(needed["Loading"], optimal_capped.get("Loading", needed["Loading"]))
 
-            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed_adj)
+            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed)
             opt_staff, opt_present, opt_summary, opt_counts = _named_counts_for_targets(optimal_capped)
 
             def _loads_controlled(counts):
@@ -4262,6 +4261,11 @@ def run_full_generation(
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
+
+    # Cap needed['Loading'] using the Phase 1 recommended_counts (which already had the
+    # optimizer cap applied). Keeps the PDF summary table consistent with the Compute step.
+    if recommended_counts and "Loading" in recommended_counts:
+        needed["Loading"] = min(needed["Loading"], recommended_counts["Loading"])
 
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
