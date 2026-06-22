@@ -28,6 +28,7 @@ except Exception:
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
 st.title("Staffing Report Generator")
+st.caption("v3.1 — loader cap fix active")
 st.write("Enter daily inputs, select who is present, and generate the staffing report.")
 
 TEMPLATE_FILE = "staffing_template.xlsx"
