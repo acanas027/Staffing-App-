@@ -3216,7 +3216,7 @@ STATUS DEFINITIONS:
 - CPU = customer pickup (protect timing, they may leave). 
 - Only positions are: pickers, taskers, loaders, unloaders, receivers, lead and extra
 
-RATES: Pick 185 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
+RATES: Pick 210 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
 LABOR RULES:
 - Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Extra proactively.
