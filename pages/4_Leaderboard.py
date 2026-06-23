@@ -158,7 +158,7 @@ DEFAULT_HOURS = {
     },
     "Weekend": {
         "1st break":   3.25,
-        "Lunch":       6.5,
+        "Lunch":       6.75,
         "2nd break":   9.25,
         "End of day":  11.25,
     },
