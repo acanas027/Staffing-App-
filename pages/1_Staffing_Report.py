@@ -5709,7 +5709,7 @@ if result:
     crossdock_matches = result.get("crossdock_matches", [])
     tt4_matches = result.get("tt4_matches", [])
     board_analysis_text = result["board_analysis_text"]
-    executive_summary_text = result["executive_summary_text"]
+    executive_summary_text = result.get("executive_summary_text", "")
 
     st.success("PDF staffing report generated successfully.")
     if _is_ai_analysis_unavailable(board_analysis_text):
