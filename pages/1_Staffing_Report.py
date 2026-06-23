@@ -1,24 +1,29 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.layout import Layout, ManualLayout
+from openpyxl.utils import get_column_letter
 from io import BytesIO
 import os
+import shutil
 import re
 import json
 import datetime
 from openai import OpenAI
 
 import dc_config
-import urllib
+import urllib.parse
 
 try:
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
     )
     REPORTLAB_AVAILABLE = True
 except Exception:
@@ -28,7 +33,6 @@ except Exception:
 st.set_page_config(page_title="Staffing Report Generator", layout="wide")
 
 st.title("Staffing Report Generator")
-st.caption("v3.3")
 st.write("Enter daily inputs, select who is present, and generate the staffing report.")
 
 TEMPLATE_FILE = "staffing_template.xlsx"
@@ -50,26 +54,30 @@ if not os.path.exists(TEMPLATE_FILE):
 #    E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
 #    H: Pictures (Y/N)   I: Other (Y/N)
 # ============================================================
-OC_FILE = "OC Cusotmer List.xlsx"
+OC_FILE = "Resers DCs Opportunity Customer List.xlsx"
 OC_SHEET = "OC Customer List"
+OC_HEADER_ROW = 6
 OC_DATA_START = 8
 
 
 @st.cache_data
 def load_oc_customer_list():
     """
-    Read the OC Excel file and return a (customers_list, error_message) tuple.
+    Read the OC Excel file and return a list of customer dicts.
     Cached so it only reads once per app session.
     """
     if not os.path.exists(OC_FILE):
-        return [], None
+        st.error(
+            f"OC customer list file not found: '{OC_FILE}'. "
+            "Make sure it is in the same folder as report.py."
+        )
+        return []
 
     try:
         wb = load_workbook(OC_FILE, data_only=True)
         if OC_SHEET not in wb.sheetnames:
-            available = ', '.join(wb.sheetnames)
-            return [], f"Sheet '{OC_SHEET}' not found in {OC_FILE}. Available sheets: {available}"
-
+            st.error(f"Sheet '{OC_SHEET}' not found in {OC_FILE}.")
+            return []
 
         ws = wb[OC_SHEET]
         customers = []
@@ -134,15 +142,15 @@ def load_oc_customer_list():
                 "priority": priority,
             })
 
-        return customers, None
+        return customers
 
     except Exception as e:
-        return [], f"Error loading OC customer list: {e}"
-
+        st.error(f"Error loading OC customer list: {e}")
+        return []
 
 
 def find_oc_customers_in_board(board_text):
-    oc_list, _ = load_oc_customer_list()
+    oc_list = load_oc_customer_list()
     board_lower = board_text.lower()
     matches = []
     for customer in oc_list:
@@ -225,6 +233,16 @@ def load_tt4_device_list():
         return devices
     except Exception:
         return []
+
+
+# Canadian Walmart cities/locations. Any board customer containing "WALMART"
+# AND one of these is a Canadian Walmart and must use the Canada TT4.
+WALMART_CANADA_KEYWORDS = {
+    "canada", "cornwall", "moncton", "mississauga", "miss", "brampton",
+    "ontario", "quebec",
+}
+WALMART_CANADA_TT4 = "28077"
+WALMART_US_TT4 = "28040"
 
 
 def normalize_tt4_match_text(value):
@@ -380,6 +398,7 @@ def get_groq_client():
         api_key=st.secrets["GROQ_API_KEY"],
         base_url="https://api.groq.com/openai/v1",
     )
+
 
 
 # ============================================================
@@ -556,6 +575,74 @@ def find_crossdock_matches(crossdock_rows, board_rows):
     return matches
 
 
+def write_crossdock_alerts_to_excel(wb, crossdock_matches):
+    """Create a workbook tab with matched Cross Dock alerts."""
+    if not crossdock_matches:
+        return
+
+    sheet_name = "Cross Dock Alerts"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue = "0F5B78"
+    orange = "C55A11"
+    white = "FFFFFF"
+    light_orange = "FCE4D6"
+    thin = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "Cross Dock Alerts — Verify Before Shipping"
+    ws["A1"].font = Font(size=16, bold=True, color=white)
+    ws["A1"].fill = PatternFill("solid", fgColor=orange)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:J1")
+
+    headers = [
+        "Load #", "Board Customer", "Appt Time", "Door", "Status",
+        "Cross Dock Customer", "Order/PO", "Pallets", "Location", "Required Action"
+    ]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(3, col)
+        cell.value = header
+        cell.font = Font(bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=dark_blue)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    for row_idx, match in enumerate(crossdock_matches, 4):
+        action = (
+            f"Verify {match.get('pallets', 0)} pallet(s) located at {match.get('location', '')} "
+            f"are on load {match.get('load', '')} before this load ships."
+        )
+        values = [
+            match.get("load", ""),
+            match.get("board_customer", ""),
+            match.get("board_time", ""),
+            match.get("board_door", ""),
+            match.get("board_status", ""),
+            match.get("customer", ""),
+            match.get("order_po", ""),
+            match.get("pallets", 0),
+            match.get("location", ""),
+            action,
+        ]
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row_idx, col)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=light_orange)
+
+    widths = [14, 28, 12, 10, 16, 28, 18, 10, 14, 70]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = "A4"
+
+
 # ============================================================
 #  TT4 ALERTS
 #  Direct Python alert only. Lists today's outbound loads that require TT4.
@@ -619,6 +706,71 @@ def find_tt4_required_loads(board_rows, selected_day):
     return matches
 
 
+def write_tt4_alerts_to_excel(wb, tt4_matches):
+    """Create a workbook tab with today's loads requiring TT4."""
+    if not tt4_matches:
+        return
+
+    sheet_name = "TT4 Alerts"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue = "0F5B78"
+    orange = "C55A11"
+    white = "FFFFFF"
+    light_orange = "FCE4D6"
+    thin = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "TT4 Alerts — Today's Loads Requiring TT4"
+    ws["A1"].font = Font(size=16, bold=True, color=white)
+    ws["A1"].fill = PatternFill("solid", fgColor=orange)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:D1")
+
+    headers = [
+        "Load #", "Customer", "Time / Status", "Required Action"
+    ]
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(3, col)
+        cell.value = header
+        cell.font = Font(bold=True, color=white)
+        cell.fill = PatternFill("solid", fgColor=dark_blue)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    for row_idx, match in enumerate(tt4_matches, 4):
+        action = (
+            f"Verify TT4 requirement is completed for load {match.get('load', '')} "
+            f"before this load ships."
+        )
+
+        values = [
+            match.get("load", ""),
+            match.get("customer", ""),
+            f"{match.get('time', '')} / {match.get('status', '')}",
+            action,
+        ]
+
+        for col, value in enumerate(values, 1):
+            cell = ws.cell(row_idx, col)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=light_orange)
+
+    widths = [14, 36, 22, 70]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    ws.freeze_panes = "A4"
+
+
 # ============================================================
 #  NAME LOADING
 #  Reads directly from the staffing sheets (col A), filtered
@@ -670,15 +822,15 @@ def name_contains(row, text):
     return text.lower() in str(row["Name"]).lower()
 
 
-# Staffing NEED is sized from TODAY'S TOTAL CASES using fixed day-level splits,
-# then multiplied by SHIFT_TARGET (0.52) inside calculate_needed().
-#   Picks need  = total_cases * 0.37 * 0.52
-#   Pulls need  = total_cases * 0.63 * 0.52  (converted to pallets via CASES_PER_PALLET)
-# When actual board picks/pulls (K2 / L2) are available they are used instead
-# to allocate against real remaining work — see cases_to_pick_override /
-# full_pallets_override in calculate_needed().
-PICK_SPLIT = 0.37   # share of total day cases that go through picking
-PULL_SPLIT = 0.63   # share of total day cases that go through full-pallet pulls
+# Shift shares of TODAY'S TOTAL CASES, used to size the staffing NEED.
+# These set the minimum each shift is expected to handle out of the whole day,
+# so a single shift is never sized to clear the entire all-day board.
+#   cases:   share of total cases that shift is expected to pick
+#   pallets: share of total cases that shift is expected to pull, then / CASES_PER_PALLET
+FIRST_SHIFT_PICK_SHARE = 0.20
+SECOND_SHIFT_PICK_SHARE = 0.19
+FIRST_SHIFT_PALLET_SHARE = 0.33
+SECOND_SHIFT_PALLET_SHARE = 0.31
 CASES_PER_PALLET = 75
 
 # Full-shift working hours used ONLY to size the staffing NEED (breaks excluded).
@@ -686,17 +838,18 @@ CASES_PER_PALLET = 75
 # divided by full-shift hours, or regenerating the report midday inflates every
 # need. hours_remaining is still used everywhere else (goal/handoff math) where
 # remaining work is measured against remaining time -- this does NOT touch those.
-SHIFT_LABOR_HOURS = 11
+SHIFT_LABOR_HOURS = 9.5
 
 
 def calculate_input_values(day, shift, total_cases):
-    # Picks and pulls are sized from the full day's cases using fixed day-level splits.
-    # SHIFT_TARGET (0.52) is applied inside calculate_needed(), so the final need is:
-    #   Picks need  = total_cases * PICK_SPLIT * SHIFT_TARGET  (= total_cases * 0.37 * 0.52)
-    #   Pulls need  = total_cases * PULL_SPLIT * SHIFT_TARGET  (= total_cases * 0.63 * 0.52)
-    # `day` and `shift` are kept in the signature for API compatibility.
-    cases_to_pick = total_cases * PICK_SPLIT
-    full_pallets = (total_cases * PULL_SPLIT) / CASES_PER_PALLET
+    # Flat per-shift shares of the day's total cases. `day` is kept in the
+    # signature for compatibility but no longer changes the result.
+    if shift == "1st":
+        cases_to_pick = total_cases * FIRST_SHIFT_PICK_SHARE
+        full_pallets = (total_cases * FIRST_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
+    else:
+        cases_to_pick = total_cases * SECOND_SHIFT_PICK_SHARE
+        full_pallets = (total_cases * SECOND_SHIFT_PALLET_SHARE) / CASES_PER_PALLET
     return cases_to_pick, full_pallets
 
 
@@ -705,12 +858,10 @@ def calculate_needed(
     crossroads_open, deer_creek_open, msb_open,
     cases_to_pick_override=None, full_pallets_override=None,
 ):
-    # NOTE: Picking and Tasking NEED are sized off the FIXED full-shift length
-    # (SHIFT_LABOR_HOURS) so regenerating mid-shift doesn't inflate the need.
-    # Loading is DIFFERENT: its need is purely time-based (loaders * 1 trailer/hr * hrs_remaining).
-    # Using SHIFT_LABOR_HOURS for Loading would undercount loaders needed when hrs_remaining < 11
-    # (e.g., at 7 AM with 9.5 hrs left: 45-load target / (1 * 9.5) = 4.7 loaders needed,
-    # not 2 as SHIFT_LABOR_HOURS would produce). So Loading need always uses hours_remaining.
+    # NOTE: hours_remaining is still accepted for signature compatibility, but the
+    # staffing NEED is sized off the FIXED full-shift length (SHIFT_LABOR_HOURS),
+    # not time-remaining. A full-shift quota divided by shrinking time-left would
+    # inflate the need every time the report is regenerated later in the shift.
 
     # Old fallback: estimate picks/pulls from total cases.
     # New board flow: use exact board totals from Outbound!L2 and Outbound!K2.
@@ -724,26 +875,14 @@ def calculate_needed(
         inbound_pallets += 500
     if msb_open == "YES":
         inbound_pallets += 640
-    # 52% of the day's volume is the 1st-shift target for picks, pulls, and loading.
-    # Inbound (unloading/receiving/putaway) is sized for its full inbound volume — no partial target.
-    SHIFT_TARGET = 0.52
-    # Safe hours_remaining for the Loading formula. Falls back to SHIFT_LABOR_HOURS only
-    # if hours_remaining was not provided (e.g. called without it).
-    try:
-        _hrs_for_loading = max(0.5, float(hours_remaining or SHIFT_LABOR_HOURS))
-    except Exception:
-        _hrs_for_loading = SHIFT_LABOR_HOURS
     raw_needed = {
         "Unloading":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
         "Receiving":     (inbound_pallets / 4) / (UNLOAD_RATE * SHIFT_LABOR_HOURS),
         "Putaway":       (inbound_pallets / 2) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Picking":       (cases_to_pick * SHIFT_TARGET) / (PICK_RATE * SHIFT_LABOR_HOURS),
-        "Replenishment": ((cases_to_pick * SHIFT_TARGET) / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        "Full Pallets":  (full_pallets * SHIFT_TARGET) / (PULL_RATE * SHIFT_LABOR_HOURS),
-        # Loading: how many loaders are needed to hit the loading goal in the actual hours left.
-        # total_outbound_loads_actual already equals day_loads * LOAD_TARGET_SHARE (the 52% goal).
-        # Dividing by (LOAD_RATE * hours_remaining) gives the correct real-time headcount.
-        "Loading":       total_outbound_loads_actual / (LOAD_RATE * _hrs_for_loading),
+        "Picking":       cases_to_pick / (PICK_RATE * SHIFT_LABOR_HOURS),
+        "Replenishment": (cases_to_pick / CASES_PER_PALLET) / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Full Pallets":  full_pallets / (PULL_RATE * SHIFT_LABOR_HOURS),
+        "Loading":       total_outbound_loads_actual / SHIFT_LABOR_HOURS,
     }
     needed = {
         "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
@@ -752,12 +891,7 @@ def calculate_needed(
         "Tasking":    whole_workers(
             raw_needed["Putaway"] + raw_needed["Replenishment"] + raw_needed["Full Pallets"]
         ),
-        # Loading: use floor (int) not whole_workers (rounds up at +0.7).
-        # whole_workers(5.26) = 6 because 5.26+0.7=5.96 -> int=5... wait actually:
-        # whole_workers(5.59) = int(5.59+0.7) = int(6.29) = 6 — overshoots.
-        # We want the minimum loaders that can cover the goal, not the rounded-up version.
-        # The optimizer already accounts for pick throughput and will cap further if needed.
-        "Loading":    max(1, int(raw_needed["Loading"])),
+        "Loading":    whole_workers(raw_needed["Loading"]),
     }
     return needed, raw_needed, cases_to_pick, full_pallets, inbound_pallets
 
@@ -901,11 +1035,7 @@ def generate_recommendations(staff, needed):
         skilled_tasks = [
             task for task, skill in final_skill_map.items()
             if has_skill(row, skill)
-            # Never overflow Receiving or Loading beyond need in the final pass.
-            # Receiving has a hard cap of 2. Loading has a hard cap of needed[Loading]
-            # so that a pure-L worker doesn't inflate loading when Picking is the bottleneck.
             and not (task == "Receiving" and assigned.get("Receiving", 0) >= needed.get("Receiving", 0))
-            and not (task == "Loading" and assigned.get("Loading", 0) >= needed.get("Loading", 0))
         ]
         if not skilled_tasks:
             return "Support"
@@ -1104,20 +1234,6 @@ def build_summary(staff, needed):
         staff["Present"].astype(str).str.strip().str.lower().eq("x")
         & staff["Recommended Task"].astype(str).str.strip().ne("")
     ].copy()
-
-    # Hard cap: if more workers ended up assigned to Loading than needed, move the
-    # excess to Picking (the typical bottleneck). This corrects any overspill from
-    # generate_recommendations regardless of how it occurred.
-    loading_needed = int(needed.get("Loading", 0))
-    loading_assigned_idx = present_recommendations.index[
-        present_recommendations["Recommended Task"] == "Loading"
-    ].tolist()
-    if len(loading_assigned_idx) > loading_needed:
-        excess_indexes = loading_assigned_idx[loading_needed:]
-        for idx in excess_indexes:
-            present_recommendations.at[idx, "Recommended Task"] = "Picking"
-            staff.at[idx, "Recommended Task"] = "Picking"
-
     needed_list   = pd.Series(needed, name="Needed")
     assigned_list = present_recommendations["Recommended Task"].value_counts().rename("Assigned")
     summary_table = pd.concat([needed_list, assigned_list], axis=1).fillna(0)
@@ -1128,6 +1244,8 @@ def build_summary(staff, needed):
         lambda x: "Good" if x == 0 else ("Overstaffed" if x > 0 else "Understaffed")
     )
     return present_recommendations, summary_table
+
+
 
 
 def count_present_skill_capacity(staff):
@@ -2178,43 +2296,19 @@ def format_minutes_for_pacing(minutes):
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-# Unpaid break inside a shift. hours_remaining is entered as WORKING hours
-# (breaks excluded), but clock time keeps moving during the break. The break is
-# modeled as a single block that is FINISHED by SHIFT_BREAK_DONE_BY (clock time):
-#   - Before the break, the whole break is still ahead, so clock-time-left =
-#     working-left + break. (1st shift: 8.5 working left = 07:00.)
-#   - After the break, working time and clock time run 1:1, so zero working left
-#     = the exact shift end (16:30).
-# This keeps all three points exact -- 9.5 -> 06:00, 8.5 -> 07:00, 0 -> 16:30 --
-# with clean whole/half-hour readings in between.
-SHIFT_BREAK_HOURS = 1.0
-
-
 def estimated_current_minutes_from_shift(shift, hours_remaining):
-    """Estimate current clock time from WORKING hours remaining (breaks excluded)."""
+    """Estimate current clock time from shift end and hours remaining."""
     try:
-        working_remaining = max(0.0, float(hours_remaining or 0))
+        remaining_minutes = int(round(float(hours_remaining or 0) * 60))
     except Exception:
         return None
 
-    break_minutes = int(round(SHIFT_BREAK_HOURS * 60))
-    remaining_minutes = int(round(working_remaining * 60))
-
     shift_lower = str(shift or "").lower()
     if "1" in shift_lower:
-        end_minutes = 16 * 60 + 30        # 1st shift ends 16:30
-        break_done_by = 12 * 60           # breaks finished by 12:00
+        end_minutes = 16 * 60 + 30    # 1st shift: 06:00-16:30
     else:
-        end_minutes = 23 * 60 + 30        # 2nd shift estimate
-        break_done_by = 19 * 60           # breaks finished by 19:00
+        end_minutes = 23 * 60 + 30    # 2nd shift estimate
 
-    # Working hours still left at the moment the break is finished.
-    working_left_at_break_done = end_minutes - break_done_by
-
-    if remaining_minutes > working_left_at_break_done:
-        # Before the break: the full break is still ahead of you.
-        return max(0, end_minutes - remaining_minutes - break_minutes)
-    # After the break: working time and clock time run 1:1 to the shift end.
     return max(0, end_minutes - remaining_minutes)
 
 
@@ -2309,6 +2403,8 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
     }
 
 
+
+
 # ============================================================
 #  THROUGHPUT-OPTIMAL ALLOCATION  (paste near compute_python_shift_goal_preview)
 #  Goal: control (pick + pull + stage) as many of TODAY's loads as possible
@@ -2351,6 +2447,7 @@ def status_is_controlled_appointment(status):
     )
 
 
+
 def status_is_excluded_from_new_control(status):
     """
     Rows excluded from new labor-control capacity.
@@ -2359,6 +2456,7 @@ def status_is_excluded_from_new_control(status):
     """
     status_upper = str(status or "").strip().upper()
     return status_upper in {"LOADED SHORT"}
+
 
 
 def compute_throughput_optimal_allocation(
@@ -2583,14 +2681,6 @@ def appointment_controlled_by_allocation(
     rtl_controlled = sum(
         1 for r in selected_rows if status_is_rtl(r.get("status"))
     )
-    # R/S loads: product not available in the DC. They count toward appointment cutoff
-    # (the pick wave is done or moot) but they are NOT DC-controllable — no loader or
-    # picker action will ship them until product arrives. Surfaced separately so the
-    # report never silently inflates the "controlled" number with unshippable loads.
-    rs_count = sum(
-        1 for r in selected_rows
-        if str(r.get("status") or "").strip().upper() in {"R/S", "READY/SHORT"}
-    )
     already_controlled = sum(
         1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
     )
@@ -2685,7 +2775,6 @@ def appointment_controlled_by_allocation(
         "already_controlled_loads": already_controlled,
         "completed_or_loaded_now": completed_or_loaded_now,
         "rtl_controlled_loads": rtl_controlled,
-        "rs_count": rs_count,
         "excluded_from_new_control_loads": excluded_from_new_control,
         "cutoff": cutoff,
         "binding": binding_name,
@@ -2696,12 +2785,9 @@ def appointment_controlled_by_allocation(
         "base_loading_goal_loads": base_loading_goal_loads,
         "additional_loads_controlled": additional_controlled,
         "note": (
-            f"Already controlled: Completed/Loaded/RTL/R/S ({already_controlled}). "
-            f"RTL = picking done, staged on door, still needs loader work. "
-            + (f"R/S ({rs_count} load(s)): picking is done, load is waiting on product not yet in the DC. "
-               f"Counted as controlled since no pick work remains; status expected to resolve before departure. "
-               if rs_count > 0 else "")
-            + f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
+            f"Already controlled includes Completed/Loaded/RTL/R/S ({already_controlled}); "
+            f"RTL counts for appointment cutoff but still needs loader work; R/S remains controlled but needs product follow-up. "
+            f"Loading goal = 52% of selected-day loads = {loading_target_loads}."
         ),
     }
 
@@ -2716,20 +2802,10 @@ def render_allocation_controls_preview(label, controlled):
              f"{controlled['loads_controlled']} / {controlled['selected_day_loads']}")
     b.metric("Controlled through appt", controlled["cutoff"])
     c.metric("Bottleneck", controlled["binding"])
-    rs_count = int(controlled.get("rs_count", 0) or 0)
-    rs_note = (
-        f" Note: {rs_count} of those are currently R/S (Ready/Short) — "
-        f"picking is done but product is not yet available in the DC to complete the load. "
-        f"These are counted as controlled because no further pick work is needed, "
-        f"but their status should resolve before departure as product arrives."
-        if rs_count > 0 else ""
-    )
     st.caption(
         f"Coverage — picking {int(controlled['pick_frac']*100)}%, "
         f"pulls {int(controlled['pull_frac']*100)}%, loading {int(controlled['load_frac']*100)}%. "
-        f"Already controlled: Completed/Loaded/RTL/R/S ({controlled.get('already_controlled_loads', 0)}). "
-        f"Loading goal = 52% of selected-day loads = {controlled.get('loading_target_loads', 0)}."
-        + rs_note
+        f"{controlled['note']}"
     )
 
 
@@ -2741,6 +2817,15 @@ def render_allocation_controls_preview(label, controlled):
 def shift_end_label(shift):
     """Return the planned shift-end label used in the Python goal."""
     return "16:30" if "1" in str(shift).lower() else "23:30"
+
+
+def is_controlled_for_target(status):
+    """
+    Controlled for appointment cutoff means the heavy warehouse work is done/protected.
+    RTL counts as controlled for appointment cutoff, but it still needs loader work.
+    R/S counts as controlled for appointment cutoff, but it is still a product follow-up item.
+    """
+    return status_is_controlled_appointment(status)
 
 
 def build_summary_table_from_counts(needed, assigned_counts):
@@ -2847,7 +2932,6 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
     already_controlled = int(controlled.get("already_controlled_loads", 0) or 0)
     completed_or_loaded_now = int(controlled.get("completed_or_loaded_now", 0) or 0)
     rtl_controlled = int(controlled.get("rtl_controlled_loads", 0) or 0)
-    rs_count = int(controlled.get("rs_count", 0) or 0)
     loading_target_loads = int(controlled.get("loading_target_loads", 0) or 0)
     base_loading_goal_loads = int(controlled.get("base_loading_goal_loads", 0) or 0)
     cutoff = str(controlled.get("cutoff", "n/a"))
@@ -2863,23 +2947,17 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         f"({loads_controlled} of {total_loads} selected-day loads) by shift end {shift_end_label(shift)}."
     )
 
-    rs_note = (
-        f" Note: {rs_count} of those are currently R/S — picking is done but product is not yet "
-        f"in the DC. Counted as controlled since no pick work remains; expected to resolve before departure."
-        if rs_count > 0 else ""
-    )
-
     if loads_controlled >= total_loads:
         reason = (
             f"This allocation can control the full selected-day board by shift end: "
-            f"{loads_controlled} of {total_loads} load(s).{rs_note} "
+            f"{loads_controlled} of {total_loads} load(s). "
             f"Already controlled now: {already_controlled} "
             f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled})."
         )
         suggested_adjustment = "Protect current pickers, taskers, and loaders until the full board is controlled."
     elif loads_controlled > 0:
         reason = (
-            f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end.{rs_note} "
+            f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end. "
             f"Already controlled now: {already_controlled} "
             f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled}). "
             f"The limiting stream is {bottleneck}."
@@ -2893,7 +2971,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         else:
             suggested_adjustment = "Protect current allocation until the controlled wave is complete."
     else:
-        reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}.{rs_note}"
+        reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}."
         suggested_adjustment = "Add labor to the bottleneck before generating the final report."
 
     return {
@@ -2917,7 +2995,6 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         "already_controlled_loads": already_controlled,
         "completed_or_loaded_now": completed_or_loaded_now,
         "rtl_controlled_loads": rtl_controlled,
-        "rs_count": rs_count,
         "loading_target_loads": loading_target_loads,
         "base_loading_goal_loads": base_loading_goal_loads,
         "controlled_through_appt": cutoff,
@@ -2961,13 +3038,12 @@ def render_python_shift_goal_preview(preview):
         f"Loads controlled in target wave: {preview.get('loads_to_stage_for_target', 0)} | "
         f"Already controlled now: {preview.get('already_controlled_loads', 0)} | "
         f"RTL controlled/not loaded: {preview.get('rtl_controlled_loads', 0)} | "
-        + (f"R/S (picking done, waiting on product): {preview.get('rs_count', 0)} | "
-           if preview.get('rs_count', 0) > 0 else "")
-        + f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
+        f"Loading goal: {preview.get('loading_target_loads', 0)} loads "
         f"(52% of day)"
     )
     st.write(f"**Why:** {preview.get('reason', '')}")
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
+
 
 
 def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining, summary_table_or_counts):
@@ -3299,6 +3375,473 @@ Example: "Behind 5 loads: should have 17 done by now, have done 12. Target have 
     except Exception as e:
         return f"Board analysis could not be completed: {str(e)}"
 
+def build_executive_summary_with_groq(
+    day, shift, total_cases, hours_remaining, total_outbound_loads_day,
+    board_text, summary_table, present_recommendations, availability,
+    oc_matches, notes, board_analysis_text=None,
+    recommended_allocation=None, deviation_reason=None,
+    python_shift_goal_preview=None,
+):
+    """
+    Second, lightweight Groq call on llama-3.3-70b-versatile.
+    Runs on a DIFFERENT model than the gpt-oss-120b board analysis, so it never
+    shares that model's per-minute token bucket. Fed Python-verified facts only,
+    so every number is exact and nothing is recomputed by the model.
+    """
+    client = get_groq_client()
+    if client is None:
+        return None  # caller falls back to the detailed body
+
+    try:
+        payload = json.loads(board_text)
+    except Exception:
+        payload = {}
+
+    py_out   = payload.get("python_verified_outbound_summary", {})
+    py_in    = payload.get("python_verified_inbound_summary", {})
+    py_today = payload.get("python_verified_today_totals", {})
+    all_rows = payload.get("all_outbound_rows", [])
+
+    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining)
+
+    picks_left = py_today.get("picks_left_today")
+    pulls_left = py_today.get("pulls_left_today")
+
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    net_gap        = total_assigned - total_needed
+    labor_hours_gap = net_gap * hours_remaining
+
+    staffing_lines = []
+    for task, row in summary_table.iterrows():
+        staffing_lines.append(
+            f"{task}: need {int(row['Needed'])}, assigned {int(row['Assigned'])}, "
+            f"gap {int(row['Difference'])} ({row['Status']})"
+        )
+    staffing_block = "\n".join(staffing_lines)
+
+    # Labor availability stated as a hard fact so the model can't invent a free body.
+    if availability["has_available_labor"]:
+        bench = []
+        if availability["surplus_tasks"]:
+            bench.append(", ".join(f"{t} +{n}" for t, n in availability["surplus_tasks"].items()))
+        if availability["lead_extra_count"] > 0:
+            bench.append(f"Lead/Extra {availability['lead_extra_count']}")
+        availability_fact = f"Surplus labor available: YES ({'; '.join(bench)}). A safe internal move exists."
+    else:
+        availability_fact = (
+            "Surplus labor available: NO. Every present worker is assigned and no area is overstaffed. "
+            "Any move into one function reopens a gap in another. Closing gaps requires overtime, an "
+            "early 2nd-shift start, or borrowing labor. Do NOT suggest moving a worker as if one is free."
+        )
+
+    if oc_matches:
+        oc_str = "; ".join(
+            f"{m['customer']['name'].upper()} [{m['customer']['priority']}]"
+            + (" — sign-off required" if m['customer'].get('sign_off') else "")
+            + (" — photos required" if m['customer'].get('pictures') else "")
+            for m in oc_matches
+        )
+    else:
+        oc_str = "none on today's board"
+
+    onlot_atdoor = (py_in.get("on_lot", 0) or 0) + (py_in.get("at_door", 0) or 0)
+    inbound_fact = (
+        f"Total inbound loads: {py_in.get('loads_read_from_inbound', 'not provided')}; "
+        f"Live: {py_in.get('live_loads', 'not provided')}; "
+        f"Drop: {py_in.get('drop_loads', 'not provided')}; "
+        f"On lot/at door: {onlot_atdoor}"
+    )
+
+    board_fact = (
+        f"Outbound loads today: {pacing.get('selected_day_total_loads', 'not provided')}; "
+        f"Completed: {pacing.get('completed_count', 0)}; Loaded: {pacing.get('loaded_count', 0)}; "
+        f"RTL: {py_out.get('rtl_loads', 0)}; R/S: {py_out.get('rs_loads', 0)}; "
+        f"Picking/Short: {py_out.get('picking_short_loads', 0)}; Picking: {py_out.get('picking_loads', 0)}; "
+        f"Blank/Not started: {py_out.get('blank_or_not_started_loads', 0)}; "
+        f"Pacing: {pacing.get('pacing', 'not provided')}; "
+        f"Due by now: {pacing.get('due_by_now', 0)}; Due not done: {pacing.get('due_not_RTL', 0)}; "
+        f"Estimated current time: {pacing.get('estimated_current_time', 'not provided')}"
+    )
+
+    facts = f"""DAY/SHIFT: {day} {shift} | Total cases: {total_cases:,} | Hours remaining: {hours_remaining}
+
+STATUS / PACING (Python-verified — use exactly as given):
+{board_fact}
+
+LABOR (Python-verified):
+Present: {total_present} | Needed: {total_needed} | Assigned: {total_assigned} | Net gap: {net_gap:+d} people = {labor_hours_gap:+.1f} labor-hours
+Per function:
+{staffing_block}
+{availability_fact}
+
+WORKLOAD / CAPACITY (Python-verified):
+Picks left: {picks_left if picks_left is not None else 'not provided'} | Pulls left: {pulls_left if pulls_left is not None else 'not provided'} | Hours left: {hours_remaining}
+
+INBOUND (Python-verified):
+{inbound_fact}
+
+OPPORTUNITY CUSTOMERS: {oc_str}
+
+PYTHON-COMPUTED SHIFT GOAL (source of truth):
+{python_shift_goal_preview.get('goal', 'not provided') if python_shift_goal_preview else 'not provided'}
+Confidence: {python_shift_goal_preview.get('confidence', 'not provided') if python_shift_goal_preview else 'not provided'}
+Main constraint: {python_shift_goal_preview.get('main_constraint', 'not provided') if python_shift_goal_preview else 'not provided'}
+
+OPERATIONS NOTES: {notes.strip() or 'none'}
+"""
+
+    if recommended_allocation:
+        label_map = {
+            "Picking": "Pickers",
+            "Tasking": "Taskers",
+            "Loading": "Loaders",
+            "Unloading": "Unloaders",
+            "Receiving": "Receivers",
+        }
+        rec_line = ", ".join(
+            f"{label_map.get(t, t)} {int(n)}" for t, n in recommended_allocation.items()
+        )
+        facts += (
+            "\nALLOCATION MODE: Supervisor is running a DIFFERENT allocation than recommended. "
+            "The per-function 'assigned' numbers above are the ACTUAL crew, not the recommendation.\n"
+            f"Recommended placement (comparison only): {rec_line}\n"
+        )
+        if deviation_reason and deviation_reason.strip():
+            facts += f"Supervisor's reason for the deviation: {deviation_reason.strip()}\n"
+
+    if board_analysis_text:
+        facts += (
+            "\nDETAILED BOARD ANALYSIS (narrative context only — prioritization and threats; "
+            "if any number here conflicts with the verified facts above, the facts above win):\n"
+            f"{board_analysis_text}\n"
+        )
+
+    prompt = f"""You are summarizing a warehouse staffing and board analysis for an experienced DC Manager.
+Create a concise executive email summary.
+
+Rules:
+- Do not repeat the full report.
+- Do not explain basic warehouse terms.
+- Focus on status, constraint, labor gap, board risk, recommendation, and decision needed.
+- Keep it professional and direct.
+- Keep it under one page.
+- Do not invent numbers. Use only the facts provided below.
+- Use the PYTHON-COMPUTED SHIFT GOAL exactly; do not create a different appointment target.
+- If a number is missing from the facts, write "not provided".
+- If "Surplus labor available" is NO, do NOT suggest moving a worker as if one is free. State plainly that no safe internal move exists and that closing the gap requires overtime, an early 2nd-shift start, or borrowing labor.
+- If an allocation override and a reason are provided, treat the supervisor's reason as valid context: do not flag an intentionally-covered gap as a failure, but still note any genuine risk it creates.
+- Include exactly these sections, in this order:
+  1. Bottom Line
+  2. Labor: How many workers x area and staffing status
+  3. Workload / Capacity. Always state capacity. Capacity = 185 x hours remaining x workers picking. State Key risks here based on workload,capacity and staffing.
+  4. Board / Outbound : Summarize board by status. Mention how many inbounds for the day. 
+  5. Current Actions/Recomendations
+
+  FORMAT: Write every section as short, scannable bullet points starting with "- ".
+  Do NOT write paragraphs. One fact per bullet. Keep each bullet to a single short
+  sentence or fragment. No long prose blocks.
+
+FACTS:
+{facts}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_completion_tokens=1200,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Executive summary could not be generated: {e}"
+
+def write_board_analysis_to_excel(wb, analysis_text, oc_matches=None):
+    sheet_name = "Board Analysis"
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet(sheet_name)
+
+    dark_blue    = "0F5B78"
+    orange       = "C55A11"
+    white        = "FFFFFF"
+    light_blue   = "D9EAF7"
+    light_orange = "FCE4D6"
+    thin   = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "Board Excel Analysis — AI Insights"
+    ws["A1"].font      = Font(size=16, bold=True, color=white)
+    ws["A1"].fill      = PatternFill("solid", fgColor=dark_blue)
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.merge_cells("A1:G1")
+    ws.row_dimensions[1].height = 28
+
+    ws["A2"] = "Generated by Groq AI — cross-referenced with today's staffing and demand data"
+    ws["A2"].font = Font(italic=True, size=10)
+    ws["A2"].fill = PatternFill("solid", fgColor=light_blue)
+    ws.merge_cells("A2:G2")
+
+    current_row = 4
+
+    if oc_matches:
+        ws.cell(current_row, 1).value = "OPPORTUNITY CUSTOMER ALERT — SPECIAL HANDLING REQUIRED"
+        ws.cell(current_row, 1).font      = Font(size=13, bold=True, color=white)
+        ws.cell(current_row, 1).fill      = PatternFill("solid", fgColor=orange)
+        ws.cell(current_row, 1).alignment = Alignment(horizontal="center")
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+        ws.row_dimensions[current_row].height = 22
+        current_row += 1
+
+        for match in oc_matches:
+            c = match["customer"]
+            oc_lines = [
+                f"CUSTOMER: {c['name'].upper()}  |  Priority: {c['priority']}",
+                f"DC Requirements: {c['requirements']}",
+            ]
+            if c["sign_off"]:
+                oc_lines.append("DC Supervisor Sign-Off REQUIRED before this load ships.")
+            if c["pictures"]:
+                oc_lines.append("Photos REQUIRED: 3 on dock + 3 during loading (6 total). Email to manager.")
+            for line in oc_lines:
+                cell = ws.cell(current_row, 1, line)
+                cell.font      = Font(size=10, bold=("CUSTOMER:" in line or "" in line or "" in line))
+                cell.fill      = PatternFill("solid", fgColor=light_orange)
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                cell.border    = border
+                ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+                ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
+                current_row += 1
+            current_row += 1
+        current_row += 1
+
+    for line in analysis_text.split("\n"):
+        cell = ws.cell(current_row, 1, line)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        cell.border    = border
+        ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=7)
+        ws.row_dimensions[current_row].height = max(15, min(60, len(line) // 5))
+        current_row += 1
+
+    for col in range(1, 8):
+        ws.column_dimensions[get_column_letter(col)].width = 22
+    ws.column_dimensions["A"].width = 110
+
+
+# ============================================================
+#  EXCEL WRITE-BACK
+#  1st shift → "Staffing sheet 1ST Shift" col I + Crew Sheet
+#  2nd shift → "Staffing Sheet 2nd Shift" col I only
+# ============================================================
+def write_recommendations_to_excel(wb, staff, shift):
+    if shift == "1st":
+        sheet_name = "Staffing sheet 1ST Shift"
+    else:
+        sheet_name = "Staffing Sheet 2nd Shift"
+
+    ws_staff = wb[sheet_name]
+
+    for excel_row, task in zip(range(2, len(staff) + 2), staff["Recommended Task"]):
+        ws_staff[f"I{excel_row}"] = task
+
+    # Update Crew Sheet for both shifts, filtered by col B (1=1st, 2=2nd)
+    shift_number = 1 if shift == "1st" else 2
+    ws_crew = wb["Crew Sheet"]
+
+    crew_name_to_row = {}
+    for row in range(2, ws_crew.max_row + 1):
+        name       = ws_crew.cell(row, 1).value
+        crew_shift = ws_crew.cell(row, 2).value
+        if name and str(crew_shift).strip() == str(shift_number):
+            crew_name_to_row[str(name).strip().lower()] = row
+
+    for _, row in staff.iterrows():
+        name = str(row["Name"]).strip().lower()
+        task = row["Recommended Task"]
+        if name in crew_name_to_row:
+            crew_row = crew_name_to_row[name]
+            ws_crew[f"C{crew_row}"] = task
+            ws_crew[f"D{crew_row}"] = task
+
+
+def build_dashboard(wb, summary_table, present_recommendations, recommendations, oc_matches=None, lead_extra_override=None):
+    if "Staffing Dashboard" in wb.sheetnames:
+        ws_dash = wb["Staffing Dashboard"]
+        ws_dash.delete_rows(1, ws_dash.max_row)
+    else:
+        ws_dash = wb.create_sheet("Staffing Dashboard")
+
+    dark_blue  = "0F5B78"
+    orange     = "C55A11"
+    light_blue = "D9EAF7"
+    green      = "C6EFCE"
+    red        = "FFC7CE"
+    yellow     = "FFEB9C"
+    white      = "FFFFFF"
+    thin   = Side(style="thin", color="B7B7B7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws_dash["A1"] = "1st Shift Staffing Dashboard"
+    ws_dash["A1"].font      = Font(size=18, bold=True, color=white)
+    ws_dash["A1"].fill      = PatternFill("solid", fgColor=dark_blue)
+    ws_dash["A1"].alignment = Alignment(horizontal="center")
+    ws_dash.merge_cells("A1:K1")
+
+    total_present  = len(present_recommendations)
+    total_needed   = int(summary_table["Needed"].sum())
+    total_assigned = int(summary_table["Assigned"].sum())
+    if lead_extra_override is None:
+        lead_extra = int((present_recommendations["Recommended Task"] == "Lead/Extra").sum())
+    else:
+        lead_extra = int(lead_extra_override)
+    overall_gap    = total_assigned - total_needed
+
+    kpis     = [
+        ("Total Present",  total_present),
+        ("Total Needed",   total_needed),
+        ("Total Assigned", total_assigned),
+        ("Lead/Extra",     lead_extra),
+        ("Overall Gap",    overall_gap),
+    ]
+    kpi_cols = [1, 3, 5, 7, 9]
+    for (label, value), col in zip(kpis, kpi_cols):
+        ws_dash.cell(3, col).value     = label
+        ws_dash.cell(4, col).value     = value
+        ws_dash.cell(3, col).font      = Font(bold=True, color=white)
+        ws_dash.cell(3, col).fill      = PatternFill("solid", fgColor=dark_blue)
+        ws_dash.cell(3, col).alignment = Alignment(horizontal="center")
+        ws_dash.cell(4, col).font      = Font(bold=True, size=14)
+        ws_dash.cell(4, col).fill      = PatternFill("solid", fgColor=light_blue)
+        ws_dash.cell(4, col).alignment = Alignment(horizontal="center")
+        ws_dash.merge_cells(start_row=3, start_column=col, end_row=3, end_column=col + 1)
+        ws_dash.merge_cells(start_row=4, start_column=col, end_row=4, end_column=col + 1)
+
+    oc_banner_row = 6
+    if oc_matches:
+        customer_names = ", ".join(m["customer"]["name"].upper() for m in oc_matches)
+        ws_dash.cell(oc_banner_row, 1).value = (
+            f"OC ALERT: Opportunity Customers on today's board — {customer_names} — See 'Board Analysis' tab for full requirements."
+        )
+        ws_dash.cell(oc_banner_row, 1).font      = Font(bold=True, color=white, size=11)
+        ws_dash.cell(oc_banner_row, 1).fill      = PatternFill("solid", fgColor=orange)
+        ws_dash.cell(oc_banner_row, 1).alignment = Alignment(horizontal="center", wrap_text=True)
+        ws_dash.merge_cells(start_row=oc_banner_row, start_column=1, end_row=oc_banner_row, end_column=11)
+        ws_dash.row_dimensions[oc_banner_row].height = 22
+        summary_label_row = oc_banner_row + 2
+    else:
+        summary_label_row = oc_banner_row
+
+    ws_dash.cell(summary_label_row, 1).value = "Needed vs Assigned"
+    ws_dash.cell(summary_label_row, 1).font  = Font(size=14, bold=True)
+
+    header_row = summary_label_row + 1
+    headers = ["Task", "Needed", "Assigned", "Difference", "Status"]
+    for c, header in enumerate(headers, 1):
+        cell           = ws_dash.cell(header_row, c)
+        cell.value     = header
+        cell.font      = Font(bold=True, color=white)
+        cell.fill      = PatternFill("solid", fgColor=dark_blue)
+        cell.border    = border
+        cell.alignment = Alignment(horizontal="center")
+
+    for r, (task, row) in enumerate(summary_table.iterrows(), header_row + 1):
+        values = [task, int(row["Needed"]), int(row["Assigned"]), int(row["Difference"]), row["Status"]]
+        for c, value in enumerate(values, 1):
+            cell           = ws_dash.cell(r, c)
+            cell.value     = value
+            cell.border    = border
+            cell.alignment = Alignment(horizontal="center")
+            if c == 5:
+                if value == "Good":
+                    cell.fill = PatternFill("solid", fgColor=green)
+                elif value == "Understaffed":
+                    cell.fill = PatternFill("solid", fgColor=red)
+                else:
+                    cell.fill = PatternFill("solid", fgColor=yellow)
+
+    ws_dash.cell(summary_label_row, 7).value = "Written Recommendations / What-Ifs"
+    ws_dash.cell(summary_label_row, 7).font  = Font(size=14, bold=True)
+
+    rec_row = header_row
+    for rec in recommendations:
+        ws_dash.cell(rec_row, 7).value     = f"• {rec}"
+        ws_dash.cell(rec_row, 7).alignment = Alignment(wrap_text=True, vertical="top")
+        ws_dash.merge_cells(start_row=rec_row, start_column=7, end_row=rec_row, end_column=11)
+        rec_row += 1
+
+    board_start = max(header_row + len(summary_table) + 4, rec_row + 2)
+    ws_dash.cell(board_start, 1).value = "Recommended Staffing Board"
+    ws_dash.cell(board_start, 1).font  = Font(size=14, bold=True)
+
+    board_headers = ["Name", "Skills", "Best Fit", "Recommended Task"]
+    for c, header in enumerate(board_headers, 1):
+        cell           = ws_dash.cell(board_start + 1, c)
+        cell.value     = header
+        cell.font      = Font(bold=True, color=white)
+        cell.fill      = PatternFill("solid", fgColor=dark_blue)
+        cell.border    = border
+        cell.alignment = Alignment(horizontal="center")
+
+    for r, (_, row) in enumerate(present_recommendations.iterrows(), board_start + 2):
+        values = [row["Name"], row["Skills"], row["Best Fit"], row["Recommended Task"]]
+        for c, value in enumerate(values, 1):
+            cell           = ws_dash.cell(r, c)
+            cell.value     = value
+            cell.border    = border
+            cell.alignment = Alignment(horizontal="center")
+            if r % 2 == 0:
+                cell.fill = PatternFill("solid", fgColor=light_blue)
+
+    # Charts start 3 rows after the Written Recommendations block ends (rec_row
+    # is already the row just past the last recommendation).
+    chart_anchor_row = rec_row + 3
+
+    bar = BarChart()
+    bar.title        = "Needed vs Assigned"
+    bar.y_axis.title = "Workers"
+    bar.x_axis.title = "Task"
+    data = Reference(ws_dash, min_col=2, max_col=3, min_row=header_row, max_row=header_row + len(summary_table))
+    cats = Reference(ws_dash, min_col=1, min_row=header_row + 1, max_row=header_row + len(summary_table))
+    bar.add_data(data, titles_from_data=True)
+    bar.set_categories(cats)
+    # Force the axes (and therefore the task-name category labels) to render.
+    bar.x_axis.delete = False
+    bar.y_axis.delete = False
+    bar.height = 9
+    bar.width  = 15
+    bar.legend.position = "r"
+    # Nudge the title up toward the top edge.
+    bar.title.layout = Layout(manualLayout=ManualLayout(y=0.0, yMode="edge"))
+    # Keep the legend on the right but raise it.
+    bar.legend.layout = Layout(manualLayout=ManualLayout(x=0.80, y=0.10, xMode="edge", yMode="edge"))
+    ws_dash.add_chart(bar, f"E{chart_anchor_row}")
+
+    pie = PieChart()
+    pie.title = "Assigned Labor Distribution"
+    pie_data = Reference(ws_dash, min_col=3, min_row=header_row, max_row=header_row + len(summary_table))
+    pie_cats = Reference(ws_dash, min_col=1, min_row=header_row + 1, max_row=header_row + len(summary_table))
+    pie.add_data(pie_data, titles_from_data=True)
+    pie.set_categories(pie_cats)
+    pie.height = 9
+    pie.width  = 13
+    pie.legend.position = "r"
+    # Nudge the title up toward the top edge.
+    pie.title.layout = Layout(manualLayout=ManualLayout(y=0.0, yMode="edge"))
+    # Keep the legend on the right but raise it.
+    pie.legend.layout = Layout(manualLayout=ManualLayout(x=0.80, y=0.10, xMode="edge", yMode="edge"))
+    # Drop the pie 2 rows lower than the bar chart so its title isn't clipped.
+    ws_dash.add_chart(pie, f"I{chart_anchor_row + 2}")
+
+    for col in range(1, 12):
+        ws_dash.column_dimensions[get_column_letter(col)].width = 18
+    ws_dash.column_dimensions["A"].width = 22
+    for col in ["G", "H", "I", "J", "K"]:
+        ws_dash.column_dimensions[col].width = 35
+    ws_dash.freeze_panes = f"A{header_row}"
 
 def _build_mailto(to_addr, subject, body):
     """Build a mailto: link that prefills recipient, subject, and body."""
@@ -3315,10 +3858,24 @@ def _build_mailto(to_addr, subject, body):
 def build_email_draft(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations,
-    board_analysis_text=None, oc_matches=None,
+    board_analysis_text=None, oc_matches=None, executive_summary_text=None,
     board_text="", shift_goal_preview=None,
 ):
     subject = f"{day} {shift} Shift – Staffing & Board Summary"
+
+    # If an AI exec summary is ever passed in, use it. Normally None now.
+    if executive_summary_text and executive_summary_text.strip() \
+            and not executive_summary_text.strip().lower().startswith("executive summary could not"):
+        clean_summary = re.sub(
+            r"^#{1,6}\s*", "", executive_summary_text.strip(), flags=re.MULTILINE
+        )
+        body = (
+            "Good morning,\n\n"
+            f"{clean_summary}\n\n"
+            "The full staffing report and board analysis are attached.\n\n"
+            "Thanks,"
+        )
+        return subject, body
 
     # ---- Python-only concise recap of the PDF first page ----
     try:
@@ -3410,6 +3967,7 @@ def build_email_draft(
     return subject, body
 
 
+
 # ============================================================
 #  PDF REPORT GENERATION
 #  Generates the final organized report as PDF instead of Excel.
@@ -3466,6 +4024,13 @@ def pdf_number(value, default=0):
         return default
 
 
+def pdf_first_nonblank(*values):
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 def pdf_status_color(health):
     health = str(health or "").upper()
     if health == "GREEN":
@@ -3489,6 +4054,15 @@ def derive_shift_health(summary_table, pacing, py_out):
     return "GREEN"
 
 
+def board_selected_rows_from_payload(board_text, day):
+    try:
+        payload = json.loads(board_text or "{}")
+        rows = payload.get("all_outbound_rows", [])
+    except Exception:
+        return []
+    return rows_for_selected_day(rows, day)
+
+
 def appointment_cutoff_from_rows(rows):
     times = []
     for row in rows or []:
@@ -3502,7 +4076,7 @@ def appointment_cutoff_from_rows(rows):
 
 def find_oc_load_matches(board_rows, selected_day):
     """Load-level OC matches for the PDF report."""
-    oc_list, _ = load_oc_customer_list()
+    oc_list = load_oc_customer_list()
     selected_day = str(selected_day or "").strip().lower()
     matches = []
     seen = set()
@@ -3601,6 +4175,15 @@ def pdf_table(data, col_widths=None, header_fill="#0F5B78"):
     return table
 
 
+def pdf_paragraph_list(items, styles):
+    story = []
+    for item in items or []:
+        if item is None or str(item).strip() == "":
+            continue
+        story.append(Paragraph(f"- {pdf_safe(item)}", styles["BodySmall"]))
+    return story
+
+
 def pdf_paragraph_list_large(items, styles):
     """Bigger bullet text for the PDF Prioritization and Top Action Items pages."""
     story = []
@@ -3647,73 +4230,254 @@ def _is_markdown_table_line(text):
         return True
     return False
 
-def extract_ai_prioritization_lines(board_analysis_text):
-    """Return only the AI prioritization section. No Python-generated priority list."""
+def _is_ai_analysis_unavailable(board_analysis_text):
+    """True when the AI did not return real operational analysis."""
+    text = str(board_analysis_text or "").strip()
+    if not text:
+        return True
+    upper = text.upper()
+    failure_markers = [
+        "BOARD ANALYSIS COULD NOT BE COMPLETED",
+        "GROQ_API_KEY IS MISSING",
+        "ADD GROQ_API_KEY",
+        "MISSING API KEY",
+        "ERROR",
+    ]
+    return any(marker in upper for marker in failure_markers)
+
+
+def _clean_ai_section_line(raw):
+    """Clean one AI output line while keeping useful section/category labels."""
+    clean = clean_pdf_text(raw)
+    clean = re.sub(r"^\s*(?:[-*]+\s*)?\d+[\.)]\s*", "", clean).strip()
+    clean = re.sub(r"^\s*(?:[-*]+\s*)?[A-Z][\.)]\s*", "", clean).strip()
+    return clean
+
+
+def _looks_like_heading(raw, *keywords):
+    clean = clean_pdf_text(raw).upper()
+    clean = re.sub(r"^\s*\d+[\.)]?\s*", "", clean).strip()
+    return any(keyword.upper() in clean for keyword in keywords)
+
+
+def _extract_ai_section_lines(board_analysis_text, start_keywords, stop_keywords):
+    """
+    Robust AI section extractor.
+    Handles headings like:
+      3. PRIORITIZATION
+      PRIORITIZATION — Past due / next 2 hours
+      Top Action Items
+      TOP ACTIONS
+    """
     text = str(board_analysis_text or "")
-    if not text.strip():
+    if not text.strip() or _is_ai_analysis_unavailable(text):
         return []
 
     lines = [line.rstrip() for line in text.splitlines()]
     output = []
-    in_priority = False
+    capturing = False
 
     for line in lines:
         raw = line.strip()
-        upper = raw.upper()
+        if not raw or _is_markdown_table_line(raw):
+            continue
 
-        if "PRIORITIZATION" in upper:
-            in_priority = True
+        if not capturing and _looks_like_heading(raw, *start_keywords):
+            capturing = True
+            # Do not print a plain section title as a bullet.
+            cleaned_heading = _clean_ai_section_line(raw)
+            if cleaned_heading and not any(k.upper() == cleaned_heading.upper() for k in start_keywords):
+                # If the heading also contains useful detail, keep it.
+                if ":" in cleaned_heading or "-" in cleaned_heading:
+                    output.append(cleaned_heading)
+            continue
 
-        if in_priority:
-            # Stop before Top Action Items or the next major section after prioritization.
-            if output and (
-                re.match(r"^#{0,6}\s*4\.\s", raw)
-                or "TOP ACTION" in upper
-                or "PICKING & SHORT" in upper
-                or "BOARD SUMMARY" in upper
-            ):
-                break
-            if raw and not _is_markdown_table_line(raw) :
-                clean = clean_pdf_text(raw)
-                clean = re.sub(r"^\d+\.\s*", "", clean).strip()
-                if clean:
-                    output.append(clean)
+        if capturing and _looks_like_heading(raw, *stop_keywords):
+            break
+
+        if capturing:
+            clean = _clean_ai_section_line(raw)
+            if not clean:
+                continue
+            # Avoid adding repeated section title lines.
+            if any(k.upper() == clean.upper() for k in start_keywords):
+                continue
+            output.append(clean)
 
     return output
+
+
+def extract_ai_prioritization_lines(board_analysis_text):
+    """Return the AI prioritization section when the model generated one."""
+    return _extract_ai_section_lines(
+        board_analysis_text,
+        start_keywords=["PRIORITIZATION", "PRIORITIES", "PRIORITY"],
+        stop_keywords=[
+            "TOP ACTION ITEMS", "TOP ACTIONS", "ACTION ITEMS",
+            "NEXT 30 MINUTES", "POSSIBLE OUTCOMES", "STAFFING ENGINE",
+            "OC ACTION", "OWNER", "DEADLINE",
+        ],
+    )
 
 
 def extract_ai_top_action_items_lines(board_analysis_text):
-    """Return only the AI Top Action Items section for the final PDF page."""
-    text = str(board_analysis_text or "")
-    if not text.strip():
-        return []
+    """Return the AI top action items section when the model generated one."""
+    return _extract_ai_section_lines(
+        board_analysis_text,
+        start_keywords=["TOP ACTION ITEMS", "TOP ACTIONS", "ACTION ITEMS", "NEXT ACTIONS"],
+        stop_keywords=[
+            "POSSIBLE OUTCOMES", "STAFFING ENGINE", "OC ACTION", "OWNER", "DEADLINE",
+            "APPENDIX", "RAW", "BOARD SUMMARY",
+        ],
+    )
 
-    lines = [line.rstrip() for line in text.splitlines()]
-    output = []
-    in_actions = False
 
-    for line in lines:
-        raw = line.strip()
-        upper = raw.upper()
+def _row_status_upper(row):
+    return str(row.get("status", "") or "").strip().upper()
 
-        if "TOP ACTION ITEMS" in upper:
-            in_actions = True
 
-        if in_actions:
-            # Stop at OC Actions, an owner/deadline table, or the next major numbered section.
-            if output and (
-                re.match(r"^#{0,6}\s*[5-9]\.\s", raw)
-                or "OC ACTION" in upper
-            ):
+def _load_display(row):
+    load = row.get("load") or row.get("load_number") or "(no load #)"
+    customer = row.get("customer") or "unknown customer"
+    appt = row.get("time") or row.get("appt_time") or "?"
+    status = row.get("status") or "Blank/Not Started"
+    door = row.get("door") or ""
+    door_text = f" door {door}" if door else ""
+    return f"Load {load} - {customer} - appt {appt}{door_text} - {status}"
+
+
+def _selected_day_active_rows(selected_rows):
+    active = []
+    for row in selected_rows or []:
+        status = _row_status_upper(row)
+        if status in {"COMPLETED", "COMPLETE", "LOADED"}:
+            continue
+        active.append(row)
+    return active
+
+
+def build_python_prioritization_fallback(selected_rows, pacing, oc_load_matches, crossdock_matches, tt4_matches):
+    """Deterministic fallback so the PDF never prints 'AI prioritization was not generated.'"""
+    lines = []
+    active_rows = _selected_day_active_rows(selected_rows)
+    current_minutes = board_minutes_for_pacing((pacing or {}).get("estimated_current_time"))
+
+    past_due = []
+    next_two_hours = []
+    later_risk = []
+
+    for row in active_rows:
+        appt_min = board_minutes_for_pacing(row.get("time") or row.get("appt_time"))
+        controlled = status_is_controlled_appointment(row.get("status"))
+        if current_minutes is not None and appt_min is not None:
+            if appt_min <= current_minutes and not controlled:
+                past_due.append(row)
+            elif current_minutes < appt_min <= current_minutes + 120 and not controlled:
+                next_two_hours.append(row)
+            else:
+                later_risk.append(row)
+        else:
+            later_risk.append(row)
+
+    lines.append("A) Past due / immediate risk")
+    if past_due:
+        for row in past_due[:8]:
+            lines.append(_load_display(row))
+    else:
+        lines.append("No selected-day load is past due and uncontrolled based on the parsed board.")
+
+    lines.append("B) Next 2 hours")
+    if next_two_hours:
+        for row in next_two_hours[:8]:
+            lines.append(_load_display(row))
+    else:
+        lines.append("No selected-day load in the next 2 hours needs special prioritization from the parsed board.")
+
+    alert_lines = []
+    for m in oc_load_matches or []:
+        alert_lines.append(f"OC: load {m.get('load','')} - {m.get('customer_on_board','')} - {m.get('time','')} - verify requirements before ship.")
+    for m in crossdock_matches or []:
+        alert_lines.append(f"Cross Dock: load {m.get('load','')} - verify {m.get('pallets',0)} pallet(s) at {m.get('location','')} before shipping.")
+    for m in tt4_matches or []:
+        alert_lines.append(f"TT4: load {m.get('load','')} - {m.get('customer','')} - verify TT4 before shipping.")
+    for row in later_risk:
+        status = _row_status_upper(row)
+        if "SHORT" in status or status in {"PICKING", "R/S", "READY/SHORT"}:
+            alert_lines.append(_load_display(row))
+
+    lines.append("C) Later today high risk")
+    if alert_lines:
+        for item in list(dict.fromkeys(alert_lines))[:12]:
+            lines.append(item)
+    else:
+        lines.append("No OC, Cross Dock, TT4, short, or unresolved high-risk later-today loads were detected.")
+
+    return lines
+
+
+def build_python_top_action_items_fallback(summary_table, pacing, oc_load_matches, crossdock_matches, tt4_matches):
+    """Deterministic fallback actions when AI does not return a usable action section."""
+    actions_30 = []
+    actions_2h = []
+
+    def gap(task):
+        try:
+            if summary_table is not None and task in summary_table.index:
+                return int(summary_table.loc[task, "Difference"])
+        except Exception:
+            pass
+        return 0
+
+    due_not_rtl = pdf_number((pacing or {}).get("due_not_RTL", 0))
+    pacing_state = str((pacing or {}).get("pacing", "")).upper()
+
+    if due_not_rtl > 0:
+        actions_30.append(f"Verify the {due_not_rtl} due-by-now load(s) not RTL/loaded; clear the oldest appointment first.")
+    if gap("Picking") < 0:
+        actions_30.append(f"Protect Picking immediately; Picking is short by {abs(gap('Picking'))} worker(s). Do not pull pickers to other functions.")
+    if gap("Loading") < 0:
+        actions_30.append(f"Protect Loading; Loading is short by {abs(gap('Loading'))} worker(s). Prioritize earliest RTL/live departures.")
+    if oc_load_matches:
+        actions_30.append(f"Verify OC handling on {len(oc_load_matches)} OC load(s): sign-off/photos/requirements before ship.")
+    if tt4_matches:
+        actions_30.append(f"Confirm TT4 on {len(tt4_matches)} load(s) before ship.")
+    if crossdock_matches:
+        actions_30.append(f"Confirm Cross Dock pallets on {len(crossdock_matches)} matched load(s) before release.")
+
+    if not actions_30:
+        actions_30.append("Confirm the next outbound wave is RTL/loaded in appointment order and no blank-status load is past due.")
+    while len(actions_30) < 3:
+        fillers = [
+            "Check the oldest active Picking/Picking-Short load and confirm whether it needs replenishment support.",
+            "Confirm loaders are working earliest RTL/live departures before later drop trailers.",
+            "Audit board statuses for blank or stale rows so the next action list is based on current reality.",
+        ]
+        for item in fillers:
+            if item not in actions_30:
+                actions_30.append(item)
                 break
-            if raw and not _is_markdown_table_line(raw):
-                clean = clean_pdf_text(raw)
-                clean = re.sub(r"^\d+\.\s*", "", clean).strip()
-                if clean:
-                    output.append(clean)
 
-    return output
+    if gap("Tasking") < 0:
+        actions_2h.append(f"Add/protect Tasking; Tasking is short by {abs(gap('Tasking'))} worker(s), which can starve Picking and full-pallet work.")
+    if pacing_state == "BEHIND":
+        actions_2h.append("Run a 2-hour catch-up wave: oldest appointment first, then CPU/OC/live loads before Reser's drop loads.")
+    if gap("Unloading") < 0 or gap("Receiving") < 0:
+        actions_2h.append("Watch inbound congestion; do not pull more from outbound unless doors or receivers become the active constraint.")
+    if oc_load_matches or crossdock_matches or tt4_matches:
+        actions_2h.append("Recheck all OC/Cross Dock/TT4 loads before departure so direct customer-service requirements are not missed.")
 
+    while len(actions_2h) < 3:
+        fillers = [
+            "Recalculate status after the next wave is staged; update board before the next report decision.",
+            "Keep pickers on cases and use taskers to protect replenishment/pulls before moving anyone to non-critical work.",
+            "Prepare second-shift handoff with remaining picks, pulls, RTL loads, shorts, and any unresolved TT4/OC/Cross Dock items.",
+        ]
+        for item in fillers:
+            if item not in actions_2h:
+                actions_2h.append(item)
+                break
+
+    return ["Next 30 minutes"] + actions_30[:3] + ["Next 2 hours"] + actions_2h[:3]
 
 def build_pdf_board_summary_rows(selected_rows):
     """Small first-page board summary table for the selected day only."""
@@ -3781,6 +4545,7 @@ def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, cr
     return "LOW", "No major service risk detected from current pacing, staffing, or direct alerts."
 
 
+
 def pdf_alert_table(data, col_widths=None, header_fill="#0F5B78", header_text="#000000"):
     table = Table(data, colWidths=col_widths, repeatRows=1)
     table.setStyle(TableStyle([
@@ -3803,7 +4568,7 @@ def pdf_alert_table(data, col_widths=None, header_fill="#0F5B78", header_text="#
 def build_pdf_report(
     day, shift, total_cases, hours_remaining, total_outbound_loads_day,
     summary_table, present_recommendations, recommendations, board_text,
-    board_analysis_text, oc_matches, oc_load_matches,
+    board_analysis_text, executive_summary_text, oc_matches, oc_load_matches,
     crossdock_matches, tt4_matches, notes, override_mode=False,
     actual_counts=None, recommended_counts=None, deviation_reason=None,
     python_shift_goal_preview=None,
@@ -3911,6 +4676,13 @@ def build_pdf_report(
             pass
         return 0
 
+    def _tool_rec_count(task):
+        try:
+            if recommended_counts is not None and task in recommended_counts:
+                return int(recommended_counts.get(task, 0))
+        except Exception:
+            pass
+        return None
 
     def _staffing_fact(task):
         assigned = _assigned_count(task)
@@ -4091,27 +4863,37 @@ def build_pdf_report(
 
     story.append(PageBreak())
 
-    # 5. Prioritization - AI only.
+    # 5. Prioritization - AI first, Python fallback.
     story.append(Paragraph("5. Prioritization", styles["Section"]))
     priority_lines = extract_ai_prioritization_lines(board_analysis_text)
     if priority_lines:
         story.append(Paragraph("AI prioritization and board execution insight", styles["Subsection"]))
         story.extend(pdf_paragraph_list_large(priority_lines[:70], styles))
     else:
-        story.append(Paragraph("AI prioritization was not generated.", styles["Body"]))
+        story.append(Paragraph("Python fallback prioritization - AI text was missing or not in the expected section format", styles["Subsection"]))
+        if _is_ai_analysis_unavailable(board_analysis_text):
+            story.append(Paragraph(pdf_safe(str(board_analysis_text or "AI analysis did not return text.")), styles["BodySmall"]))
+        priority_lines = build_python_prioritization_fallback(
+            selected_rows, pacing, oc_load_matches, crossdock_matches, tt4_matches
+        )
+        story.extend(pdf_paragraph_list_large(priority_lines[:70], styles))
 
     # Keep Top Action Items on the same page when Prioritization is short.
     # ReportLab will naturally continue onto a new page if the content is too long.
     story.append(Spacer(1, 10))
 
-    # 6. Top Action Items - AI only
+    # 6. Top Action Items - AI first, Python fallback.
     story.append(Paragraph("6. Top Action Items", styles["Section"]))
-    story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
     top_action_lines = extract_ai_top_action_items_lines(board_analysis_text)
     if top_action_lines:
+        story.append(Paragraph("AI next actions from the board analysis", styles["Subsection"]))
         story.extend(pdf_paragraph_list_large(top_action_lines[:80], styles))
     else:
-        story.append(Paragraph("AI top action items were not generated.", styles["Body"]))
+        story.append(Paragraph("Python fallback next actions - AI top action section was missing", styles["Subsection"]))
+        top_action_lines = build_python_top_action_items_fallback(
+            summary_table, pacing, oc_load_matches, crossdock_matches, tt4_matches
+        )
+        story.extend(pdf_paragraph_list_large(top_action_lines[:80], styles))
 
     # Removed possible outcomes / staffing-engine recommendation page per report cleanup.
     doc.build(story, onFirstPage=pdf_add_footer, onLaterPages=pdf_add_footer)
@@ -4132,33 +4914,6 @@ def compute_recommended_allocation(
         day, shift, total_cases, hours_remaining, total_outbound_loads_actual,
         crossroads_open, deer_creek_open, msb_open,
     )
-
-    # Read K2/L2 from the board now (before generate_recommendations) so the optimizer
-    # can cap needed['Loading'] using real pick/pull throughput.
-    # Without a board file, picks_left=0 is treated as unlimited — no cap benefit, no harm.
-    _early_picks_left = 0
-    _early_pulls_left = 0
-    if board_file is not None:
-        try:
-            board_file.seek(0)
-            _early_totals = read_board_today_totals_from_excel(board_file)
-            _early_picks_left = pdf_number(_early_totals.get("picks_left_today", 0))
-            _early_pulls_left = pdf_number(_early_totals.get("pulls_left_today", 0))
-            board_file.seek(0)
-        except Exception:
-            pass
-
-    # Run the optimizer with the actual present headcount to get the correct Loading cap.
-    # This must happen before generate_recommendations so Loading is never overfilled.
-    _early_present = len([n for n in present_workers if str(n).strip()])
-    _early_optimal = compute_throughput_optimal_allocation(
-        picks_left=_early_picks_left,
-        pulls_left=_early_pulls_left,
-        total_loads=int(total_outbound_loads_day),
-        hours_remaining=hours_remaining,
-        present_total=_early_present,
-    )
-    needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
 
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
     staff = pd.read_excel(TEMPLATE_FILE, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
@@ -4206,49 +4961,13 @@ def compute_recommended_allocation(
                 completed_or_loaded_now=completed_or_loaded_now,
             )
 
-            # Build two skill-grounded candidates and KEEP WHICHEVER CONTROLS MORE
-            # selected-day loads, using the same appointment-control logic used
-            # everywhere else. Both are realized by generate_recommendations(), which
-            # only ever assigns a worker to a function they are actually skilled for,
-            # so a candidate can never recommend a loader/picker/etc. we don't have.
-            #   A) the per-shift staffing NEED from calculate_needed()
-            #   B) the throughput-optimal split, capped to the skills actually present
-            def _named_counts_for_targets(targets):
-                trial = generate_recommendations(staff.copy(), targets)
-                _present, _summary = build_summary(trial, needed)
-                return trial, _present, _summary, assigned_counts_from_summary(_summary)
-
-            optimal_capped = cap_allocation_to_available_skills(optimal, staff)
-
-            # Cap needed['Loading'] at the optimizer's value before anything else runs.
-            # The optimizer accounts for what Picking/Tasking can actually feed to loaders.
-            # calculate_needed can overshoot (e.g. Loading=6 when hrs=8) because it doesn't
-            # know pick throughput. Updating needed in-place here keeps generate_recommendations,
-            # build_summary, and the summary table all consistent — no contradictory "Overstaffed"
-            # next to Loading when Picking is the actual bottleneck.
-            needed["Loading"] = min(needed["Loading"], optimal_capped.get("Loading", needed["Loading"]))
-
-            need_staff, need_present, need_summary, need_counts = _named_counts_for_targets(needed)
-            opt_staff, opt_present, opt_summary, opt_counts = _named_counts_for_targets(optimal_capped)
-
-            def _loads_controlled(counts):
-                return int(appointment_controlled_by_allocation(
-                    board_text_for_preview, day, shift, hours_remaining, counts,
-                ).get("loads_controlled", 0) or 0)
-
-            need_controlled = _loads_controlled(need_counts)
-            opt_controlled = _loads_controlled(opt_counts)
-
-            # Pick the allocation that controls more loads. Tie -> fewer total workers
-            # used, then fall back to the calculated need for stability.
-            if (opt_controlled, -sum(opt_counts.values())) > (need_controlled, -sum(need_counts.values())):
-                staff = opt_staff
-                present_recommendations, summary_table = opt_present, opt_summary
-                recommended_counts = opt_counts
-            else:
-                staff = need_staff
-                present_recommendations, summary_table = need_present, need_summary
-                recommended_counts = need_counts
+            # The optimized model can estimate the best flow, but named recommendations must
+            # be grounded in who is actually present and what skills they actually have.
+            # Keep the true Needed column from calculate_needed(), assign only skill-qualified
+            # workers, and then set the Recommended Allocation from the actual named assignments.
+            staff = generate_recommendations(staff, needed)
+            present_recommendations, summary_table = build_summary(staff, needed)
+            recommended_counts = assigned_counts_from_summary(summary_table)
 
             python_shift_goal_preview = compute_python_shift_goal_preview(
                 board_text=board_text_for_preview,
@@ -4288,9 +5007,65 @@ def run_full_generation(
     crossdock_file=None, override_mode=False, actual_counts=None,
     recommended_counts=None, deviation_reason=None,
 ):
-    """Phase 2: full report: reads board, runs AI, and builds direct alerts."""
+    """Phase 2: full report: writes workbook, reads board, runs AI, and builds direct alerts."""
+    working_file = f"working_staffing_file_{day}_{shift}.xlsx"
+    shutil.copyfile(TEMPLATE_FILE, working_file)
+
+    wb = load_workbook(working_file)
+    ws = wb["Inputs"]
+
     total_outbound_loads_actual = total_outbound_loads_day * LOAD_TARGET_SHARE
+
+    ws["B1"] = day
+    ws["B2"] = shift
+    ws["B3"] = total_cases
+    ws["B4"] = hours_remaining
+    ws["B8"] = crossroads_open
+    ws["B9"] = deer_creek_open
+    ws["B10"] = msb_open
+
+    board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
+    if board_file is not None:
+        try:
+            board_file.seek(0)
+            board_input_totals = read_board_today_totals_from_excel(board_file)
+        except Exception:
+            board_input_totals = {"pulls_left_today": None, "picks_left_today": None}
+
+    if board_file is not None and (
+        board_input_totals.get("picks_left_today") is not None
+        or board_input_totals.get("pulls_left_today") is not None
+    ):
+        cases_to_pick = float(board_input_totals.get("picks_left_today") or 0)
+        full_pallets = float(board_input_totals.get("pulls_left_today") or 0)
+    else:
+        cases_to_pick, full_pallets = calculate_input_values(day, shift, total_cases)
+
+    # B5/B6 keep their meaning: the TRUE remaining picks/pulls (board K2/L2) when a
+    # board is uploaded, or the formula estimate when it isn't. These feed the goal /
+    # handoff math and the AI prompt -- they are NOT the staffing-need driver.
+    ws["B5"] = cases_to_pick
+    ws["B6"] = full_pallets
+    ws["B7"] = total_outbound_loads_actual
+
     selected = {name.strip().lower() for name in present_workers}
+    ws_crew_ref = wb["Crew Sheet"]
+    crew_name_to_inputs_row = {}
+    for _r in range(2, ws_crew_ref.max_row + 1):
+        crew_name = ws_crew_ref.cell(_r, 1).value
+        if crew_name and str(crew_name).strip():
+            crew_name_to_inputs_row[str(crew_name).strip().lower()] = _r + 1
+    for _r in range(3, max(crew_name_to_inputs_row.values(), default=3) + 1):
+        ws.cell(_r, 7).value = ""
+    for worker in selected:
+        if worker in crew_name_to_inputs_row:
+            ws.cell(crew_name_to_inputs_row[worker], 7).value = "x"
+
+    ws["B12"] = notes
+
+    wb.calculation.fullCalcOnLoad = True
+    wb.calculation.forceFullCalc = True
+    wb.save(working_file)
 
     # NEEDED is derived from total cases via the per-shift shares in
     # calculate_input_values() -- NOT from the board's all-day remaining picks/pulls.
@@ -4301,61 +5076,24 @@ def run_full_generation(
         crossroads_open, deer_creek_open, msb_open,
     )
 
-    # Same early optimizer cap as Phase 1 — applied before generate_recommendations.
-    # board_text is read later, but we can read K2/L2 cheaply now just for this cap.
-    _early_picks_left = 0
-    _early_pulls_left = 0
-    if board_file is not None:
-        try:
-            board_file.seek(0)
-            _early_totals = read_board_today_totals_from_excel(board_file)
-            _early_picks_left = pdf_number(_early_totals.get("picks_left_today", 0))
-            _early_pulls_left = pdf_number(_early_totals.get("pulls_left_today", 0))
-            board_file.seek(0)
-        except Exception:
-            pass
-    _early_present = len([n for n in present_workers if str(n).strip()])
-    _early_optimal = compute_throughput_optimal_allocation(
-        picks_left=_early_picks_left,
-        pulls_left=_early_pulls_left,
-        total_loads=int(total_outbound_loads_day),
-        hours_remaining=hours_remaining,
-        present_total=_early_present,
-    )
-    needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
-    # Further refine using Phase 1 recommended_counts if available.
-    if recommended_counts and "Loading" in recommended_counts:
-        needed["Loading"] = min(needed["Loading"], recommended_counts["Loading"])
-
     staffing_sheet = "Staffing sheet 1ST Shift" if shift == "1st" else "Staffing Sheet 2nd Shift"
-    staff = pd.read_excel(TEMPLATE_FILE, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
+    staff = pd.read_excel(working_file, sheet_name=staffing_sheet, usecols="A,D,F,H,I")
     staff.columns = ["Name", "Skills", "Best Fit", "Present", "Recommended Task"]
     staff = staff[staff["Name"].notna()].copy()
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
 
-    # Cap needed['Loading'] using the Phase 1 recommended_counts (which already had the
-    # optimizer cap applied). Keeps the PDF summary table consistent with the Compute step.
-    if recommended_counts and "Loading" in recommended_counts:
-        needed["Loading"] = min(needed["Loading"], recommended_counts["Loading"])
-
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
 
     # Tool's recommended placement, captured BEFORE any supervisor override below
     # reassigns the same crew. This is shown on screen as the comparison board.
-    # Use the load-maximizing allocation chosen in Phase 1 (recommended_counts) so
-    # the Recommended Staffing Board matches the Recommended Allocation (e.g. shows
-    # 3 loaders when 3 control more loads), not the raw per-shift need. Falls back
-    # to the need-based board when no Phase-1 recommendation was passed in.
-    if recommended_counts:
-        rec_targets = cap_allocation_to_available_skills(recommended_counts, staff)
-        rec_board_staff = generate_recommendations(staff.copy(), rec_targets)
-        recommended_present_board, _ = build_summary(rec_board_staff, needed)
-        recommended_present_board = recommended_present_board.copy()
-    else:
-        recommended_present_board = present_recommendations.copy()
+    # build_summary() already returns a fresh copy, but copy() makes the intent explicit.
+    recommended_present_board = present_recommendations.copy()
+    total_present = len(present_recommendations)
+    total_needed = int(pd.Series(needed).sum())
+    lead_extra_override = None
     ai_recommended = None
     ai_reason = None
 
@@ -4370,6 +5108,7 @@ def run_full_generation(
         # In override mode, every present worker must be assigned to one of the five functions.
         # Safe move sources are only the functions showing a positive gap.
         availability = compute_labor_availability(summary_table, present_recommendations, lead_extra_count=0)
+        lead_extra_override = max(0, total_present - total_needed)
         ai_recommended = recommended_counts
         ai_reason = deviation_reason
     else:
@@ -4379,6 +5118,10 @@ def run_full_generation(
         summary_table, present_recommendations, raw_needed, hours_remaining, notes,
         availability=availability,
     )
+
+    executive_summary_text = None
+    wb = load_workbook(working_file)
+    write_recommendations_to_excel(wb, staff, shift)
 
     board_analysis_text = None
     python_shift_goal_preview = None
@@ -4398,10 +5141,12 @@ def run_full_generation(
 
             oc_load_matches = find_oc_load_matches(board_rows_for_alerts, day)
             tt4_matches = find_tt4_required_loads(board_rows_for_alerts, day)
+            write_tt4_alerts_to_excel(wb, tt4_matches)
 
             if crossdock_file is not None:
                 crossdock_rows = read_crossdock_rows(crossdock_file)
                 crossdock_matches = find_crossdock_matches(crossdock_rows, board_rows_for_alerts)
+                write_crossdock_alerts_to_excel(wb, crossdock_matches)
 
         except Exception as e:
             st.error(f"Direct alert matching failed: {e}")
@@ -4428,6 +5173,8 @@ def run_full_generation(
             python_shift_goal_preview=python_shift_goal_preview,
         )
 
+        write_board_analysis_to_excel(wb, board_analysis_text, oc_matches=oc_matches)
+        
         # --- Snapshot today's commitments + shift goal for end-of-shift closeout ---
         try:
             import shift_log
@@ -4451,15 +5198,33 @@ def run_full_generation(
             )
         except Exception as e:
             st.warning(f"Commitment snapshot skipped: {e}")
+        
 
+        executive_summary_text = None
+        
     else:
         board_text = ""
+
+    build_dashboard(
+        wb, summary_table, present_recommendations, recommendations,
+        oc_matches=oc_matches, lead_extra_override=lead_extra_override,
+    )
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    try:
+        os.remove(working_file)
+    except Exception:
+        pass
 
     email_subject, email_body = build_email_draft(
         day=day, shift=shift, total_cases=total_cases, hours_remaining=hours_remaining,
         total_outbound_loads_day=total_outbound_loads_day, summary_table=summary_table,
         present_recommendations=present_recommendations, recommendations=recommendations,
         board_analysis_text=board_analysis_text, oc_matches=oc_matches,
+        executive_summary_text=executive_summary_text,
         board_text=board_text, shift_goal_preview=python_shift_goal_preview,
     )
 
@@ -4468,7 +5233,7 @@ def run_full_generation(
         total_outbound_loads_day=total_outbound_loads_day, summary_table=summary_table,
         present_recommendations=present_recommendations, recommendations=recommendations,
         board_text=board_text, board_analysis_text=board_analysis_text,
-        oc_matches=oc_matches,
+        executive_summary_text=executive_summary_text, oc_matches=oc_matches,
         oc_load_matches=oc_load_matches, crossdock_matches=crossdock_matches,
         tt4_matches=tt4_matches, notes=notes, override_mode=override_mode,
         actual_counts=actual_counts, recommended_counts=recommended_counts,
@@ -4478,11 +5243,13 @@ def run_full_generation(
 
     return {
         "output_bytes": pdf_output_bytes,
+        "excel_output_bytes": output.getvalue(),
         "summary_table": summary_table,
         "present_recommendations": present_recommendations,
         "recommended_present_board": recommended_present_board,
         "recommendations": recommendations,
         "board_analysis_text": board_analysis_text,
+        "executive_summary_text": executive_summary_text,
         "oc_matches": oc_matches,
         "oc_load_matches": oc_load_matches,
         "crossdock_matches": crossdock_matches,
@@ -4669,7 +5436,7 @@ if board_file:
             st.exception(e)
 
 with st.expander("View Opportunity Customer List (from Excel file)"):
-    oc_list_preview, oc_load_error = load_oc_customer_list()
+    oc_list_preview = load_oc_customer_list()
     if oc_list_preview:
         oc_preview_rows = []
         for c in oc_list_preview:
@@ -4684,10 +5451,8 @@ with st.expander("View Opportunity Customer List (from Excel file)"):
             })
         st.dataframe(pd.DataFrame(oc_preview_rows), use_container_width=True)
         st.caption(f"Loaded {len(oc_list_preview)} customers from '{OC_FILE}'")
-    elif oc_load_error:
-        st.warning(oc_load_error)
     else:
-        st.info(f"OC customer list not connected. Place '{OC_FILE}' in the app folder to enable this feature.")
+        st.warning(f"No customers loaded. Check that '{OC_FILE}' exists in the app folder.")
 
 st.markdown("---")
 
@@ -4944,8 +5709,17 @@ if result:
     crossdock_matches = result.get("crossdock_matches", [])
     tt4_matches = result.get("tt4_matches", [])
     board_analysis_text = result["board_analysis_text"]
+    executive_summary_text = result["executive_summary_text"]
 
     st.success("PDF staffing report generated successfully.")
+    if _is_ai_analysis_unavailable(board_analysis_text):
+        st.warning(
+            "AI board analysis did not return usable prioritization/action text. "
+            "The PDF used Python fallback prioritization/actions instead. "
+            "Check GROQ_API_KEY, the Groq error text, and the raw AI output below."
+        )
+    with st.expander("Debug: raw AI board analysis text", expanded=False):
+        st.text(board_analysis_text or "No AI analysis text returned.")
 
     if result["override_mode"]:
         st.info(
@@ -4954,6 +5728,72 @@ if result:
         )
         if result.get("deviation_reason"):
             st.caption(f"Your stated reason: {result['deviation_reason']}")
+
+    if tt4_matches:
+        st.markdown("---")
+        st.subheader("TT4 Alerts")
+        st.error(
+            "The following loads on today's board require TT4. "
+            "Verify TT4 is completed before these loads ship."
+        )
+        for match in tt4_matches:
+            with st.expander(
+                f"Load {match.get('load', '')} — {match.get('customer', '')} — {match.get('time', '')}",
+                expanded=True,
+            ):
+                st.markdown(f"**Customer:** {match.get('customer', '')}")
+                st.markdown(f"**Time / Status:** {match.get('time', '')} / {match.get('status', '')}")
+                st.markdown(
+                    f"**Required Action:** Verify TT4 requirement is completed for load "
+                    f"{match.get('load', '')} before this load ships."
+                )
+    elif board_file is not None:
+        st.info("No TT4-required loads detected on today's board.")
+
+    if crossdock_matches:
+        st.markdown("---")
+        st.subheader("Cross Dock Alerts")
+        st.error(
+            "The following Cross Dock pallet(s) matched loads on today's board. "
+            "Verify these pallet(s) are 100% on the correct load before shipping."
+        )
+        for match in crossdock_matches:
+            with st.expander(
+                f"Load {match.get('load', '')} — {match.get('pallets', 0)} pallet(s) at {match.get('location', '')}",
+                expanded=True,
+            ):
+                st.markdown(f"**Board Customer:** {match.get('board_customer', '')}")
+                st.markdown(
+                    f"**Board Time / Door / Status:** "
+                    f"{match.get('board_time', '')} / {match.get('board_door', '')} / {match.get('board_status', '')}"
+                )
+                st.markdown(f"**Cross Dock Customer:** {match.get('customer', '')}")
+                st.markdown(f"**Order/PO:** {match.get('order_po', '')}")
+                st.markdown(f"**Location:** {match.get('location', '')}")
+                st.markdown(
+                    f"**Required Action:** Verify {match.get('pallets', 0)} pallet(s) located at "
+                    f"{match.get('location', '')} are 100% on load {match.get('load', '')} before this load ships."
+                )
+    elif crossdock_file is not None and board_file is not None:
+        st.info("No Cross Dock pallets matched the load numbers on today's board.")
+
+    if oc_matches:
+        st.markdown("---")
+        st.subheader("Opportunity Customer Alerts")
+        st.error(
+            "The following customers on today's board are on the Opportunity Customer List "
+            "and require special DC actions before their loads ship."
+        )
+        for match in oc_matches:
+            c = match["customer"]
+            with st.expander(f"{c['name'].upper()}  -  Priority: {c['priority']}", expanded=True):
+                st.markdown(f"**DC Requirements:** {c['requirements']}")
+                if c["sign_off"]:
+                    st.markdown("**DC Supervisor Sign-Off REQUIRED before this load ships.**")
+                if c["pictures"]:
+                    st.markdown("**Photos REQUIRED:** 3 on dock + 3 during loading (6 total). Email to manager.")
+    elif board_file is not None:
+        st.info("No Opportunity Customers detected on today's board.")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
@@ -4978,12 +5818,26 @@ if result:
     for rec in recommendations:
         st.write(f"• {rec}")
 
+    if board_analysis_text:
+        st.markdown("---")
+        st.subheader("Board Excel Analysis - AI Insights")
+        st.info(
+            "The analysis below was generated by Groq AI reading the board Excel/CSV file directly "
+            "from cell values, including color flags for load checks, TT4s, and Canadian loads."
+        )
+        st.markdown(board_analysis_text)
+
     st.download_button(
         label="Download PDF Staffing Report",
         data=result["output_bytes"],
         file_name="Staffing Board Full Report.pdf",
         mime="application/pdf",
     )
+
+    if executive_summary_text:
+        st.markdown("---")
+        st.subheader("Executive Summary (Email Body)")
+        st.markdown(executive_summary_text)
 
     st.markdown("---")
     st.subheader("Email this report")
