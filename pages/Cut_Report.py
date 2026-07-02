@@ -38,10 +38,10 @@ import streamlit as st
 # --------------------------------------------------------------------------
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
-MAILTO_SAFE_LENGTH = 3600  # links longer than this may fail to open in some clients
+MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts / Shorts From Loads — Rep Email Generator")
+st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -894,6 +894,24 @@ TABLE_COLS = [
 ]
 
 
+NEEDS_REVIEW_PREFIX = "NEEDS REVIEW - raw note: "
+
+
+def format_reason_for_display(reason_code, reason_desc):
+    """
+    Formats the Reason line shown in the email. For an unmapped Daily Cuts
+    reason (stored as "NEEDS REVIEW - raw note: <text>" so it's flagged in
+    the on-screen review table), the email itself just shows the raw note
+    text plainly -- the "NEEDS REVIEW" framing is for your review table, not
+    something a customer service rep needs to see in their inbox.
+    """
+    if reason_desc.startswith(NEEDS_REVIEW_PREFIX):
+        return reason_desc[len(NEEDS_REVIEW_PREFIX):]
+    if reason_code and reason_desc:
+        return f"{reason_code} - {reason_desc}"
+    return reason_code or reason_desc
+
+
 def build_plain_text_table(df):
     """
     Plain-text item list for the mailto body. Customer/Load/Order repeat across
@@ -920,7 +938,7 @@ def build_plain_text_table(df):
         for _, row in sub.iterrows():
             reason_code = val(row, "REASON CODE")
             reason_desc = val(row, "REASON DESCRIPTION")
-            reason = f"{reason_code} - {reason_desc}" if reason_code and reason_desc else (reason_code or reason_desc)
+            reason = format_reason_for_display(reason_code, reason_desc)
 
             lines.append(f"  Item #:      {val(row, 'ITEM NUMBER')}")
             lines.append(f"  Description: {val(row, 'DESCRIPTION')}")
@@ -1073,7 +1091,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f" {rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
+                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -1086,10 +1104,10 @@ if uploaded:
                     if too_long:
                         st.warning(
                             f"This email has {len(group)} items — the link is "
-                            f"{len(mailto_link)} characters, above the ~3600-character "
+                            f"{len(mailto_link)} characters, above the ~1800-character "
                             "range some mail clients handle reliably. Try opening it "
                             "anyway; if Outlook doesn't open or the body looks cut off, "
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
