@@ -6,13 +6,20 @@ Upload the weekly "SHORTS FROM LOADS" workbook and this app will:
   2. Match each customer to their CS Rep + email using the
      CUSTOMER SERVICE MASTER LIST tab
   3. Build ONE email per rep containing every affected line item
-  4. Let you download ready-to-send .eml files (opens directly in
-     Outlook / Mail, addressed and formatted, just hit Send)
+  4. Give you an "Open email" button that opens the message directly in
+     your default mail app (Outlook), addressed, subject filled in, and
+     the item table in the body — you just review and hit Send.
+
+This uses mailto: links (same pattern as the Shift Closeout page's
+"Email this report" button), so it's handled by your browser/OS, not the
+server. That means it works the same whether you run this locally or on
+a hosted server — no Outlook desktop automation / pywin32 required.
 
 Run with:  streamlit run cuts_email_generator.py
 """
 
 import io
+import urllib.parse
 import zipfile
 from html import escape
 
@@ -22,21 +29,17 @@ import streamlit as st
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Outlook desktop automation (Windows only). If this isn't available -
-# e.g. you're on Mac/Linux or running the app on a hosted server instead
-# of your own Windows machine - the app falls back to .eml downloads.
-try:
-    import win32com.client  # pywin32
-    OUTLOOK_AVAILABLE = True
-except ImportError:
-    OUTLOOK_AVAILABLE = False
-
 # --------------------------------------------------------------------------
 # CONFIG — adjust here if sheet names / sender address ever change
 # --------------------------------------------------------------------------
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 FROM_EMAIL = "customerservice@resers.com"  # <-- change to your real sender
+
+# mailto: links break in most mail clients past ~2000 characters. If a
+# rep's plain-text table would exceed this, we skip the mailto button for
+# them and point at the .eml download instead (no length limit there).
+MAILTO_SAFE_LENGTH = 1800
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
 st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
@@ -46,16 +49,6 @@ st.caption(
 )
 
 uploaded = st.file_uploader("Upload the workbook (.xlsx)", type=["xlsx"])
-
-if OUTLOOK_AVAILABLE:
-    st.success("✅ Outlook detected — emails will open directly in Outlook, ready to press Send.")
-else:
-    st.warning(
-        "⚠️ Outlook desktop automation isn't available in this environment "
-        "(needs Windows + Outlook desktop + `pip install pywin32`, running "
-        "locally on your machine — not a hosted server). Falling back to "
-        "`.eml` downloads, which also open ready-to-send when double-clicked."
-    )
 
 
 # --------------------------------------------------------------------------
@@ -169,17 +162,23 @@ def extract_shift_rows(wb, sheet_name):
     return rows
 
 
+# --------------------------------------------------------------------------
+# EMAIL BUILDING
+# --------------------------------------------------------------------------
+TABLE_COLS = [
+    "CUSTOMER", "LOAD", "ORDER NUMBER", "ITEM NUMBER", "DESCRIPTION",
+    "QUANTITY CASES CUT", "REASON CODE", "REASON DESCRIPTION",
+]
+
+
 def build_html_table(df):
-    cols = [
-        "CUSTOMER", "LOAD", "ORDER NUMBER", "ITEM NUMBER", "DESCRIPTION",
-        "QUANTITY CASES CUT", "REASON CODE", "REASON DESCRIPTION",
-    ]
+    """HTML version of the table, used for the .eml download (Outlook renders it as a real table)."""
     html = [
         '<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;'
         'font-family:Calibri,Arial,sans-serif;font-size:13px;">'
     ]
     html.append("<tr>")
-    for c in cols:
+    for c in TABLE_COLS:
         html.append(
             f'<th style="border:1px solid #999999;background:#4472C4;color:#ffffff;'
             f'padding:4px 8px;text-align:left;">{escape(c)}</th>'
@@ -188,7 +187,7 @@ def build_html_table(df):
 
     for _, row in df.iterrows():
         html.append("<tr>")
-        for c in cols:
+        for c in TABLE_COLS:
             val = row[c]
             val = "" if pd.isna(val) else val
             html.append(
@@ -199,22 +198,39 @@ def build_html_table(df):
     return "".join(html)
 
 
-def create_outlook_draft(to_email, subject, html_table):
+def build_plain_text_table(df):
     """
-    Opens a real Outlook compose window (Display, not Send) pre-filled
-    with To / Subject / HTML body. Requires Outlook desktop + pywin32,
-    and must run on the same Windows machine as Outlook.
+    Plain-text, column-aligned version of the table for the mailto: body
+    (mailto bodies can't contain HTML). Long text fields are capped so the
+    table stays readable and the overall link stays under the length limit.
     """
-    outlook = win32com.client.Dispatch("Outlook.Application")
-    mail = outlook.CreateItem(0)  # 0 = olMailItem
-    mail.To = to_email or ""
-    mail.Subject = subject
-    mail.HTMLBody = (
-        f"<html><body style='font-family:Calibri,Arial,sans-serif;font-size:13px;'>"
-        f"{html_table}<p style='margin-top:16px;'>Thank you.</p></body></html>"
+    max_col_width = 28
+    widths = {}
+    for c in TABLE_COLS:
+        col_vals = ["" if pd.isna(v) else str(v) for v in df[c]]
+        widths[c] = min(max(len(c), max(len(v) for v in col_vals)), max_col_width)
+
+    def cell(value, width):
+        text = "" if pd.isna(value) else str(value)
+        if len(text) > width:
+            text = text[: width - 1] + "…"
+        return text.ljust(width)
+
+    header = "  ".join(c.ljust(widths[c]) for c in TABLE_COLS)
+    separator = "-" * len(header)
+    lines = [header, separator]
+    for _, row in df.iterrows():
+        lines.append("  ".join(cell(row[c], widths[c]) for c in TABLE_COLS))
+    return "\n".join(lines)
+
+
+def build_mailto(to_addr, subject, body):
+    """Build a mailto: link that prefills recipient, subject, and body."""
+    params = urllib.parse.urlencode(
+        {"subject": subject, "body": body},
+        quote_via=urllib.parse.quote,
     )
-    mail.Display(True)  # opens the compose window; user reviews and clicks Send
-    return mail
+    return f"mailto:{(to_addr or '').strip()}?{params}"
 
 
 def build_eml(to_email, subject, html_table, from_email=FROM_EMAIL):
@@ -228,6 +244,16 @@ def build_eml(to_email, subject, html_table, from_email=FROM_EMAIL):
     )
     msg.attach(MIMEText(full_html, "html"))
     return msg.as_bytes()
+
+
+def build_subject(group):
+    order_numbers = sorted({str(x) for x in group["ORDER NUMBER"]})
+    customers = sorted({str(x) for x in group["CUSTOMER"]})
+    loads = sorted({str(x) for x in group["LOAD"] if x not in (None, "")})
+    return (
+        f"{', '.join(order_numbers)} - CUT - {', '.join(customers)} "
+        f"- Load# {', '.join(loads) if loads else 'N/A'}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -289,16 +315,14 @@ if uploaded:
         with zipfile.ZipFile(zip_buffer, "w") as zf:
             for rep, group in matched.groupby("REP"):
                 email_addr = rep_to_email.get(rep, "")
-                order_numbers = sorted({str(x) for x in group["ORDER NUMBER"]})
-                customers = sorted({str(x) for x in group["CUSTOMER"]})
-                loads = sorted({str(x) for x in group["LOAD"] if x not in (None, "")})
-
-                subject = (
-                    f"{', '.join(order_numbers)} - CUT - {', '.join(customers)} "
-                    f"- Load# {', '.join(loads) if loads else 'N/A'}"
-                )
+                subject = build_subject(group)
+                plain_table = build_plain_text_table(group)
                 html_table = build_html_table(group)
                 safe_name = rep.replace(" ", "_").replace("/", "-")
+
+                email_body = f"{plain_table}\n\nThank you."
+                mailto_link = build_mailto(email_addr, subject, email_body)
+                too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
                 with st.expander(
                     f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
@@ -309,19 +333,24 @@ if uploaded:
                     st.markdown(html_table, unsafe_allow_html=True)
                     st.write("Thank you.")
 
-                    if OUTLOOK_AVAILABLE:
-                        if st.button(
-                            "📤 Open in Outlook (ready to send)", key=f"outlook_{rep}"
-                        ):
-                            try:
-                                create_outlook_draft(email_addr, subject, html_table)
-                                st.success(f"Opened in Outlook for {rep} — review and click Send.")
-                            except Exception as e:
-                                st.error(f"Couldn't open Outlook: {e}")
+                    if not email_addr:
+                        st.error("No email on file for this rep — add one to the master list.")
+                    elif too_long:
+                        st.info(
+                            f"This email has {len(group)} item(s), which is too long for a "
+                            "mailto link to open reliably. Use the .eml download below instead — "
+                            "it opens the same pre-filled message with no length limit."
+                        )
+                    else:
+                        st.link_button("📤 Open email (opens in Outlook, ready to send)", mailto_link)
+                        st.caption(
+                            f"Opens your default mail app addressed to {email_addr}. "
+                            "Review it and click Send."
+                        )
 
                     eml_bytes = build_eml(email_addr, subject, html_table)
                     st.download_button(
-                        "Download .eml (fallback — also opens ready to send)",
+                        "Download .eml (also opens ready to send — has the formatted table)",
                         data=eml_bytes,
                         file_name=f"{safe_name}_cuts_email.eml",
                         mime="message/rfc822",
@@ -330,32 +359,11 @@ if uploaded:
                     zf.writestr(f"{safe_name}_cuts_email.eml", eml_bytes)
 
         st.markdown("---")
-        col1, col2 = st.columns(2)
-        with col1:
-            if OUTLOOK_AVAILABLE:
-                if st.button("📤 Open ALL emails in Outlook (one window each)"):
-                    opened = 0
-                    for rep, group in matched.groupby("REP"):
-                        email_addr = rep_to_email.get(rep, "")
-                        order_numbers = sorted({str(x) for x in group["ORDER NUMBER"]})
-                        customers = sorted({str(x) for x in group["CUSTOMER"]})
-                        loads = sorted({str(x) for x in group["LOAD"] if x not in (None, "")})
-                        subject = (
-                            f"{', '.join(order_numbers)} - CUT - {', '.join(customers)} "
-                            f"- Load# {', '.join(loads) if loads else 'N/A'}"
-                        )
-                        try:
-                            create_outlook_draft(email_addr, subject, build_html_table(group))
-                            opened += 1
-                        except Exception as e:
-                            st.error(f"Couldn't open Outlook draft for {rep}: {e}")
-                    st.success(f"Opened {opened} draft(s) in Outlook — review each and click Send.")
-        with col2:
-            st.download_button(
-                "⬇️ Download ALL as .zip (fallback)",
-                data=zip_buffer.getvalue(),
-                file_name="cuts_emails.zip",
-                mime="application/zip",
-            )
+        st.download_button(
+            "⬇️ Download ALL emails as .zip",
+            data=zip_buffer.getvalue(),
+            file_name="cuts_emails.zip",
+            mime="application/zip",
+        )
 else:
     st.info("Upload the workbook above to get started.")
