@@ -90,6 +90,65 @@ MASTER_FIELD_ALIASES = {
     "EMAIL": ["email", "emailaddress", "repemail"],
 }
 
+# "Daily Cuts" front sheet: a simpler raw log (no CUSTOMER, no formal reason
+# code) that gets expanded into the full shift-cuts row format. TRIP NUMBER
+# maps to LOAD, CASE COUNT maps to QUANTITY CASES CUT, and REASON CODE here
+# is actually informal shorthand text (e.g. "no inv.", "qh hold") rather than
+# a formal code -- handled separately, see match_reason_code.
+DAILY_CUTS_FIELD_ALIASES = {
+    "TRIP_NUMBER": ["tripnumber", "trip", "load", "loadnumber"],
+    "ORDER_NUMBER": ["ordernumber", "orderno", "order"],
+    "ITEM_NUMBER": ["itemnumber", "itemno", "item"],
+    "CASE_COUNT": ["casecount", "cases", "quantitycasescut", "qtycut"],
+    "REASON_TEXT": ["reasoncode", "reason"],
+}
+DAILY_CUTS_REQUIRED_FIELDS = ["ORDER_NUMBER", "ITEM_NUMBER"]
+
+ITEM_MASTER_FIELD_ALIASES = {
+    "ITEM_NUMBER": ["itemnumber"],
+    "DESCRIPTION": ["itemdescription", "description"],
+}
+
+# Best-effort keyword -> formal cut code mapping for the informal shorthand
+# notes in Daily Cuts' REASON CODE column. This is NOT a reliable 1:1
+# mapping -- checked against real data, the same shorthand (e.g. "no inv.")
+# has been used for genuinely different formal codes depending on the
+# specific situation, which only a person reviewing it would know. Only
+# keywords with a real, checked precedent or low ambiguity are mapped here;
+# anything else (including "no inv." and "lost" -- deliberately NOT mapped,
+# see above) is left unmapped and flagged for manual review rather than
+# guessing. Checked in order; first match wins.
+REASON_KEYWORD_MAP = [
+    (["short packaging", "short pack", "short coded", "shortcoded"], "5F"),
+    (["qh hold", "qa hold", "quality hold"], "1Q"),
+    (["reformul"], "2Q"),
+    (["sched"], "2F"),
+    (["equipment", "breakdown"], "3F"),
+    (["batch qty", "batch quantity"], "4F"),
+    (["capacity exceeded"], "0F"),
+    (["damage"], "3D"),
+    (["picking", "pick error"], "4D"),
+    (["distribution capacity"], "5D"),
+    (["receiving error"], "1D"),
+    (["cancel"], "4C"),
+    (["order entry"], "2C"),
+    (["deleted item"], "1C"),
+    (["late order"], "3C"),
+    (["transfer late", "trailer late"], "2Z"),
+    (["routed early"], "1Z"),
+    (["substitut"], "3S"),
+    (["order volume", "unusual order"], "2S"),
+    (["qty too small", "quantity too small"], "1S"),
+    (["shipped complete"], "2Y"),
+    (["sample"], "1Y"),
+    (["raw material", "material shortage"], "1R"),
+    (["pkg shortage", "packaging shortage"], "2R"),
+    (["broker non", "broker short/delay"], "1B"),
+    (["broker purchas"], "2B"),
+    (["broker", "trans truck late"], "3B"),
+    (["broker short coded"], "4B"),
+]
+
 
 def _normalize_header(text):
     """Lowercase and strip all punctuation/whitespace for robust header matching."""
@@ -284,6 +343,206 @@ def extract_shift_rows(wb, sheet_name):
     return rows
 
 
+def _is_blank_cell(value):
+    """True for None or a string that's empty/whitespace-only (Daily Cuts uses ' ' as a spacer)."""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def clean_item_number(value):
+    """Strips a leading/trailing '*' marker and whitespace, preserving the rest as-is."""
+    if _is_blank_cell(value):
+        return ""
+    return str(value).strip().strip("*").strip()
+
+
+def normalize_item_key(value):
+    """
+    Normalizes an item number for matching against the Item Master List.
+    Both sheets may store the same item as a float (e.g. 71117.1482) or a
+    string with a leading zero / trailing zero / asterisk (e.g.
+    "*06795.28681" vs 6795.28681) -- parsing as a float and formatting with
+    fixed precision makes those line up. Falls back to an uppercased string
+    if it isn't numeric at all.
+    """
+    text = clean_item_number(value)
+    if not text:
+        return ""
+    try:
+        return f"{float(text):.5f}"
+    except (ValueError, TypeError):
+        return text.upper()
+
+
+def build_item_description_lookup(wb, sheet_name="ITEM MASTER LIST"):
+    """Reads the Item Master List sheet and returns {normalized_item_key: description}."""
+    if sheet_name not in wb.sheetnames:
+        return {}
+    ws = wb[sheet_name]
+    header_row_idx, col_map = _find_header_row_and_columns(
+        ws, ITEM_MASTER_FIELD_ALIASES, ["ITEM_NUMBER", "DESCRIPTION"]
+    )
+    if header_row_idx is None:
+        return {}
+
+    lookup = {}
+    item_col = col_map["ITEM_NUMBER"]
+    desc_col = col_map["DESCRIPTION"]
+    for r in range(header_row_idx + 1, ws.max_row + 1):
+        item_val = ws.cell(row=r, column=item_col).value
+        desc_val = ws.cell(row=r, column=desc_col).value
+        key = normalize_item_key(item_val)
+        if key and desc_val not in (None, ""):
+            lookup.setdefault(key, str(desc_val).strip())
+    return lookup
+
+
+def build_cut_codes_lookup(wb, sheet_name="CUT CODES MASTER LIST"):
+    """
+    Reads the Cut Codes Master List sheet and returns {code: description}.
+    This sheet has no header row -- it's laid out as section labels (e.g.
+    "PLANT") followed by rows of (code, description) in two adjacent
+    columns, so this scans for the two columns holding that pattern rather
+    than matching a header.
+    """
+    if sheet_name not in wb.sheetnames:
+        return {}
+    ws = wb[sheet_name]
+    code_re = re.compile(r"^\d[A-Z]$|^[A-Z]\d$")
+    lookup = {}
+    for row in ws.iter_rows():
+        for i in range(len(row) - 1):
+            code_val = row[i].value
+            desc_val = row[i + 1].value
+            if (
+                isinstance(code_val, str)
+                and code_re.match(code_val.strip())
+                and isinstance(desc_val, str)
+                and desc_val.strip()
+            ):
+                lookup.setdefault(code_val.strip().upper(), desc_val.strip())
+    return lookup
+
+
+def match_reason_code(raw_text, cut_codes_lookup):
+    """
+    Best-effort match of Daily Cuts' informal shorthand reason text (e.g.
+    "qh hold", "short packaging") to a formal cut code, using
+    REASON_KEYWORD_MAP. This is NOT guaranteed accurate -- see the caveat on
+    REASON_KEYWORD_MAP. Returns (code, description, matched: bool). When
+    unmatched, code/description are ("", "") and the raw text should be
+    preserved separately so nothing is lost.
+    """
+    text = (raw_text or "").strip().lower()
+    if not text:
+        return "", "", False
+    for keywords, code in REASON_KEYWORD_MAP:
+        if any(kw in text for kw in keywords):
+            desc = cut_codes_lookup.get(code, "")
+            return code, desc, True
+    return "", "", False
+
+
+def parse_daily_cuts_sheet(wb):
+    """
+    Parses the "Daily Cuts" front sheet (always the FIRST worksheet in the
+    workbook, whatever it's named) into the same row-dict shape that
+    extract_shift_rows produces for the 1ST/2ND SHIFT CUTS sheets, so the
+    rest of the pipeline (manifest matching, rep lookup, email generation)
+    doesn't need to know which source it came from.
+
+    Layout: TRIP NUMBER, ORDER NUMBER, ITEM NUMBER, CASE COUNT, REASON CODE
+    (informal shorthand, not a formal code -- see match_reason_code). Blank
+    rows and single-space "spacer" rows separate order groups; TRIP NUMBER
+    forward-fills within a group the same way LOAD does elsewhere. There's
+    no shift column -- everything is 1st shift until a row containing a
+    cell that starts with "2ND" (case-insensitive) is found, after which
+    everything is 2nd shift. CUSTOMER isn't available here at all yet --
+    every row starts as UNKNOWN, to be filled in later by the shipping
+    manifest step exactly like the other source format.
+
+    Returns None if the first sheet doesn't look like this format at all
+    (missing ORDER NUMBER / ITEM NUMBER columns), so the caller can fall
+    back to reading 1ST/2ND SHIFT CUTS sheets directly for older workbooks.
+    """
+    ws = wb.worksheets[0]
+    header_row_idx, col_map = _find_header_row_and_columns(
+        ws, DAILY_CUTS_FIELD_ALIASES, DAILY_CUTS_REQUIRED_FIELDS
+    )
+    if header_row_idx is None:
+        return None
+
+    item_desc_lookup = build_item_description_lookup(wb)
+    cut_codes_lookup = build_cut_codes_lookup(wb)
+
+    trip_col = col_map.get("TRIP_NUMBER")
+    order_col = col_map["ORDER_NUMBER"]
+    item_col = col_map["ITEM_NUMBER"]
+    case_col = col_map.get("CASE_COUNT")
+    reason_col = col_map.get("REASON_TEXT")
+
+    rows = []
+    last_load = None
+    last_order = None
+    current_shift = "1St Shift"
+
+    for r in range(header_row_idx + 1, ws.max_row + 1):
+        row_values = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
+        if any(
+            isinstance(v, str) and re.match(r"^\s*2nd\b", v, re.IGNORECASE)
+            for v in row_values
+        ):
+            current_shift = "2Nd Shift"
+            continue
+
+        trip = ws.cell(row=r, column=trip_col).value if trip_col else None
+        order_no = ws.cell(row=r, column=order_col).value
+        item_no_raw = ws.cell(row=r, column=item_col).value
+        case_count = ws.cell(row=r, column=case_col).value if case_col else None
+        reason_text = ws.cell(row=r, column=reason_col).value if reason_col else None
+
+        if all(_is_blank_cell(v) for v in (trip, order_no, item_no_raw, case_count, reason_text)):
+            last_order = None  # a spacer row ends the current order group
+            continue
+
+        if not _is_blank_cell(trip):
+            last_load = trip
+
+        if not _is_blank_cell(order_no):
+            last_order = order_no
+
+        if _is_blank_cell(item_no_raw) or last_order is None:
+            continue  # not a real line item
+
+        item_no = clean_item_number(item_no_raw)
+        item_key = normalize_item_key(item_no)
+        description = item_desc_lookup.get(item_key, "Not Found")
+
+        raw_reason = "" if _is_blank_cell(reason_text) else str(reason_text).strip()
+        code, code_desc, matched = match_reason_code(raw_reason, cut_codes_lookup)
+        if matched:
+            reason_code_out = code
+            reason_description_out = code_desc
+        else:
+            reason_code_out = ""
+            reason_description_out = f"NEEDS REVIEW - raw note: {raw_reason}" if raw_reason else ""
+
+        rows.append(
+            {
+                "Shift": current_shift,
+                "CUSTOMER": "UNKNOWN",
+                "LOAD": last_load,
+                "ORDER NUMBER": last_order,
+                "ITEM NUMBER": item_no,
+                "DESCRIPTION": description,
+                "QUANTITY CASES CUT": case_count,
+                "REASON CODE": reason_code_out,
+                "REASON DESCRIPTION": reason_description_out,
+            }
+        )
+
+    return rows
+
+
 # --------------------------------------------------------------------------
 # SHIPPING MANIFEST (PDF) PARSING
 # --------------------------------------------------------------------------
@@ -297,9 +556,15 @@ def extract_shift_rows(wb, sheet_name):
 # starts with "RESER'S -" (e.g. "RESER'S - TK - TOPEKA DISTRIBUTION CENTER",
 # "RESER'S - NC - HALIFAX DISTRIBUTION CENTER") regardless of which facility
 # code is used, and are treated as non-customer stops (skipped for matching).
+#
+# Some stops are also the CARRIER's own cross-dock/relay terminal rather than
+# a real customer (e.g. "FRZF - 4   FFE - Butler, MO", where "FRZF" is also
+# the load's own carrier code from the CARR/SCT TR line) -- these are
+# likewise skipped once the current load's carrier code is known.
 MANIFEST_STOP_HEADER_RE = re.compile(
     r"^\s*(\d{1,2})\s+(\d{4,}|[A-Z]{2,4})\s+(?:-\s*\d+\s+)?(.+?)\s*$"
 )
+MANIFEST_CARRIER_RE = re.compile(r"^\s*CARR/SCT\s+TR:\s*([A-Z0-9]{2,6})\b", re.IGNORECASE)
 
 # Matches an order number with its trailing load-sequence suffix, e.g.
 # "3600012594-520" -> captures "3600012594".
@@ -316,6 +581,15 @@ MANIFEST_ORDER_ANCHOR_RE = re.compile(r"^(\d{6,12})-\d+$")
 INLINE_CUSTID_X_RANGE = (395, 445)
 INLINE_NAME_X_RANGE = (445, 505)
 INLINE_ORDER_COL_MAX_X = 200
+
+# The CUST NAME column hard-wraps at exactly this many characters per physical
+# line (calibrated from the actual report: "DISTRIBUTO" and "PERISHABLE" both
+# hit exactly 10 and are the longest fragments observed). A fragment that
+# reaches this length, followed immediately by another alphabetic fragment,
+# is almost certainly one word split mid-way by the wrap (e.g. "DISTRIBUTO"
+# + "RS" -> "DISTRIBUTORS") rather than two separate words, so those get
+# joined with no space instead of the usual space-separated join.
+NAME_WRAP_CHAR_LIMIT = 10
 
 
 def normalize_order_id(value):
@@ -336,22 +610,65 @@ def normalize_order_id(value):
     return digits
 
 
+def clean_customer_name(name):
+    """
+    Strips numbers out of a resolved customer name -- store numbers, or
+    stray CUSTID/PO digits that leaked in from a neighboring column during
+    reconstruction. Removes any token that contains a digit at all (covers
+    plain numbers like "6072" as well as store/location codes like "T3727"
+    or "DC5"), then tidies up any leftover dangling dashes/punctuation and
+    extra whitespace.
+    """
+    if not name:
+        return name
+    tokens = name.split()
+    kept = [t for t in tokens if not any(ch.isdigit() for ch in t)]
+    cleaned = " ".join(kept)
+    cleaned = re.sub(r"[-,]\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or name  # never return an empty string -- fall back to original
+
+
+def join_name_fragments(fragments):
+    """
+    Joins wrapped CUST NAME fragments (each already known to be pure text,
+    sorted top-to-bottom) into one name. A fragment that hit the column's
+    hard-wrap character limit, followed by another alphabetic fragment, is
+    treated as a mid-word split and joined with no space; otherwise a space
+    is inserted, matching normal word-by-word wrapping.
+
+    Checks each fragment's OWN original length (not the cumulative merged
+    result) against the wrap limit -- otherwise a short fragment appended
+    onto an already-long merged word (e.g. "SPRINGFIEL" + "D" -> "SPRINGFIELD",
+    now 11 characters) would incorrectly look "at the limit" again and
+    swallow the next real word too (producing "SPRINGFIELDDELI").
+    """
+    if not fragments:
+        return ""
+    result = fragments[0]
+    prev_len = len(fragments[0])
+    for frag in fragments[1:]:
+        if prev_len >= NAME_WRAP_CHAR_LIMIT and frag.isalpha():
+            result += frag  # mid-word wrap -- no space
+        else:
+            result += " " + frag
+        prev_len = len(frag)
+    return result
+
+
 def parse_manifest_inline_fallback(pdf_file):
     """
     Fallback parser for orders that never get a clean stop-header line --
-    typically loads that transfer through one of our own warehouses en route,
-    where the ultimate customer is only ever mentioned inline on the per-order
-    detail line's narrow CUST NAME column (which wraps across several short
-    physical lines, sometimes splitting a single word mid-way).
+    typically loads that transfer through one of our own warehouses (or a
+    carrier's own relay point) en route, where the ultimate customer is only
+    ever mentioned inline on the per-order detail line's narrow CUST NAME
+    column (which wraps across several short physical lines, occasionally
+    splitting a single word mid-way -- see join_name_fragments).
 
     Uses word x/y positions (not flattened text) to reconstruct each order's
     CUST NAME column specifically, ignoring what's happening in neighboring
-    columns on the same wrapped lines. This recovers a usable, human-readable
-    customer name in most cases, but reconstruction can occasionally insert
-    an extra space where a long word wrapped mid-word (e.g. "MERCHANT
-    DISTRIBUTO RS" instead of "MERCHANT DISTRIBUTORS") -- still clearly
-    identifiable, but callers should treat this as lower-confidence than the
-    primary stop-header method.
+    columns on the same wrapped lines. Numbers (store numbers, or stray
+    CUSTID/PO digits) are stripped from the result.
 
     Returns {order_number_str: reconstructed_name}.
     """
@@ -379,8 +696,10 @@ def parse_manifest_inline_fallback(pdf_file):
                     if INLINE_NAME_X_RANGE[0] <= w["x0"] < INLINE_NAME_X_RANGE[1]
                 ]
                 if name_words:
-                    name = " ".join(w["text"] for w in sorted(name_words, key=lambda w: w["top"]))
-                    order_to_name.setdefault(order_no, name)
+                    fragments = [w["text"] for w in sorted(name_words, key=lambda w: w["top"])]
+                    name = clean_customer_name(join_name_fragments(fragments))
+                    if name:
+                        order_to_name.setdefault(order_no, name)
 
     return order_to_name
 
@@ -392,41 +711,52 @@ def parse_shipping_manifest(pdf_file):
       order_to_customer: {order_number_str: customer_name}
       order_confidence:  {order_number_str: "exact" | "inline"}
 
-    Primary method: each load's stops are read in order. A stop whose name
-    starts with "RESER'S -" is one of our own warehouses (a pickup, or an
-    internal transfer hop) and is not a customer -- skipped. Any other stop's
-    header line gives the real customer name (marked "exact"); every order
-    number appearing before the next stop header is attributed to it. Orders
-    appear multiple times across a load's stops -- only the real-customer
-    occurrence sets the attribution, internal-warehouse occurrences are
-    skipped, so this resolves correctly without needing to match them up by
-    CUSTID.
+    Primary method: each load's stops are read in order, tracking the load's
+    own carrier code from its "CARR/SCT TR:" line. A stop is treated as a
+    non-customer (skipped) if its name starts with "RESER'S -" (one of our
+    own warehouses) or if its facility code matches the load's own carrier
+    code (the carrier's own cross-dock/relay terminal, not a real customer).
+    Any other stop's header line gives the real customer name (marked
+    "exact"); every order number appearing before the next stop header is
+    attributed to it.
 
-    Fallback: some loads transfer through one of our own warehouses and never
-    have a real external stop at all in this manifest (the actual delivery is
-    a separate, later leg not included here). For orders left unresolved by
-    the primary method, parse_manifest_inline_fallback recovers a best-effort
-    name from the per-order line's own narrow CUST NAME column (marked
-    "inline" -- see that function's docstring for the accuracy trade-off).
+    Fallback: some loads never have a real external stop at all in this
+    manifest (the actual delivery is a separate, later leg not included
+    here). For orders left unresolved by the primary method,
+    parse_manifest_inline_fallback recovers a best-effort name from the
+    per-order line's own narrow CUST NAME column (marked "inline" -- see
+    that function's docstring for the accuracy trade-off).
     """
     pdf_file.seek(0)
     order_to_customer = {}
     order_confidence = {}
     current_customer = None
+    current_carrier_code = None
 
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             text = page.extract_text(layout=True) or ""
             for line in text.split("\n"):
+                carrier_m = MANIFEST_CARRIER_RE.match(line)
+                if carrier_m:
+                    current_carrier_code = carrier_m.group(1).upper()
+                    continue
+
                 m = MANIFEST_STOP_HEADER_RE.match(line)
                 if m:
-                    _, _stop_code, rest = m.groups()
+                    stop_code, rest = m.group(2), m.group(3)
                     rest_clean = re.sub(r"\s+", " ", rest.strip())
-                    if rest_clean.upper().startswith("RESER'S"):
-                        current_customer = None  # our own warehouse, not a customer
+                    is_internal = rest_clean.upper().startswith("RESER'S")
+                    is_carrier_relay = (
+                        current_carrier_code is not None
+                        and stop_code.upper() == current_carrier_code
+                    )
+                    if is_internal or is_carrier_relay:
+                        current_customer = None
                     else:
-                        current_customer = rest_clean
+                        current_customer = clean_customer_name(rest_clean)
                     continue
+
                 for order_match in MANIFEST_ORDER_RE.finditer(line):
                     order_no = order_match.group(1)
                     if current_customer:
@@ -611,19 +941,33 @@ def build_mailto(to_addr, subject, body):
 if uploaded:
     wb = openpyxl.load_workbook(uploaded, data_only=True)
 
-    missing = [s for s in SHIFT_SHEETS + [MASTER_SHEET] if s not in wb.sheetnames]
-    if missing:
-        st.error(f"Missing expected sheet(s) in this workbook: {missing}")
+    if MASTER_SHEET not in wb.sheetnames:
+        st.error(f"Missing expected sheet in this workbook: {MASTER_SHEET}")
         st.stop()
 
     customer_to_rep, rep_to_email = build_rep_directory(wb)
 
-    all_rows = []
-    for sheet in SHIFT_SHEETS:
-        all_rows.extend(extract_shift_rows(wb, sheet))
+    all_rows = parse_daily_cuts_sheet(wb)
+    if all_rows is not None:
+        st.caption(
+            f"Read line items from the '{wb.worksheets[0].title}' sheet (first tab) "
+            f"— {len(all_rows)} item(s) found, expanded with item descriptions and "
+            "cut-code lookups."
+        )
+    else:
+        missing = [s for s in SHIFT_SHEETS if s not in wb.sheetnames]
+        if missing:
+            st.error(
+                f"The first sheet isn't in the expected Daily Cuts format, and this "
+                f"workbook is also missing: {missing}. Can't find any line items to process."
+            )
+            st.stop()
+        all_rows = []
+        for sheet in SHIFT_SHEETS:
+            all_rows.extend(extract_shift_rows(wb, sheet))
 
     if not all_rows:
-        st.warning("No line items found in the shift cuts sheets.")
+        st.warning("No line items found.")
         st.stop()
 
     df = pd.DataFrame(all_rows)
