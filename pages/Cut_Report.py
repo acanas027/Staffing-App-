@@ -22,6 +22,15 @@ import streamlit as st
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+# Outlook desktop automation (Windows only). If this isn't available -
+# e.g. you're on Mac/Linux or running the app on a hosted server instead
+# of your own Windows machine - the app falls back to .eml downloads.
+try:
+    import win32com.client  # pywin32
+    OUTLOOK_AVAILABLE = True
+except ImportError:
+    OUTLOOK_AVAILABLE = False
+
 # --------------------------------------------------------------------------
 # CONFIG — adjust here if sheet names / sender address ever change
 # --------------------------------------------------------------------------
@@ -37,6 +46,16 @@ st.caption(
 )
 
 uploaded = st.file_uploader("Upload the workbook (.xlsx)", type=["xlsx"])
+
+if OUTLOOK_AVAILABLE:
+    st.success("✅ Outlook detected — emails will open directly in Outlook, ready to press Send.")
+else:
+    st.warning(
+        "⚠️ Outlook desktop automation isn't available in this environment "
+        "(needs Windows + Outlook desktop + `pip install pywin32`, running "
+        "locally on your machine — not a hosted server). Falling back to "
+        "`.eml` downloads, which also open ready-to-send when double-clicked."
+    )
 
 
 # --------------------------------------------------------------------------
@@ -180,7 +199,25 @@ def build_html_table(df):
     return "".join(html)
 
 
-def build_eml(to_email, subject, html_table, from_email=FROM_EMAIL):
+def create_outlook_draft(to_email, subject, html_table):
+    """
+    Opens a real Outlook compose window (Display, not Send) pre-filled
+    with To / Subject / HTML body. Requires Outlook desktop + pywin32,
+    and must run on the same Windows machine as Outlook.
+    """
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    mail = outlook.CreateItem(0)  # 0 = olMailItem
+    mail.To = to_email or ""
+    mail.Subject = subject
+    mail.HTMLBody = (
+        f"<html><body style='font-family:Calibri,Arial,sans-serif;font-size:13px;'>"
+        f"{html_table}<p style='margin-top:16px;'>Thank you.</p></body></html>"
+    )
+    mail.Display(True)  # opens the compose window; user reviews and clicks Send
+    return mail
+
+
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_email
@@ -272,9 +309,19 @@ if uploaded:
                     st.markdown(html_table, unsafe_allow_html=True)
                     st.write("Thank you.")
 
+                    if OUTLOOK_AVAILABLE:
+                        if st.button(
+                            "📤 Open in Outlook (ready to send)", key=f"outlook_{rep}"
+                        ):
+                            try:
+                                create_outlook_draft(email_addr, subject, html_table)
+                                st.success(f"Opened in Outlook for {rep} — review and click Send.")
+                            except Exception as e:
+                                st.error(f"Couldn't open Outlook: {e}")
+
                     eml_bytes = build_eml(email_addr, subject, html_table)
                     st.download_button(
-                        "Download .eml (ready to send)",
+                        "Download .eml (fallback — also opens ready to send)",
                         data=eml_bytes,
                         file_name=f"{safe_name}_cuts_email.eml",
                         mime="message/rfc822",
@@ -283,11 +330,32 @@ if uploaded:
                     zf.writestr(f"{safe_name}_cuts_email.eml", eml_bytes)
 
         st.markdown("---")
-        st.download_button(
-            "⬇️ Download ALL emails as .zip",
-            data=zip_buffer.getvalue(),
-            file_name="cuts_emails.zip",
-            mime="application/zip",
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            if OUTLOOK_AVAILABLE:
+                if st.button("📤 Open ALL emails in Outlook (one window each)"):
+                    opened = 0
+                    for rep, group in matched.groupby("REP"):
+                        email_addr = rep_to_email.get(rep, "")
+                        order_numbers = sorted({str(x) for x in group["ORDER NUMBER"]})
+                        customers = sorted({str(x) for x in group["CUSTOMER"]})
+                        loads = sorted({str(x) for x in group["LOAD"] if x not in (None, "")})
+                        subject = (
+                            f"{', '.join(order_numbers)} - CUT - {', '.join(customers)} "
+                            f"- Load# {', '.join(loads) if loads else 'N/A'}"
+                        )
+                        try:
+                            create_outlook_draft(email_addr, subject, build_html_table(group))
+                            opened += 1
+                        except Exception as e:
+                            st.error(f"Couldn't open Outlook draft for {rep}: {e}")
+                    st.success(f"Opened {opened} draft(s) in Outlook — review each and click Send.")
+        with col2:
+            st.download_button(
+                "⬇️ Download ALL as .zip (fallback)",
+                data=zip_buffer.getvalue(),
+                file_name="cuts_emails.zip",
+                mime="application/zip",
+            )
 else:
     st.info("Upload the workbook above to get started.")
