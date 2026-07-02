@@ -37,7 +37,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
+st.title("Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -110,18 +110,28 @@ def _find_header_row_and_columns(ws, field_aliases, required_fields, max_scan_ro
 # --------------------------------------------------------------------------
 # PARSING HELPERS
 # --------------------------------------------------------------------------
+# Matches a section-header cell like "HEIDE MASON - HeideM@resers.com":
+# group(1) = rep name, group(2) = email. Some newer master lists embed the
+# email directly in the header text like this instead of a separate column.
+NAME_EMAIL_RE = re.compile(r"^\s*(.*?)\s*-\s*([^\s]+@[^\s]+)\s*$")
+
+
 def build_rep_directory(wb):
     """
     Reads the CUSTOMER SERVICE MASTER LIST sheet.
 
     If the sheet has a header row with REP / CUSTOMER / EMAIL-style column
     titles, columns are matched by name (any extra columns are ignored, in
-    any position). Your current master list has no header row at all, so
-    this falls back to the known layout: col A = rep name (section header,
-    sparse), col B = rep name (repeated per row), col C = customer name,
-    col D = email (only on the first row of each rep's color block). If you
-    ever add a header row with REP/CUSTOMER/EMAIL titles, it'll be picked up
-    automatically and you can add/reorder columns freely.
+    any position).
+
+    Your master list currently has no such header row -- it uses a section
+    layout instead: col A holds a section header per rep (either just the
+    rep name, or "REP NAME - email@domain" with the email merged in), col B
+    repeats the rep name on every row underneath, col C holds the customer
+    name. If a separate email column exists further right (the older format
+    for this file), that's picked up too. Whichever format has the email,
+    it gets matched to whichever rep name is on that same row or the block
+    it starts.
 
     Returns (customer_to_rep dict, rep_to_email dict).
     """
@@ -142,20 +152,37 @@ def build_rep_directory(wb):
         start_row = header_row_idx + 1
     else:
         # No header row found -- fall back to the known positional layout.
-        rep_col, cust_col, email_col = 2, 3, 4  # cols B, C, D
+        rep_col, cust_col, email_col = 2, 3, 4  # cols B, C, D (email col may be blank)
         start_row = 1
 
     for r in range(start_row, ws.max_row + 1):
+        section_header = ws.cell(row=r, column=1).value  # col A: section header, sparse
         rep_cell = ws.cell(row=r, column=rep_col).value if rep_col else None
         cust_cell = ws.cell(row=r, column=cust_col).value if cust_col else None
         email_cell = ws.cell(row=r, column=email_col).value if email_col else None
 
-        if rep_cell:
+        # Newer format: column A holds "REP NAME - email@domain" on the
+        # section-header row. Parse both the rep name and email from it.
+        header_rep_name = None
+        header_email = None
+        if section_header and "@" in str(section_header):
+            m = NAME_EMAIL_RE.match(str(section_header))
+            if m:
+                header_rep_name = m.group(1).strip()
+                header_email = m.group(2).strip()
+
+        if header_rep_name:
+            current_rep = header_rep_name
+        elif rep_cell:
             current_rep = str(rep_cell).strip()
+
+        if header_email and current_rep and current_rep not in rep_to_email:
+            rep_to_email[current_rep] = header_email
 
         if cust_cell and current_rep:
             customer_to_rep[str(cust_cell).strip().upper()] = current_rep
 
+        # Older format: a separate email column.
         if email_cell and current_rep and current_rep not in rep_to_email:
             rep_to_email[current_rep] = str(email_cell).strip()
 
@@ -371,7 +398,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
+                f"✉️  {rep}  —  {email_addr or  'NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -390,4 +417,4 @@ if uploaded:
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
