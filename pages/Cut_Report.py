@@ -289,14 +289,31 @@ def extract_shift_rows(wb, sheet_name):
 # --------------------------------------------------------------------------
 # Matches a stop-header line like:
 #   "2           213962136                                   F AND A FOOD SALES INC"
-# group(1) = stop number, group(2) = "TK" (our own DC, not a customer) or a
-# numeric CUSTID, group(3) = the customer/location name (drop stops) or our
-# own warehouse name (TK stops, which we skip).
-MANIFEST_STOP_HEADER_RE = re.compile(r"^\s*(\d+)\s+(TK|\d{4,})\s+(.+?)\s*$")
+# group(1) = stop number, group(2) = a numeric CUSTID or a short facility
+# code (e.g. "TK", "NC", "DC" -- our own warehouses use these instead of a
+# CUSTID), group(3) = the customer/location name.
+#
+# Internal transfers between our own warehouses show up as a stop whose name
+# starts with "RESER'S -" (e.g. "RESER'S - TK - TOPEKA DISTRIBUTION CENTER",
+# "RESER'S - NC - HALIFAX DISTRIBUTION CENTER") regardless of which facility
+# code is used, and are treated as non-customer stops (skipped for matching).
+MANIFEST_STOP_HEADER_RE = re.compile(r"^\s*(\d{1,2})\s+(\d{4,}|[A-Z]{2,4})\s+(.+?)\s*$")
 
 # Matches an order number with its trailing load-sequence suffix, e.g.
 # "3600012594-520" -> captures "3600012594".
 MANIFEST_ORDER_RE = re.compile(r"\b(\d{6,12})-\d+\b")
+MANIFEST_ORDER_ANCHOR_RE = re.compile(r"^(\d{6,12})-\d+$")
+
+# Column x0 boundaries (points) for the CUSTID / CUST NAME / CUST PO block on
+# the per-order detail line, calibrated against the actual report layout.
+# Used only as a fallback (see parse_manifest_inline_fallback below) for
+# loads where the true customer never gets its own clean stop-header line --
+# e.g. a load that transfers through one of our own warehouses on the way,
+# where the only place the ultimate customer is mentioned at all is this
+# narrow, easily-wrapped column on the pickup stop's own line.
+INLINE_CUSTID_X_RANGE = (395, 445)
+INLINE_NAME_X_RANGE = (445, 505)
+INLINE_ORDER_COL_MAX_X = 200
 
 
 def normalize_order_id(value):
@@ -317,21 +334,82 @@ def normalize_order_id(value):
     return digits
 
 
+def parse_manifest_inline_fallback(pdf_file):
+    """
+    Fallback parser for orders that never get a clean stop-header line --
+    typically loads that transfer through one of our own warehouses en route,
+    where the ultimate customer is only ever mentioned inline on the per-order
+    detail line's narrow CUST NAME column (which wraps across several short
+    physical lines, sometimes splitting a single word mid-way).
+
+    Uses word x/y positions (not flattened text) to reconstruct each order's
+    CUST NAME column specifically, ignoring what's happening in neighboring
+    columns on the same wrapped lines. This recovers a usable, human-readable
+    customer name in most cases, but reconstruction can occasionally insert
+    an extra space where a long word wrapped mid-word (e.g. "MERCHANT
+    DISTRIBUTO RS" instead of "MERCHANT DISTRIBUTORS") -- still clearly
+    identifiable, but callers should treat this as lower-confidence than the
+    primary stop-header method.
+
+    Returns {order_number_str: reconstructed_name}.
+    """
+    pdf_file.seek(0)
+    order_to_name = {}
+
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            words_sorted = sorted(words, key=lambda w: (w["top"], w["x0"]))
+
+            anchors = [
+                (w["top"], w["text"])
+                for w in words_sorted
+                if w["x0"] < INLINE_ORDER_COL_MAX_X and MANIFEST_ORDER_ANCHOR_RE.match(w["text"])
+            ]
+
+            for idx, (top, order_text) in enumerate(anchors):
+                order_no = order_text.split("-")[0]
+                next_top = anchors[idx + 1][0] if idx + 1 < len(anchors) else top + 40
+                block = [w for w in words_sorted if top - 0.5 <= w["top"] < next_top - 0.5]
+
+                name_words = [
+                    w for w in block
+                    if INLINE_NAME_X_RANGE[0] <= w["x0"] < INLINE_NAME_X_RANGE[1]
+                ]
+                if name_words:
+                    name = " ".join(w["text"] for w in sorted(name_words, key=lambda w: w["top"]))
+                    order_to_name.setdefault(order_no, name)
+
+    return order_to_name
+
+
 def parse_shipping_manifest(pdf_file):
     """
     Parses a Resers-format shipping manifest PDF and returns
-    {order_number_str: customer_name}.
+    (order_to_customer, order_confidence):
+      order_to_customer: {order_number_str: customer_name}
+      order_confidence:  {order_number_str: "exact" | "inline"}
 
-    Each load's PICKUP stop is our own warehouse (stop header shows "TK") --
-    that's skipped. Each DROP stop's header line gives the actual customer
-    name; every order number that appears anywhere before the next stop
-    header (or end of that load's section) is attributed to that customer.
-    Order numbers appear twice in the manifest (once under the pickup, once
-    under the drop) -- only the drop occurrence has a customer name active,
-    so the pickup occurrence is naturally skipped.
+    Primary method: each load's stops are read in order. A stop whose name
+    starts with "RESER'S -" is one of our own warehouses (a pickup, or an
+    internal transfer hop) and is not a customer -- skipped. Any other stop's
+    header line gives the real customer name (marked "exact"); every order
+    number appearing before the next stop header is attributed to it. Orders
+    appear multiple times across a load's stops -- only the real-customer
+    occurrence sets the attribution, internal-warehouse occurrences are
+    skipped, so this resolves correctly without needing to match them up by
+    CUSTID.
+
+    Fallback: some loads transfer through one of our own warehouses and never
+    have a real external stop at all in this manifest (the actual delivery is
+    a separate, later leg not included here). For orders left unresolved by
+    the primary method, parse_manifest_inline_fallback recovers a best-effort
+    name from the per-order line's own narrow CUST NAME column (marked
+    "inline" -- see that function's docstring for the accuracy trade-off).
     """
     pdf_file.seek(0)
     order_to_customer = {}
+    order_confidence = {}
     current_customer = None
 
     with pdfplumber.open(pdf_file) as pdf:
@@ -340,33 +418,50 @@ def parse_shipping_manifest(pdf_file):
             for line in text.split("\n"):
                 m = MANIFEST_STOP_HEADER_RE.match(line)
                 if m:
-                    _, custid_or_tk, rest = m.groups()
-                    if custid_or_tk == "TK":
-                        current_customer = None
+                    _, _stop_code, rest = m.groups()
+                    rest_clean = re.sub(r"\s+", " ", rest.strip())
+                    if rest_clean.upper().startswith("RESER'S"):
+                        current_customer = None  # our own warehouse, not a customer
                     else:
-                        current_customer = re.sub(r"\s+", " ", rest.strip())
+                        current_customer = rest_clean
                     continue
                 for order_match in MANIFEST_ORDER_RE.finditer(line):
                     order_no = order_match.group(1)
                     if current_customer:
                         order_to_customer.setdefault(order_no, current_customer)
+                        order_confidence.setdefault(order_no, "exact")
 
-    return order_to_customer
+    pdf_file.seek(0)
+    inline_map = parse_manifest_inline_fallback(pdf_file)
+    for order_no, name in inline_map.items():
+        if order_no not in order_to_customer:
+            order_to_customer[order_no] = name
+            order_confidence[order_no] = "inline"
+
+    return order_to_customer, order_confidence
 
 
 def load_manifest_maps(uploaded_files):
     """
     Takes the list of files from the manifest uploader (each may be a .pdf or
     a .zip containing one or more PDFs) and returns:
-      (combined_order_to_customer_map, list_of_per_file_summaries, list_of_errors)
+      (combined_order_to_customer_map, combined_order_confidence,
+       list_of_per_file_summaries, list_of_errors)
 
     Each summary is a dict: {"name": filename, "pdf_count": n, "orders_found": n}.
     Each error is a string naming the file and what went wrong -- one bad file
     doesn't stop the others from being processed.
     """
     combined_map = {}
+    combined_confidence = {}
     summaries = []
     errors = []
+
+    def merge(sub_map, sub_confidence):
+        for k, v in sub_map.items():
+            if k not in combined_map:
+                combined_map[k] = v
+                combined_confidence[k] = sub_confidence.get(k, "exact")
 
     for uploaded_file in uploaded_files or []:
         name = uploaded_file.name
@@ -382,55 +477,64 @@ def load_manifest_maps(uploaded_files):
                         continue
                     for pdf_name in pdf_names:
                         pdf_bytes = zf.read(pdf_name)
-                        sub_map = parse_shipping_manifest(io.BytesIO(pdf_bytes))
+                        sub_map, sub_confidence = parse_shipping_manifest(io.BytesIO(pdf_bytes))
                         pdf_count += 1
                         file_orders_found += len(sub_map)
-                        for k, v in sub_map.items():
-                            combined_map.setdefault(k, v)
+                        merge(sub_map, sub_confidence)
                 summaries.append(
                     {"name": name, "pdf_count": pdf_count, "orders_found": file_orders_found}
                 )
             else:
                 # Treat anything else (e.g. .pdf) as a single PDF.
-                sub_map = parse_shipping_manifest(uploaded_file)
-                for k, v in sub_map.items():
-                    combined_map.setdefault(k, v)
+                sub_map, sub_confidence = parse_shipping_manifest(uploaded_file)
+                merge(sub_map, sub_confidence)
                 summaries.append(
                     {"name": name, "pdf_count": 1, "orders_found": len(sub_map)}
                 )
         except Exception as e:
             errors.append(f"{name}: {e}")
 
-    return combined_map, summaries, errors
+    return combined_map, combined_confidence, summaries, errors
 
 
-def apply_manifest_customers(df, manifest_map):
+def apply_manifest_customers(df, manifest_map, manifest_confidence=None):
     """
     Fills in CUSTOMER for rows currently marked UNKNOWN, using the manifest's
-    order-number -> customer-name mapping. Adds a FROM_MANIFEST flag column
-    so the UI can show which rows were filled in this way. Rows that already
-    have a customer name are left untouched.
+    order-number -> customer-name mapping. Adds two columns so the UI can
+    show what happened:
+      FROM_MANIFEST: True if this row's customer came from the manifest
+      MANIFEST_CONFIDENCE: "exact" (from a clean stop-header line) or
+        "inline" (best-effort reconstruction -- see
+        parse_manifest_inline_fallback docstring) for manifest-filled rows,
+        "" otherwise.
+    Rows that already have a customer name are left untouched.
     """
+    manifest_confidence = manifest_confidence or {}
     df = df.copy()
     from_manifest = []
+    confidence = []
     new_customers = []
 
     for _, row in df.iterrows():
         if row["CUSTOMER"] != "UNKNOWN":
             new_customers.append(row["CUSTOMER"])
             from_manifest.append(False)
+            confidence.append("")
             continue
         key = normalize_order_id(row["ORDER NUMBER"])
         match = manifest_map.get(key) if key else None
         if match:
             new_customers.append(match)
             from_manifest.append(True)
+            confidence.append(manifest_confidence.get(key, "exact"))
         else:
             new_customers.append(row["CUSTOMER"])
             from_manifest.append(False)
+            confidence.append("")
 
     df["CUSTOMER"] = new_customers
     df["FROM_MANIFEST"] = from_manifest
+    df["MANIFEST_CONFIDENCE"] = confidence
     return df
 
 
@@ -522,8 +626,11 @@ if uploaded:
 
     df = pd.DataFrame(all_rows)
     df["FROM_MANIFEST"] = False
+    df["MANIFEST_CONFIDENCE"] = ""
 
-    manifest_map, manifest_summaries, manifest_errors = load_manifest_maps(manifest_files)
+    manifest_map, manifest_confidence, manifest_summaries, manifest_errors = load_manifest_maps(
+        manifest_files
+    )
 
     for err in manifest_errors:
         st.error(f"Could not read manifest file — {err}")
@@ -538,13 +645,22 @@ if uploaded:
 
     if manifest_map:
         unknown_before = int((df["CUSTOMER"] == "UNKNOWN").sum())
-        df = apply_manifest_customers(df, manifest_map)
+        df = apply_manifest_customers(df, manifest_map, manifest_confidence)
         resolved = int(df["FROM_MANIFEST"].sum())
-        st.success(
+        inline_count = int((df["MANIFEST_CONFIDENCE"] == "inline").sum())
+        msg = (
             f"Shipping manifest(s) loaded: {len(manifest_map)} unique order(s) found "
             f"across all of them. Filled in the customer for {resolved} of "
             f"{unknown_before} previously unknown line item(s)."
         )
+        if inline_count:
+            msg += (
+                f" {inline_count} of those came from a best-effort reconstruction "
+                "(orders that transfer through one of our own warehouses with no "
+                "external stop in this manifest) — double-check those before "
+                "trusting the auto-match, spacing can be slightly off."
+            )
+        st.success(msg)
     elif manifest_files and not manifest_errors:
         st.warning(
             "The shipping manifest(s) were read, but no order numbers could be "
@@ -576,7 +692,7 @@ if uploaded:
         st.dataframe(
             unmatched[
                 ["Shift", "CUSTOMER", "LOAD", "ORDER NUMBER", "ITEM NUMBER",
-                 "DESCRIPTION", "FROM_MANIFEST"]
+                 "DESCRIPTION", "FROM_MANIFEST", "MANIFEST_CONFIDENCE"]
             ],
             use_container_width=True,
         )
