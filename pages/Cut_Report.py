@@ -37,7 +37,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts / Shorts — Rep Email")
+st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -46,26 +46,109 @@ st.caption(
 uploaded = st.file_uploader("Upload the workbook (.xlsx)", type=["xlsx"])
 
 
+import re
+
+# --------------------------------------------------------------------------
+# HEADER MATCHING
+# --------------------------------------------------------------------------
+# Your actual current headers, plus a few reasonable variants, so the app
+# keeps working if wording/spacing/punctuation changes slightly. Matching is
+# by normalized header text (lowercased, punctuation/spaces stripped), so
+# "CUSTOMER ", "Customer", and "customer" all match the same field, and any
+# EXTRA column you add (anywhere in the sheet) is simply ignored.
+SHIFT_FIELD_ALIASES = {
+    "CS_REP": ["csrep", "csrep.", "csrepresentative"],
+    "CUSTOMER": ["customer", "customername"],
+    "LOAD": ["triploadnum", "tripload", "loadnumber", "load", "loadnum"],
+    "ORDER_NUMBER": ["ordernumber", "orderno", "order"],
+    "ITEM_NUMBER": ["itemnumber", "itemno", "item"],
+    "DESCRIPTION": ["description", "desc", "itemdescription"],
+    "QUANTITY_CASES_CUT": ["quantitycasescut", "qtycasescut", "casescut", "quantitycut", "qtycut"],
+    "REASON_CODE": ["reasoncode"],
+    "REASON_DESCRIPTION": ["reasondescription", "reasondesc"],
+}
+SHIFT_REQUIRED_FIELDS = ["CUSTOMER", "ORDER_NUMBER", "ITEM_NUMBER"]
+
+MASTER_FIELD_ALIASES = {
+    "REP": ["rep", "csrep", "repname", "csrepresentative"],
+    "CUSTOMER": ["customer", "customername"],
+    "EMAIL": ["email", "emailaddress", "repemail"],
+}
+
+
+def _normalize_header(text):
+    """Lowercase and strip all punctuation/whitespace for robust header matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _find_header_row_and_columns(ws, field_aliases, required_fields, max_scan_rows=None):
+    """
+    Scan rows top-to-bottom looking for the header row: the first row where at
+    least all required_fields can be matched by header text. Returns
+    (header_row_idx, {field_name: column_index}) or (None, {}) if not found.
+    """
+    alias_lookup = {}
+    for field, aliases in field_aliases.items():
+        for alias in aliases:
+            alias_lookup[alias] = field
+
+    max_row = max_scan_rows or ws.max_row
+    for r in range(1, max_row + 1):
+        col_map = {}
+        for c in range(1, ws.max_column + 1):
+            header_val = ws.cell(row=r, column=c).value
+            normalized = _normalize_header(header_val)
+            field = alias_lookup.get(normalized)
+            if field and field not in col_map:
+                col_map[field] = c
+        if all(f in col_map for f in required_fields):
+            return r, col_map
+
+    return None, {}
+
+
 # --------------------------------------------------------------------------
 # PARSING HELPERS
 # --------------------------------------------------------------------------
 def build_rep_directory(wb):
     """
     Reads the CUSTOMER SERVICE MASTER LIST sheet.
-    Layout: col A = rep name (section header, sparse), col B = rep name
-    (repeated per row), col C = customer name, col D = email (only on the
-    first row of each rep's color block).
+
+    If the sheet has a header row with REP / CUSTOMER / EMAIL-style column
+    titles, columns are matched by name (any extra columns are ignored, in
+    any position). Your current master list has no header row at all, so
+    this falls back to the known layout: col A = rep name (section header,
+    sparse), col B = rep name (repeated per row), col C = customer name,
+    col D = email (only on the first row of each rep's color block). If you
+    ever add a header row with REP/CUSTOMER/EMAIL titles, it'll be picked up
+    automatically and you can add/reorder columns freely.
+
     Returns (customer_to_rep dict, rep_to_email dict).
     """
     ws = wb[MASTER_SHEET]
+
+    header_row_idx, col_map = _find_header_row_and_columns(
+        ws, MASTER_FIELD_ALIASES, required_fields=["REP", "CUSTOMER"]
+    )
+
     customer_to_rep = {}
     rep_to_email = {}
     current_rep = None
 
-    for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
-        rep_cell = row[1].value if len(row) > 1 else None   # col B
-        cust_cell = row[2].value if len(row) > 2 else None  # col C
-        email_cell = row[3].value if len(row) > 3 else None  # col D
+    if header_row_idx is not None:
+        rep_col = col_map.get("REP")
+        cust_col = col_map.get("CUSTOMER")
+        email_col = col_map.get("EMAIL")
+        start_row = header_row_idx + 1
+    else:
+        # No header row found -- fall back to the known positional layout.
+        rep_col, cust_col, email_col = 2, 3, 4  # cols B, C, D
+        start_row = 1
+
+    for r in range(start_row, ws.max_row + 1):
+        rep_cell = ws.cell(row=r, column=rep_col).value if rep_col else None
+        cust_cell = ws.cell(row=r, column=cust_col).value if cust_col else None
+        email_cell = ws.cell(row=r, column=email_col).value if email_col else None
 
         if rep_cell:
             current_rep = str(rep_cell).strip()
@@ -83,9 +166,10 @@ def extract_shift_rows(wb, sheet_name):
     """
     Reads one shift-cuts sheet and returns a list of line-item dicts.
 
-    Column layout (1-indexed): A=CS REP, B=CUSTOMER, C=TRIP//LOAD#,
-    D=ORDER NUMBER, E=ITEM NUMBER, F=DESCRIPTION, G=QUANTITY CASES CUT,
-    H=REASON CODE, I=REASON DESCRIPTION.
+    Columns are matched by header name (CS REP, CUSTOMER, TRIP // LOAD #,
+    ORDER NUMBER, ITEM NUMBER, DESCRIPTION, QUANTITY CASES CUT, REASON CODE,
+    REASON DESCRIPTION) rather than fixed position, so extra columns can be
+    added anywhere in the sheet without breaking anything.
 
     LOAD# forward-fills down (a single physical load can carry several
     orders, and the load number is only typed once). CUSTOMER forward-
@@ -98,14 +182,15 @@ def extract_shift_rows(wb, sheet_name):
     """
     ws = wb[sheet_name]
 
-    header_row_idx = None
-    for r in range(1, ws.max_row + 1):
-        val = ws.cell(row=r, column=1).value
-        if val and "CS REP" in str(val).upper():
-            header_row_idx = r
-            break
+    header_row_idx, col_map = _find_header_row_and_columns(
+        ws, SHIFT_FIELD_ALIASES, SHIFT_REQUIRED_FIELDS
+    )
     if header_row_idx is None:
         return []
+
+    def get(r, field):
+        col = col_map.get(field)
+        return ws.cell(row=r, column=col).value if col else None
 
     rows = []
     last_load = None
@@ -113,14 +198,14 @@ def extract_shift_rows(wb, sheet_name):
     last_order = None
 
     for r in range(header_row_idx + 1, ws.max_row + 1):
-        customer = ws.cell(row=r, column=2).value
-        load = ws.cell(row=r, column=3).value
-        order_no = ws.cell(row=r, column=4).value
-        item_no = ws.cell(row=r, column=5).value
-        desc = ws.cell(row=r, column=6).value
-        qty = ws.cell(row=r, column=7).value
-        reason_code = ws.cell(row=r, column=8).value
-        reason_desc = ws.cell(row=r, column=9).value
+        customer = get(r, "CUSTOMER")
+        load = get(r, "LOAD")
+        order_no = get(r, "ORDER_NUMBER")
+        item_no = get(r, "ITEM_NUMBER")
+        desc = get(r, "DESCRIPTION")
+        qty = get(r, "QUANTITY_CASES_CUT")
+        reason_code = get(r, "REASON_CODE")
+        reason_desc = get(r, "REASON_DESCRIPTION")
 
         # Skip fully blank / padding rows
         if order_no in (None, "") and item_no in (None, "") and not customer and not load:
@@ -286,7 +371,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f"✉️  {rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
+                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
