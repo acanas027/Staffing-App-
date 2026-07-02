@@ -167,25 +167,40 @@ TABLE_COLS = [
 
 
 def build_plain_text_table(df):
-    """Column-aligned plain-text table (mailto bodies can't contain HTML)."""
-    max_col_width = 28
-    widths = {}
-    for c in TABLE_COLS:
-        col_vals = ["" if pd.isna(v) else str(v) for v in df[c]]
-        widths[c] = min(max(len(c), max(len(v) for v in col_vals)), max_col_width)
+    """
+    Plain-text item list for the mailto body. Customer/Load/Order repeat across
+    multiple line items in the same shipment, so instead of repeating that on
+    every item (harder to scan), each distinct Customer/Load/Order combination
+    gets one header, with its items listed underneath. Outlook's compose window
+    uses a proportional font, so this avoids relying on column-width alignment
+    (which drifts) and stays compact enough to fit more items under the mailto
+    link's length limit.
+    """
+    def val(row, col):
+        v = row[col]
+        return "" if pd.isna(v) else str(v)
 
-    def cell(value, width):
-        text = "" if pd.isna(value) else str(value)
-        if len(text) > width:
-            text = text[: width - 1] + "…"
-        return text.ljust(width)
+    lines = []
+    grouped = df.groupby(["CUSTOMER", "LOAD", "ORDER NUMBER"], sort=False, dropna=False)
+    for (customer, load, order), sub in grouped:
+        header = f"{customer}   |   Load #: {load}   |   Order #: {order}"
+        rule = "=" * min(len(header), 60)
+        lines.append(rule)
+        lines.append(header)
+        lines.append(rule)
 
-    header = "  ".join(c.ljust(widths[c]) for c in TABLE_COLS)
-    separator = "-" * len(header)
-    lines = [header, separator]
-    for _, row in df.iterrows():
-        lines.append("  ".join(cell(row[c], widths[c]) for c in TABLE_COLS))
-    return "\n".join(lines)
+        for _, row in sub.iterrows():
+            reason_code = val(row, "REASON CODE")
+            reason_desc = val(row, "REASON DESCRIPTION")
+            reason = f"{reason_code} - {reason_desc}" if reason_code and reason_desc else (reason_code or reason_desc)
+
+            lines.append(f"  Item #:      {val(row, 'ITEM NUMBER')}")
+            lines.append(f"  Description: {val(row, 'DESCRIPTION')}")
+            lines.append(f"  Qty Cut:     {val(row, 'QUANTITY CASES CUT')}")
+            lines.append(f"  Reason:      {reason}")
+            lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def build_subject(group):
