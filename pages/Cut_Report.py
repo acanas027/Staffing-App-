@@ -254,7 +254,8 @@ def build_rep_directory(wb):
             rep_to_email[current_rep] = header_email
 
         if cust_cell and current_rep:
-            customer_to_rep[str(cust_cell).strip().upper()] = current_rep
+            key = strip_deli(str(cust_cell).strip()).upper()
+            customer_to_rep[key] = current_rep
 
         # Older format: a separate email column.
         if email_cell and current_rep and current_rep not in rep_to_email:
@@ -610,6 +611,16 @@ def normalize_order_id(value):
     return digits
 
 
+def strip_deli(name):
+    """Removes the standalone word 'DELI' from a customer name (case-insensitive)."""
+    if not name:
+        return name
+    cleaned = re.sub(r"\bDELI\b", "", name, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[-,]\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or name
+
+
 def clean_customer_name(name):
     """
     Strips numbers out of a resolved customer name -- store numbers, or
@@ -617,7 +628,10 @@ def clean_customer_name(name):
     reconstruction. Removes any token that contains a digit at all (covers
     plain numbers like "6072" as well as store/location codes like "T3727"
     or "DC5"), then tidies up any leftover dangling dashes/punctuation and
-    extra whitespace.
+    extra whitespace. Also strips the standalone word "DELI" (e.g. "C&S
+    MIAMI DELI" -> "C&S MIAMI") -- applied consistently to both the master
+    list's own customer entries and any freshly-resolved name, so matching
+    still lines up on both sides.
     """
     if not name:
         return name
@@ -626,6 +640,7 @@ def clean_customer_name(name):
     cleaned = " ".join(kept)
     cleaned = re.sub(r"[-,]\s*$", "", cleaned).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = strip_deli(cleaned)
     return cleaned or name  # never return an empty string -- fall back to original
 
 
@@ -1015,7 +1030,7 @@ if uploaded:
         )
 
     df["REP"] = df["CUSTOMER"].apply(
-        lambda c: customer_to_rep.get(str(c).strip().upper())
+        lambda c: customer_to_rep.get(strip_deli(str(c).strip()).upper())
     )
     df["EMAIL"] = df["REP"].map(rep_to_email)
 
