@@ -217,7 +217,7 @@ def create_outlook_draft(to_email, subject, html_table):
     return mail
 
 
-
+def build_eml(to_email, subject, html_table, from_email=FROM_EMAIL):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_email
