@@ -297,7 +297,9 @@ def extract_shift_rows(wb, sheet_name):
 # starts with "RESER'S -" (e.g. "RESER'S - TK - TOPEKA DISTRIBUTION CENTER",
 # "RESER'S - NC - HALIFAX DISTRIBUTION CENTER") regardless of which facility
 # code is used, and are treated as non-customer stops (skipped for matching).
-MANIFEST_STOP_HEADER_RE = re.compile(r"^\s*(\d{1,2})\s+(\d{4,}|[A-Z]{2,4})\s+(.+?)\s*$")
+MANIFEST_STOP_HEADER_RE = re.compile(
+    r"^\s*(\d{1,2})\s+(\d{4,}|[A-Z]{2,4})\s+(?:-\s*\d+\s+)?(.+?)\s*$"
+)
 
 # Matches an order number with its trailing load-sequence suffix, e.g.
 # "3600012594-520" -> captures "3600012594".
