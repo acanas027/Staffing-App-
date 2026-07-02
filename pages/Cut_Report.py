@@ -38,10 +38,10 @@ import streamlit as st
 # --------------------------------------------------------------------------
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
-MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
+MAILTO_SAFE_LENGTH = 3600  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
+st.title("Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -1073,7 +1073,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
+                f" {rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -1086,10 +1086,10 @@ if uploaded:
                     if too_long:
                         st.warning(
                             f"This email has {len(group)} items — the link is "
-                            f"{len(mailto_link)} characters, above the ~1800-character "
+                            f"{len(mailto_link)} characters, above the ~3600-character "
                             "range some mail clients handle reliably. Try opening it "
                             "anyway; if Outlook doesn't open or the body looks cut off, "
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
