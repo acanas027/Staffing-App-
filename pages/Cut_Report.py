@@ -23,10 +23,12 @@ may get a link that's too long for some mail clients to open reliably.
 Run with:  streamlit run cuts_email_generator.py
 """
 
+import re
 import urllib.parse
 
 import openpyxl
 import pandas as pd
+import pdfplumber
 import streamlit as st
 
 # --------------------------------------------------------------------------
@@ -34,19 +36,26 @@ import streamlit as st
 # --------------------------------------------------------------------------
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
-MAILTO_SAFE_LENGTH = 4000  # links longer than this may fail to open in some clients
+MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts / Shorts From Loads — Rep Email Generator")
+st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
 )
 
 uploaded = st.file_uploader("Upload the workbook (.xlsx)", type=["xlsx"])
-
-
-import re
+manifest_file = st.file_uploader(
+    "Upload today's shipping manifest (.pdf) — optional",
+    type=["pdf"],
+    help=(
+        "Used to fill in the CUSTOMER column for line items where it's blank in "
+        "the workbook. Matches by ORDER NUMBER, then uses whatever customer name "
+        "the manifest shows for that order. This only covers orders that are "
+        "actually on this manifest -- it won't resolve every unknown row."
+    ),
+)
 
 # --------------------------------------------------------------------------
 # HEADER MATCHING
@@ -270,6 +279,106 @@ def extract_shift_rows(wb, sheet_name):
 
 
 # --------------------------------------------------------------------------
+# SHIPPING MANIFEST (PDF) PARSING
+# --------------------------------------------------------------------------
+# Matches a stop-header line like:
+#   "2           213962136                                   F AND A FOOD SALES INC"
+# group(1) = stop number, group(2) = "TK" (our own DC, not a customer) or a
+# numeric CUSTID, group(3) = the customer/location name (drop stops) or our
+# own warehouse name (TK stops, which we skip).
+MANIFEST_STOP_HEADER_RE = re.compile(r"^\s*(\d+)\s+(TK|\d{4,})\s+(.+?)\s*$")
+
+# Matches an order number with its trailing load-sequence suffix, e.g.
+# "3600012594-520" -> captures "3600012594".
+MANIFEST_ORDER_RE = re.compile(r"\b(\d{6,12})-\d+\b")
+
+
+def normalize_order_id(value):
+    """
+    Normalize an order number for matching between the workbook (numbers,
+    sometimes floats like 3000131623.0) and the manifest (plain digit
+    strings). Returns '' if it can't be parsed as a number at all.
+    """
+    if value is None or value == "":
+        return ""
+    try:
+        f = float(value)
+        if f.is_integer():
+            return str(int(f))
+    except (ValueError, TypeError):
+        pass
+    digits = re.sub(r"[^0-9]", "", str(value))
+    return digits
+
+
+def parse_shipping_manifest(pdf_file):
+    """
+    Parses a Resers-format shipping manifest PDF and returns
+    {order_number_str: customer_name}.
+
+    Each load's PICKUP stop is our own warehouse (stop header shows "TK") --
+    that's skipped. Each DROP stop's header line gives the actual customer
+    name; every order number that appears anywhere before the next stop
+    header (or end of that load's section) is attributed to that customer.
+    Order numbers appear twice in the manifest (once under the pickup, once
+    under the drop) -- only the drop occurrence has a customer name active,
+    so the pickup occurrence is naturally skipped.
+    """
+    pdf_file.seek(0)
+    order_to_customer = {}
+    current_customer = None
+
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text(layout=True) or ""
+            for line in text.split("\n"):
+                m = MANIFEST_STOP_HEADER_RE.match(line)
+                if m:
+                    _, custid_or_tk, rest = m.groups()
+                    if custid_or_tk == "TK":
+                        current_customer = None
+                    else:
+                        current_customer = re.sub(r"\s+", " ", rest.strip())
+                    continue
+                for order_match in MANIFEST_ORDER_RE.finditer(line):
+                    order_no = order_match.group(1)
+                    if current_customer:
+                        order_to_customer.setdefault(order_no, current_customer)
+
+    return order_to_customer
+
+
+def apply_manifest_customers(df, manifest_map):
+    """
+    Fills in CUSTOMER for rows currently marked UNKNOWN, using the manifest's
+    order-number -> customer-name mapping. Adds a FROM_MANIFEST flag column
+    so the UI can show which rows were filled in this way. Rows that already
+    have a customer name are left untouched.
+    """
+    df = df.copy()
+    from_manifest = []
+    new_customers = []
+
+    for _, row in df.iterrows():
+        if row["CUSTOMER"] != "UNKNOWN":
+            new_customers.append(row["CUSTOMER"])
+            from_manifest.append(False)
+            continue
+        key = normalize_order_id(row["ORDER NUMBER"])
+        match = manifest_map.get(key) if key else None
+        if match:
+            new_customers.append(match)
+            from_manifest.append(True)
+        else:
+            new_customers.append(row["CUSTOMER"])
+            from_manifest.append(False)
+
+    df["CUSTOMER"] = new_customers
+    df["FROM_MANIFEST"] = from_manifest
+    return df
+
+
+# --------------------------------------------------------------------------
 # EMAIL BUILDING
 # --------------------------------------------------------------------------
 TABLE_COLS = [
@@ -356,6 +465,35 @@ if uploaded:
         st.stop()
 
     df = pd.DataFrame(all_rows)
+    df["FROM_MANIFEST"] = False
+
+    manifest_map = {}
+    manifest_error = ""
+    if manifest_file is not None:
+        try:
+            manifest_map = parse_shipping_manifest(manifest_file)
+        except Exception as e:
+            manifest_error = str(e)
+            st.error(f"Could not read the shipping manifest: {e}")
+
+    if manifest_error:
+        pass  # already surfaced above; continue with whatever rows we have
+    elif manifest_map:
+        unknown_before = int((df["CUSTOMER"] == "UNKNOWN").sum())
+        df = apply_manifest_customers(df, manifest_map)
+        resolved = int(df["FROM_MANIFEST"].sum())
+        st.success(
+            f"Shipping manifest loaded: {len(manifest_map)} order(s) found on it. "
+            f"Filled in the customer for {resolved} of {unknown_before} previously "
+            f"unknown line item(s)."
+        )
+    elif manifest_file is not None:
+        st.warning(
+            "The shipping manifest was read, but no order numbers on it could "
+            "be parsed — double check it's the standard Resers shipping "
+            "manifest format."
+        )
+
     df["REP"] = df["CUSTOMER"].apply(
         lambda c: customer_to_rep.get(str(c).strip().upper())
     )
@@ -372,13 +510,15 @@ if uploaded:
     if not unmatched.empty:
         st.warning(
             f"{len(unmatched)} line item(s) couldn't be matched to a rep "
-            "(customer is UNKNOWN or not found in the master list). "
-            "No email is generated for these — fix the CUSTOMER column in "
-            "the source file and re-upload, or review manually below."
+            "(customer is UNKNOWN, or the customer name doesn't exactly match "
+            "an entry in the master list). No email is generated for these — "
+            "fix the CUSTOMER column (or the master list) and re-upload, or "
+            "review manually below."
         )
         st.dataframe(
             unmatched[
-                ["Shift", "CUSTOMER", "LOAD", "ORDER NUMBER", "ITEM NUMBER", "DESCRIPTION"]
+                ["Shift", "CUSTOMER", "LOAD", "ORDER NUMBER", "ITEM NUMBER",
+                 "DESCRIPTION", "FROM_MANIFEST"]
             ],
             use_container_width=True,
         )
@@ -398,7 +538,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f"✉️  {rep}  —  {email_addr or  'NO EMAIL ON FILE'}  "
+                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -417,4 +557,4 @@ if uploaded:
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
