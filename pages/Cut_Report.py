@@ -23,8 +23,10 @@ may get a link that's too long for some mail clients to open reliably.
 Run with:  streamlit run cuts_email_generator.py
 """
 
+import io
 import re
 import urllib.parse
+import zipfile
 
 import openpyxl
 import pandas as pd
@@ -46,14 +48,18 @@ st.caption(
 )
 
 uploaded = st.file_uploader("Upload the workbook (.xlsx)", type=["xlsx"])
-manifest_file = st.file_uploader(
-    "Upload today's shipping manifest (.pdf) — optional",
-    type=["pdf"],
+manifest_files = st.file_uploader(
+    "Upload today's shipping manifest(s) (.zip or .pdf) — optional",
+    type=["pdf", "zip"],
+    accept_multiple_files=True,
     help=(
         "Used to fill in the CUSTOMER column for line items where it's blank in "
         "the workbook. Matches by ORDER NUMBER, then uses whatever customer name "
-        "the manifest shows for that order. This only covers orders that are "
-        "actually on this manifest -- it won't resolve every unknown row."
+        "the manifest shows for that order. Accepts the .zip file straight from "
+        "the mass-print export (PDFs inside are found automatically), a raw "
+        ".pdf, or several of either if you have more than one to cover. This "
+        "only covers orders that are actually on the manifest(s) you upload -- "
+        "it won't resolve every unknown row."
     ),
 )
 
@@ -348,6 +354,56 @@ def parse_shipping_manifest(pdf_file):
     return order_to_customer
 
 
+def load_manifest_maps(uploaded_files):
+    """
+    Takes the list of files from the manifest uploader (each may be a .pdf or
+    a .zip containing one or more PDFs) and returns:
+      (combined_order_to_customer_map, list_of_per_file_summaries, list_of_errors)
+
+    Each summary is a dict: {"name": filename, "pdf_count": n, "orders_found": n}.
+    Each error is a string naming the file and what went wrong -- one bad file
+    doesn't stop the others from being processed.
+    """
+    combined_map = {}
+    summaries = []
+    errors = []
+
+    for uploaded_file in uploaded_files or []:
+        name = uploaded_file.name
+        try:
+            uploaded_file.seek(0)
+            if name.lower().endswith(".zip"):
+                pdf_count = 0
+                file_orders_found = 0
+                with zipfile.ZipFile(uploaded_file) as zf:
+                    pdf_names = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
+                    if not pdf_names:
+                        errors.append(f"{name}: no PDF files found inside this zip.")
+                        continue
+                    for pdf_name in pdf_names:
+                        pdf_bytes = zf.read(pdf_name)
+                        sub_map = parse_shipping_manifest(io.BytesIO(pdf_bytes))
+                        pdf_count += 1
+                        file_orders_found += len(sub_map)
+                        for k, v in sub_map.items():
+                            combined_map.setdefault(k, v)
+                summaries.append(
+                    {"name": name, "pdf_count": pdf_count, "orders_found": file_orders_found}
+                )
+            else:
+                # Treat anything else (e.g. .pdf) as a single PDF.
+                sub_map = parse_shipping_manifest(uploaded_file)
+                for k, v in sub_map.items():
+                    combined_map.setdefault(k, v)
+                summaries.append(
+                    {"name": name, "pdf_count": 1, "orders_found": len(sub_map)}
+                )
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    return combined_map, summaries, errors
+
+
 def apply_manifest_customers(df, manifest_map):
     """
     Fills in CUSTOMER for rows currently marked UNKNOWN, using the manifest's
@@ -467,31 +523,33 @@ if uploaded:
     df = pd.DataFrame(all_rows)
     df["FROM_MANIFEST"] = False
 
-    manifest_map = {}
-    manifest_error = ""
-    if manifest_file is not None:
-        try:
-            manifest_map = parse_shipping_manifest(manifest_file)
-        except Exception as e:
-            manifest_error = str(e)
-            st.error(f"Could not read the shipping manifest: {e}")
+    manifest_map, manifest_summaries, manifest_errors = load_manifest_maps(manifest_files)
 
-    if manifest_error:
-        pass  # already surfaced above; continue with whatever rows we have
-    elif manifest_map:
+    for err in manifest_errors:
+        st.error(f"Could not read manifest file — {err}")
+
+    if manifest_summaries:
+        detail = "; ".join(
+            f"{s['name']} ({s['pdf_count']} PDF{'s' if s['pdf_count'] != 1 else ''}, "
+            f"{s['orders_found']} order(s))"
+            for s in manifest_summaries
+        )
+        st.caption(f"Manifest file(s) read: {detail}")
+
+    if manifest_map:
         unknown_before = int((df["CUSTOMER"] == "UNKNOWN").sum())
         df = apply_manifest_customers(df, manifest_map)
         resolved = int(df["FROM_MANIFEST"].sum())
         st.success(
-            f"Shipping manifest loaded: {len(manifest_map)} order(s) found on it. "
-            f"Filled in the customer for {resolved} of {unknown_before} previously "
-            f"unknown line item(s)."
+            f"Shipping manifest(s) loaded: {len(manifest_map)} unique order(s) found "
+            f"across all of them. Filled in the customer for {resolved} of "
+            f"{unknown_before} previously unknown line item(s)."
         )
-    elif manifest_file is not None:
+    elif manifest_files and not manifest_errors:
         st.warning(
-            "The shipping manifest was read, but no order numbers on it could "
-            "be parsed — double check it's the standard Resers shipping "
-            "manifest format."
+            "The shipping manifest(s) were read, but no order numbers could be "
+            "parsed — double check they're the standard Resers shipping manifest "
+            "format."
         )
 
     df["REP"] = df["CUSTOMER"].apply(
