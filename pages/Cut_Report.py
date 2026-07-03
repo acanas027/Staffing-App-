@@ -1,5 +1,5 @@
 """
-Cuts From Loads-Rep Email Generator
+Cuts / Shorts From Loads — Rep Email Generator
 ------------------------------------------------
 Same pattern as the "Email this report" button on the Shift Closeout page:
 a mailto: link that opens your default mail app (Outlook) with the message
@@ -41,7 +41,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts From Loads — Rep Email Generator")
+st.title("Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -462,8 +462,13 @@ def parse_daily_cuts_sheet(wb):
     manifest step exactly like the other source format.
 
     Returns None if the first sheet doesn't look like this format at all
-    (missing ORDER NUMBER / ITEM NUMBER columns), so the caller can fall
-    back to reading 1ST/2ND SHIFT CUTS sheets directly for older workbooks.
+    (missing ORDER NUMBER / ITEM NUMBER columns), OR if it's actually a
+    fully-populated 1ST/2ND SHIFT CUTS-style sheet placed first in the
+    workbook -- that format happens to share the exact same "ORDER NUMBER"
+    and "ITEM NUMBER" header wording, so the deciding signal is whether a
+    CUSTOMER column is also present on that header row (Daily Cuts never
+    has one; the full format always does). Either way, the caller falls
+    back to reading 1ST/2ND SHIFT CUTS sheets directly.
     """
     ws = wb.worksheets[0]
     header_row_idx, col_map = _find_header_row_and_columns(
@@ -471,6 +476,12 @@ def parse_daily_cuts_sheet(wb):
     )
     if header_row_idx is None:
         return None
+
+    for c in range(1, ws.max_column + 1):
+        if _normalize_header(ws.cell(row=header_row_idx, column=c).value) in (
+            "customer", "customername",
+        ):
+            return None  # this is the full format, not raw Daily Cuts
 
     item_desc_lookup = build_item_description_lookup(wb)
     cut_codes_lookup = build_cut_codes_lookup(wb)
