@@ -215,6 +215,8 @@ try:
     short_clean = short_clean.dropna(subset=["Item", "Cases"])
 
     # ---- MATCH ----
+    # Full exact match: Book1's SKU (ColJ + ColK) reconstructs the same full decimal
+    # item number used on the short sheet, e.g. "68820.13" + "081" = "68820.13081".
     match_df = short_clean.merge(clean_df, left_on="Item", right_on="SKU", how="left")
 
     # ---- TRAILER PRIORITY ----
@@ -240,10 +242,10 @@ try:
     trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
 
     # ---- LOAD COVERAGE + FILL (with real inventory allocation) ----
-    # An item's total inventory is shared across every load that needs it — two loads
-    # can't both get credit for the same physical cases. Demand is allocated item-by-item
-    # in dispatch order (earliest-shipping load first), so once an item's cases run out,
-    # later loads correctly show as Partial/Short instead of both showing Full.
+    # An item family's total inventory is shared across every load that needs it — two
+    # loads can't both get credit for the same physical cases. Demand is allocated
+    # family-by-family in dispatch order (earliest-shipping load first), so once a
+    # family's cases run out, later loads correctly show as Partial/Short.
     item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
@@ -271,10 +273,11 @@ try:
 
     alloc["Status"] = alloc["Fill_Rate"].apply(get_status)
 
-    # Which trailer(s) actually carry this item, and the earliest wave any of them
-    # unload in — shown for reference alongside the allocation result.
-    sku_to_wave = clean_df.merge(trailer_priority[["Trailer", "Wave"]], on="Trailer", how="left")
-    trailer_lookup = sku_to_wave.groupby("SKU").agg(
+    # Which trailer(s) actually carry this exact item, and the earliest wave any of
+    # them unload in — this is "where to find it," shown for reference. Blank means no
+    # trailer currently carries this item at all (a genuine inventory gap).
+    trailer_lookup = clean_df.merge(trailer_priority[["Trailer", "Wave"]], on="Trailer", how="left")
+    trailer_lookup = trailer_lookup.groupby("SKU").agg(
         Trailer=("Trailer", lambda s: ", ".join(sorted(set(s.astype(str))))),
         Wave=("Wave", "min")
     ).reset_index().rename(columns={"SKU": "Item"})
@@ -292,24 +295,25 @@ try:
 
     # ---- OPTIMIZED TRAILERS ----
     # For each item still short/partial, find the physical trailers that carry it and
-    # how many cases each one holds (Fix_Cases), and how many distinct loads are waiting
-    # on that item (Loads_Impacted) — without multiplying a trailer's cases once per load.
+    # how many cases each one holds (Fix_Cases — properly summed across every pallet/LPN
+    # on that trailer, not just deduplicated rows), and how many distinct loads are
+    # waiting on that item (Loads_Impacted).
     problem_items = exceptions["Item"].unique()
 
-    trailer_item_avail = clean_df[clean_df["SKU"].isin(problem_items)][
-        ["Trailer", "SKU", "Quantity"]
-    ].drop_duplicates().rename(columns={"SKU": "Item"})
+    trailer_item_qty = clean_df[clean_df["SKU"].isin(problem_items)].groupby(
+        ["Trailer", "SKU"], as_index=False
+    )["Quantity"].sum().rename(columns={"SKU": "Item"})
 
     loads_per_item = exceptions.groupby("Item")["Trip"].nunique()
-    trailer_item_avail["Loads_Impacted"] = trailer_item_avail["Item"].map(loads_per_item).fillna(0).astype(int)
+    trailer_item_qty["Loads_Impacted"] = trailer_item_qty["Item"].map(loads_per_item).fillna(0).astype(int)
 
-    optimized_trailers = trailer_item_avail.groupby("Trailer").agg(
+    optimized_trailers = trailer_item_qty.groupby("Trailer").agg(
         Fix_Cases=("Quantity", "sum"),
         Loads_Impacted=("Loads_Impacted", "sum")
     ).reset_index().sort_values(by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False])
 
-    top5_trailers = optimized_trailers.head(5).copy()
-    top5_trailers.insert(0, "Rank", range(1, len(top5_trailers) + 1))
+    top4_trailers = optimized_trailers.head(4).copy()
+    top4_trailers.insert(0, "Rank", range(1, len(top4_trailers) + 1))
 
     # ---- FORMAT EXPORTS ----
     dock_plan_export = trailer_priority.copy()
@@ -400,24 +404,30 @@ with tab_overview:
     c3, c4 = st.columns(2)
     with c3:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        wave_summary = dock_plan_export.groupby("Wave")["Demand_Served"].sum().reset_index()
         fig2 = px.bar(
-            wave_summary, x="Wave", y="Demand_Served", title="Demand by Wave",
-            color_discrete_sequence=[NAVY]
+            top4_trailers, x="Trailer", y="Fix_Cases",
+            title="Top 4 Trailers to Move to Door", text="Fix_Cases",
+            color_discrete_sequence=[SUCCESS]
         )
         st.plotly_chart(style_fig(fig2), use_container_width=True)
+        st.caption("Unload these trailers next — they resolve the most shortage cases across the most loads.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c4:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         short_items = load_export[load_export["Shortage_Cases"] > 0]
-        top_skus = short_items.groupby("Item")["Shortage_Cases"].sum().reset_index()
+        top_skus = short_items.groupby("Item").agg(
+            Shortage_Cases=("Shortage_Cases", "sum"),
+            Trailer=("Trailer", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
+        ).reset_index()
         top_skus = top_skus.sort_values(by="Shortage_Cases", ascending=False).head(10)
         fig4 = px.bar(
             top_skus, x="Item", y="Shortage_Cases", title="Top Shortage Drivers (Cases Missing)",
-            text="Shortage_Cases", color_discrete_sequence=[DANGER]
+            text="Shortage_Cases", color_discrete_sequence=[DANGER],
+            hover_data={"Trailer": True, "Item": False}
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
+        st.caption("Hover a bar to see which trailer(s), if any, carry that item.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- WAVE PLAN ----------------
@@ -471,8 +481,8 @@ with tab_fix:
     with c1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         fig5 = px.bar(
-            top5_trailers, x="Trailer", y="Fix_Cases",
-            title="Top 5 Trailers to Fix Shorts", text="Fix_Cases",
+            top4_trailers, x="Trailer", y="Fix_Cases",
+            title="Top 4 Trailers to Fix Shorts", text="Fix_Cases",
             color_discrete_sequence=[SUCCESS]
         )
         st.plotly_chart(style_fig(fig5), use_container_width=True)
@@ -485,7 +495,7 @@ with tab_fix:
             "Fix_Cases = cases of shortage-causing items this trailer has on board. "
             "Loads_Impacted = how many different shipments that inventory could help complete."
         )
-        st.dataframe(top5_trailers, use_container_width=True, hide_index=True)
+        st.dataframe(top4_trailers, use_container_width=True, hide_index=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -503,7 +513,7 @@ def build_excel():
         load_export.to_excel(writer, sheet_name="Load Coverage", index=False)
         exception_export.to_excel(writer, sheet_name="Exception Report", index=False)
         optimized_trailers.to_excel(writer, sheet_name="Optimized Trailers", index=False)
-        top5_trailers.to_excel(writer, sheet_name="Top 5 Trailers", index=False)
+        top4_trailers.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
 
         for sheet in writer.sheets:
             ws = writer.sheets[sheet]
