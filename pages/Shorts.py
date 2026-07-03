@@ -192,7 +192,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     value_row = [k[1] for k in kpis]
     sub_row = [k[2] for k in kpis]
 
-    kpi_table = Table([header_row, value_row, sub_row], colWidths=[150] * len(kpis))
+    kpi_table = Table([header_row, value_row, sub_row], colWidths=[105] * len(kpis))
     kpi_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -215,8 +215,8 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
 
     images = []
     for chart_title, fig in figs:
-        png_bytes = fig.to_image(format="png", scale=2, width=560, height=340)
-        images.append(Image(BytesIO(png_bytes), width=350, height=213))
+        png_bytes = fig.to_image(format="png", scale=2, width=520, height=316)
+        images.append(Image(BytesIO(png_bytes), width=255, height=155))
 
     rows = []
     for i in range(0, len(images), 2):
@@ -226,7 +226,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
         rows.append(pair)
 
     if rows:
-        chart_table = Table(rows, colWidths=[360, 360])
+        chart_table = Table(rows, colWidths=[265, 265])
         chart_table.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("ALIGN", (0, 0), (-1, -1), "CENTER"),
@@ -506,8 +506,12 @@ total_trailers = dock_plan_export["Trailer"].nunique()
 total_cases_short = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Actual_short_cases"].clip(lower=0).sum())
 total_waves = dock_plan_export["Wave"].nunique()
-loads_met_count = int(load_export["Status"].eq("Full").sum())
-total_loads = len(load_export)
+
+# "Loads" = distinct trips/trucks (Trip), not order lines. A load only counts as fully
+# met if EVERY item on that trip is Full — one short item still leaves the whole load short.
+trip_status = load_export.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
+loads_met_count = int(trip_status.sum())
+total_loads = int(trip_status.shape[0])
 
 if not top4_trailers.empty:
     top_trailer = top4_trailers.iloc[0]
