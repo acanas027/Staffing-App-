@@ -200,8 +200,8 @@ try:
     clean_df = clean_df.dropna(subset=["SKU", "Quantity"])
 
     # ---- LOAD SHORT SHEET ----
-    short_df = pd.read_excel(short_file)
-    short_df = short_df.iloc[6:].reset_index(drop=True)
+    short_df = pd.read_excel(short_file, header=2)
+    short_df = short_df.iloc[:, :11].reset_index(drop=True)
 
     short_df.columns = [
         "Trip", "Destination", "Dispatch", "Status", "Order",
@@ -349,24 +349,28 @@ st.markdown("""
 total_trailers = dock_plan_export["Trailer"].nunique()
 total_demand = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Shortage_Cases"].clip(lower=0).sum())
-overall_fill = (
-    load_export["Allocated_Cases"].sum() / load_export["Demand_Cases"].sum()
-    if load_export["Demand_Cases"].sum() else 0
-)
 total_waves = dock_plan_export["Wave"].nunique()
 loads_met_pct = (load_export["Status"].eq("Full ✅").mean() * 100) if len(load_export) else 0
 
+if not top4_trailers.empty:
+    top_trailer = top4_trailers.iloc[0]
+    move_next_value = f"Trailer {top_trailer['Trailer']}"
+    move_next_sub = f"fixes {int(top_trailer['Fix_Cases']):,} cases across {int(top_trailer['Loads_Impacted'])} load(s)"
+else:
+    move_next_value = "—"
+    move_next_sub = "no shortages to fix"
+
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    kpi_card("Trailers", f"{total_trailers}", f"across {total_waves} waves")
+    kpi_card("Trailers Involved", f"{total_trailers}", f"carry items needed today, across {total_waves} waves")
 with k2:
     kpi_card("Total Demand", f"{total_demand:,}", "cases ordered")
 with k3:
-    kpi_card("Overall Fill Rate", f"{overall_fill*100:.0f}%", "available vs. demand")
-with k4:
     kpi_card("Shortage Cases", f"{total_shortage:,}", "cases still missing")
-with k5:
+with k4:
     kpi_card("Loads Fully Met", f"{loads_met_pct:.0f}%", "of load lines fully covered")
+with k5:
+    kpi_card("Move Next", move_next_value, move_next_sub)
 
 st.write("")
 
