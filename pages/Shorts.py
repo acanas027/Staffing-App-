@@ -257,33 +257,11 @@ try:
     # item number used on the short sheet, e.g. "68820.13" + "081" = "68820.13081".
     match_df = short_clean.merge(clean_df, left_on="Item", right_on="SKU", how="left")
 
-    # ---- TRAILER PRIORITY ----
-    dispatch_lookup = short_clean.groupby("Item", as_index=False)["Dispatch"].min()
-    dispatch_lookup = dispatch_lookup.rename(columns={"Dispatch": "Item_Dispatch"})
-    match_with_dispatch = match_df.merge(dispatch_lookup, on="Item", how="left")
-
-    trailer_priority = match_with_dispatch.groupby("Trailer").agg(
-        Demand_Served=("Cases", "sum"),
-        SKU_Count=("Item", "nunique"),
-        Earliest_Dispatch=("Item_Dispatch", "min")
-    ).reset_index()
-
-    trailer_priority["Priority_Score"] = (
-        trailer_priority["Demand_Served"] / trailer_priority["SKU_Count"]
-    )
-
-    trailer_priority = trailer_priority.sort_values(
-        by=["Earliest_Dispatch", "Priority_Score"],
-        ascending=[True, False]
-    ).reset_index(drop=True)
-
-    trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
-
     # ---- LOAD COVERAGE + FILL (with real inventory allocation) ----
-    # An item family's total inventory is shared across every load that needs it — two
-    # loads can't both get credit for the same physical cases. Demand is allocated
-    # family-by-family in dispatch order (earliest-shipping load first), so once a
-    # family's cases run out, later loads correctly show as Partial/Short.
+    # An item's total inventory is shared across every load that needs it — two loads
+    # can't both get credit for the same physical cases. Demand is allocated item-by-item
+    # in dispatch order (earliest-shipping load first), so once an item's cases run out,
+    # later loads correctly show as Partial/Short instead of both showing Full.
     item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
@@ -311,6 +289,81 @@ try:
 
     alloc["Status"] = alloc["Fill_Rate"].apply(get_status)
 
+    # ---- EXCEPTIONS ----
+    exceptions_raw = alloc[alloc["Status"] != "Full ✅"].copy()
+
+    # ---- OPTIMIZED TRAILERS ----
+    # For each item still short/partial, find the physical trailers that carry it and
+    # how many cases each one holds (Fix_Cases — properly summed across every pallet/LPN
+    # on that trailer, not just deduplicated rows), and how many distinct loads are
+    # waiting on that item (Loads_Impacted). Computed here, before trailer priority, so
+    # Loads_Impacted can feed directly into the priority ranking below.
+    problem_items = exceptions_raw["Item"].unique()
+
+    trailer_item_qty = clean_df[clean_df["SKU"].isin(problem_items)].groupby(
+        ["Trailer", "SKU"], as_index=False
+    )["Quantity"].sum().rename(columns={"SKU": "Item"})
+
+    loads_per_item = exceptions_raw.groupby("Item")["Trip"].nunique()
+    trailer_item_qty["Loads_Impacted"] = trailer_item_qty["Item"].map(loads_per_item).fillna(0).astype(int)
+
+    optimized_trailers = trailer_item_qty.groupby("Trailer").agg(
+        Fix_Cases=("Quantity", "sum"),
+        Loads_Impacted=("Loads_Impacted", "sum")
+    ).reset_index().sort_values(by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False])
+
+    top4_trailers = optimized_trailers.head(4).copy()
+    top4_trailers.insert(0, "Rank", range(1, len(top4_trailers) + 1))
+
+    # ---- TRAILER PRIORITY ----
+    # Blends two things equally: how urgent the trailer's demand is (Earliest_Dispatch —
+    # sooner is more urgent) and how many currently-short/partial loads it would help fix
+    # (Loads_Impacted — more is better). Both are normalized to a 0-1 scale so neither
+    # dominates just because of its raw units, then averaged 50/50 into one score.
+    # Priority_Score (demand efficiency) remains as the final tiebreaker.
+    dispatch_lookup = short_clean.groupby("Item", as_index=False)["Dispatch"].min()
+    dispatch_lookup = dispatch_lookup.rename(columns={"Dispatch": "Item_Dispatch"})
+    match_with_dispatch = match_df.merge(dispatch_lookup, on="Item", how="left")
+
+    trailer_priority = match_with_dispatch.groupby("Trailer").agg(
+        Demand_Served=("Cases", "sum"),
+        SKU_Count=("Item", "nunique"),
+        Earliest_Dispatch=("Item_Dispatch", "min")
+    ).reset_index()
+
+    trailer_priority["Priority_Score"] = (
+        trailer_priority["Demand_Served"] / trailer_priority["SKU_Count"]
+    )
+
+    loads_impacted_lookup = optimized_trailers.set_index("Trailer")["Loads_Impacted"]
+    trailer_priority["Loads_Impacted"] = trailer_priority["Trailer"].map(loads_impacted_lookup).fillna(0).astype(int)
+
+    dispatch_min = trailer_priority["Earliest_Dispatch"].min()
+    dispatch_max = trailer_priority["Earliest_Dispatch"].max()
+    if dispatch_max > dispatch_min:
+        trailer_priority["Urgency_Score"] = 1 - (
+            (trailer_priority["Earliest_Dispatch"] - dispatch_min) / (dispatch_max - dispatch_min)
+        )
+    else:
+        trailer_priority["Urgency_Score"] = 1.0
+
+    loads_max = trailer_priority["Loads_Impacted"].max()
+    if loads_max > 0:
+        trailer_priority["Fix_Score"] = trailer_priority["Loads_Impacted"] / loads_max
+    else:
+        trailer_priority["Fix_Score"] = 0.0
+
+    trailer_priority["Blended_Score"] = (
+        0.5 * trailer_priority["Urgency_Score"] + 0.5 * trailer_priority["Fix_Score"]
+    )
+
+    trailer_priority = trailer_priority.sort_values(
+        by=["Blended_Score", "Priority_Score"],
+        ascending=[False, False]
+    ).reset_index(drop=True)
+
+    trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
+
     # Which trailer(s) actually carry this exact item, and the earliest wave any of
     # them unload in — this is "where to find it," shown for reference. Blank means no
     # trailer currently carries this item at all (a genuine inventory gap).
@@ -327,34 +380,11 @@ try:
          "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Shortage_Cases"]
     ]
 
-    # ---- EXCEPTIONS ----
     exceptions = load_trailer[load_trailer["Status"] != "Full ✅"].copy()
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
-    # ---- OPTIMIZED TRAILERS ----
-    # For each item still short/partial, find the physical trailers that carry it and
-    # how many cases each one holds (Fix_Cases — properly summed across every pallet/LPN
-    # on that trailer, not just deduplicated rows), and how many distinct loads are
-    # waiting on that item (Loads_Impacted).
-    problem_items = exceptions["Item"].unique()
-
-    trailer_item_qty = clean_df[clean_df["SKU"].isin(problem_items)].groupby(
-        ["Trailer", "SKU"], as_index=False
-    )["Quantity"].sum().rename(columns={"SKU": "Item"})
-
-    loads_per_item = exceptions.groupby("Item")["Trip"].nunique()
-    trailer_item_qty["Loads_Impacted"] = trailer_item_qty["Item"].map(loads_per_item).fillna(0).astype(int)
-
-    optimized_trailers = trailer_item_qty.groupby("Trailer").agg(
-        Fix_Cases=("Quantity", "sum"),
-        Loads_Impacted=("Loads_Impacted", "sum")
-    ).reset_index().sort_values(by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False])
-
-    top4_trailers = optimized_trailers.head(4).copy()
-    top4_trailers.insert(0, "Rank", range(1, len(top4_trailers) + 1))
-
     # ---- FORMAT EXPORTS ----
-    dock_plan_export = trailer_priority.copy()
+    dock_plan_export = trailer_priority.drop(columns=["Urgency_Score", "Fix_Score", "Blended_Score"]).copy()
     dock_plan_export["Priority_Score"] = dock_plan_export["Priority_Score"].round(0)
     dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
     cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
@@ -492,9 +522,9 @@ with tab_wave:
     st.subheader("Dock Plan — Trailers in Priority Order")
     st.caption("Trailers are listed in the order they should be unloaded today.")
     st.caption(
-        "Priority Score = Demand Served ÷ SKU Count — the average cases served per distinct item on "
-        "that trailer. A high score means the trailer covers a lot of demand with very few items "
-        "(efficient to unload); a lower score means demand is spread across more items."
+        "Priority blends two things equally: how soon the trailer's demand ships (urgency) and "
+        "how many currently-short/partial loads it would help fix (Loads_Impacted). "
+        "Priority_Score (Demand Served ÷ SKU Count — cases served per distinct item) is the tiebreaker."
     )
     st.dataframe(
         dock_plan_export.sort_values("Priority"),
