@@ -37,7 +37,7 @@ STATUS_COLORS = {
 
 def inject_dashboard_style():
     """Professional styling — only applied to the results dashboard,
-    never to the upload screen or sidebar, so those stay plain/default."""
+    never to the upload screen, so that one stays plain/default."""
     st.markdown(f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
@@ -147,26 +147,28 @@ st.title("Shorts analysis Tool")
 st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
-# SIDEBAR — INPUTS (plain, default Streamlit styling)
+# INPUTS (plain, default Streamlit styling, on the page)
 # =====================================================================
-with st.sidebar:
-    st.markdown("### Data Inputs")
+st.markdown("### Data Inputs")
+col1, col2 = st.columns(2)
+with col1:
     book_file = st.file_uploader("Trailer inventory", type=["xlsx"])
+with col2:
     short_file = st.file_uploader("Order shorts (short sheet.xlsx)", type=["xlsx"])
-    st.markdown("---")
-    run = st.button("Run Analysis", use_container_width=True)
-    st.markdown("---")
-    st.caption(
-        "Wave size and priority scoring are fixed at 4 trailers per wave, "
-        "ranked by earliest dispatch time and demand efficiency."
-    )
+
+run = st.button("Run Analysis")
+st.caption(
+    "Wave size and priority scoring are fixed at 4 trailers per wave, "
+    "ranked by earliest dispatch time and demand efficiency."
+)
+st.divider()
 
 if not book_file or not short_file:
-    st.info("Upload both files in the sidebar, then click **Run Analysis**.")
+    st.info("Upload both files above, then click **Run Analysis**.")
     st.stop()
 
 if not run:
-    st.info("Files loaded. Click **Run Analysis** in the sidebar to generate the dashboard.")
+    st.info("Files loaded. Click **Run Analysis** to generate the dashboard.")
     st.stop()
 
 # =====================================================================
@@ -469,13 +471,10 @@ def build_excel():
     buffer.seek(0)
     return buffer
 
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("### Export")
-    st.download_button(
-        label="Download Full Report (.xlsx)",
-        data=build_excel(),
-        file_name="Short_Analysis.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
+st.markdown("### Export")
+st.download_button(
+    label="Download Full Report (.xlsx)",
+    data=build_excel(),
+    file_name="Short_Analysis.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
