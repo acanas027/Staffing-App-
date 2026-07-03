@@ -444,32 +444,30 @@ try:
         0.5 * trailer_priority["Urgency_Score"] + 0.5 * trailer_priority["Fix_Score"]
     )
 
-    # Prioritize only trailers that actually help fix a Short/Partial load.
-    # Trailers with Loads_Impacted = 0 stay available in the background,
-    # but they do not receive a wave priority because they do not solve a current shortage.
+    # Prioritize trailers that actually solve/supply at least one load.
+    # Shortage-fixing trailers still come first, but trailers that cover Full loads
+    # also receive a wave. Trailers that do not solve any load stay out of the Wave Plan.
     trailer_priority["Fixes_Shortage"] = trailer_priority["Loads_Impacted"] > 0
+
+    # First pass sort: used only to choose ONE best trailer per item for Load Coverage.
+    # This keeps the Load Coverage report from showing multiple trailers in one cell.
     trailer_priority = trailer_priority.sort_values(
         by=["Fixes_Shortage", "Loads_Impacted", "Earliest_Dispatch", "Priority_Score"],
         ascending=[False, False, True, False]
     ).reset_index(drop=True)
-
-    trailer_priority["Wave"] = np.nan
-    trailer_priority["Trailer_Priority"] = np.nan
-    fix_mask = trailer_priority["Loads_Impacted"] > 0
-    trailer_priority.loc[fix_mask, "Trailer_Priority"] = range(1, int(fix_mask.sum()) + 1)
-    trailer_priority.loc[fix_mask, "Wave"] = ((trailer_priority.loc[fix_mask, "Trailer_Priority"] - 1) // 4) + 1
+    trailer_priority["Selection_Rank"] = range(1, len(trailer_priority) + 1)
 
     # For Load Coverage, show only ONE trailer per row.
-    # The selected trailer is the highest-priority shortage-fixing trailer for that item.
-    # This avoids multiple trailers in one cell while keeping the wave count clean.
+    # The selected trailer is the best available trailer for that item based on the
+    # background priority logic above.
     trailer_lookup_base = clean_df[["SKU", "Trailer"]].drop_duplicates().merge(
-        trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
+        trailer_priority[["Trailer", "Selection_Rank"]],
         on="Trailer",
         how="left"
     )
 
     priority_trailer_lookup = trailer_lookup_base.sort_values(
-        by=["SKU", "Trailer_Priority"],
+        by=["SKU", "Selection_Rank"],
         na_position="last"
     ).groupby("SKU", as_index=False).first()
 
@@ -477,8 +475,39 @@ try:
         columns={"SKU": "Item", "Trailer": "Trailer"}
     )
 
-    load_trailer = alloc.merge(priority_trailer_lookup, on="Item", how="left")
+    load_trailer = alloc.merge(priority_trailer_lookup[["Item", "Trailer"]], on="Item", how="left")
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
+
+    # A trailer "solves" a load when the selected trailer for an item contributes
+    # allocated cases to that trip. This includes Full and Partial rows.
+    solved_loads_lookup = load_trailer[load_trailer["Allocated_Cases"] > 0].groupby("Trailer")["Trip"].nunique()
+    trailer_priority["Loads_Solved"] = trailer_priority["Trailer"].map(solved_loads_lookup).fillna(0).astype(int)
+    trailer_priority["Solves_Load"] = trailer_priority["Loads_Solved"] > 0
+
+    # Final Wave Plan ranking:
+    # 1) trailers that solve loads first
+    # 2) shortage-fixing trailers before non-shortage demand trailers
+    # 3) more impacted/solved loads first
+    # 4) earlier dispatch first
+    # 5) demand efficiency as final hidden tiebreaker
+    trailer_priority = trailer_priority.sort_values(
+        by=["Solves_Load", "Fixes_Shortage", "Loads_Impacted", "Loads_Solved", "Earliest_Dispatch", "Priority_Score"],
+        ascending=[False, False, False, False, True, False]
+    ).reset_index(drop=True)
+
+    trailer_priority["Wave"] = np.nan
+    trailer_priority["Trailer_Priority"] = np.nan
+    solve_mask = trailer_priority["Solves_Load"]
+    trailer_priority.loc[solve_mask, "Trailer_Priority"] = range(1, int(solve_mask.sum()) + 1)
+    trailer_priority.loc[solve_mask, "Wave"] = ((trailer_priority.loc[solve_mask, "Trailer_Priority"] - 1) // 4) + 1
+
+    # Add the final wave/priority back to Load Coverage using the single selected trailer.
+    load_trailer = load_trailer.merge(
+        trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
+        on="Trailer",
+        how="left"
+    )
+
     load_trailer = load_trailer[
         ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
          "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
@@ -488,8 +517,8 @@ try:
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
-    dock_plan_export = trailer_priority[trailer_priority["Loads_Impacted"] > 0].drop(
-        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority", "Priority_Score", "Loads_Impacted", "Fixes_Shortage"]
+    dock_plan_export = trailer_priority[trailer_priority["Solves_Load"]].drop(
+        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority", "Priority_Score", "Loads_Impacted", "Fixes_Shortage", "Selection_Rank", "Loads_Solved", "Solves_Load"]
     ).copy()
     dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
     cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
