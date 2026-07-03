@@ -172,8 +172,8 @@ def build_status_table(df, status_col="Status"):
     return table
 
 
-def build_full_pdf(title, kpis, figs, wave_df, load_df):
-    """One combined PDF: Overview (KPIs + charts), Wave Plan, and Load Coverage — each on its own page."""
+def build_full_pdf(title, kpis, figs, load_df):
+    """One combined PDF: Overview (KPIs + charts) and Load Coverage only."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=portrait(letter),
@@ -244,15 +244,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
         )
     )
 
-    # ---- Page 2: Wave Plan ----
-    story.append(PageBreak())
-    story.append(Paragraph(f"{title} — Wave Plan", styles["Title"]))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("Dock Plan — Trailers in Priority Order", styles["Heading2"]))
-    story.append(Spacer(1, 6))
-    story.append(build_status_table(wave_df))
-
-    # ---- Page 3: Load Coverage ----
+    # ---- Page 2: Load Coverage ----
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Load Coverage", styles["Title"]))
     story.append(Spacer(1, 10))
@@ -480,6 +472,17 @@ try:
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
 
+    # Sort Load Coverage in the same practical order as the unloading waves:
+    # Wave 1 first, then Wave 2, Wave 3, and so on.
+    # Items with no wave/no trailer found are pushed to the bottom because
+    # unloading a trailer cannot currently add value for those rows.
+    load_export["_Wave_Sort"] = load_export["Wave"].fillna(9999)
+    load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
+    load_export = load_export.sort_values(
+        by=["_No_Value_Sort", "_Wave_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
+        ascending=[True, True, True, True, True, False]
+    ).drop(columns=["_Wave_Sort", "_No_Value_Sort"]).reset_index(drop=True)
+
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
 
@@ -687,7 +690,6 @@ with c2:
                 ("Trailer Priority Order — Today", fig2),
                 ("Top Shortage Items", fig4),
             ],
-            wave_df=dock_plan_export.sort_values("Priority"),
             load_df=load_export
         ),
         file_name="Shorts_Analysis_Report.pdf",
