@@ -9,7 +9,7 @@ from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
-
+from reportlab.lib import KeepInFrame 
 # =====================================================================
 # PAGE CONFIG
 # =====================================================================
@@ -206,8 +206,15 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
     story.append(kpi_table)
-    story.append(Spacer(1, 18))
-
+    story.append(Spacer(1, 18)
+    story.appendstory.append(
+        KeepInFrame(
+            maxWidth=doc.width,
+            maxHeight=doc.height,
+            content= overview_page,
+            mode="shrink" 
+        )
+    )
     images = []
     for chart_title, fig in figs:
         png_bytes = fig.to_image(format="png", scale=2, width=560, height=340)
