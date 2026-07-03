@@ -33,9 +33,9 @@ CARD = "#FFFFFF"
 TEXT_MUTED = "#6B7280"
 
 STATUS_COLORS = {
-    "Full ✅": SUCCESS,
-    "Partial ⚠️": WARNING,
-    "Short ❌": DANGER,
+    "Full": SUCCESS,
+    "Partial": WARNING,
+    "Short": DANGER,
 }
 
 
@@ -145,9 +145,9 @@ def kpi_card(label, value, sub=""):
 
 
 STATUS_PDF_COLORS = {
-    "Full ✅": colors.HexColor("#C7F0D8"),
-    "Partial ⚠️": colors.HexColor("#FFE8A3"),
-    "Short ❌": colors.HexColor("#F5C2C7"),
+    "Full": colors.HexColor("#C7F0D8"),
+    "Partial": colors.HexColor("#FFE8A3"),
+    "Short": colors.HexColor("#F5C2C7"),
 }
 
 
@@ -344,7 +344,7 @@ try:
     alloc["Cum_Allocated"] = alloc[["Cum_Demand", "Total_Item_Inventory"]].min(axis=1)
     alloc["Prev_Cum_Allocated"] = alloc.groupby("Item")["Cum_Allocated"].shift(fill_value=0)
     alloc["Allocated_Cases"] = alloc["Cum_Allocated"] - alloc["Prev_Cum_Allocated"]
-    alloc["Shortage_Cases"] = alloc["Cases"] - alloc["Allocated_Cases"]
+    alloc["Actual_short_cases"] = alloc["Cases"] - alloc["Allocated_Cases"]
 
     alloc["Fill_Rate"] = (
         alloc["Allocated_Cases"] / alloc["Cases"]
@@ -352,16 +352,16 @@ try:
 
     def get_status(x):
         if x >= 1:
-            return "Full ✅"
+            return "Full"
         elif x > 0:
-            return "Partial ⚠️"
+            return "Partial"
         else:
-            return "Short ❌"
+            return "Short"
 
     alloc["Status"] = alloc["Fill_Rate"].apply(get_status)
 
     # ---- EXCEPTIONS ----
-    exceptions_raw = alloc[alloc["Status"] != "Full ✅"].copy()
+    exceptions_raw = alloc[alloc["Status"] != "Full"].copy()
 
     # ---- OPTIMIZED TRAILERS ----
     # For each item still short/partial, find the physical trailers that carry it and
@@ -448,10 +448,10 @@ try:
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
     load_trailer = load_trailer[
         ["Wave", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
-         "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Shortage_Cases"]
+         "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
     ]
 
-    exceptions = load_trailer[load_trailer["Status"] != "Full ✅"].copy()
+    exceptions = load_trailer[load_trailer["Status"] != "Full"].copy()
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
@@ -487,10 +487,10 @@ st.markdown("""
 # KPI ROW
 # =====================================================================
 total_trailers = dock_plan_export["Trailer"].nunique()
-total_demand = int(load_export["Demand_Cases"].sum())
-total_shortage = int(load_export["Shortage_Cases"].clip(lower=0).sum())
+total_cases_short = int(load_export["Demand_Cases"].sum())
+total_shortage = int(load_export["Actual_short_cases"].clip(lower=0).sum())
 total_waves = dock_plan_export["Wave"].nunique()
-loads_met_count = int(load_export["Status"].eq("Full ✅").sum())
+loads_met_count = int(load_export["Status"].eq("Full").sum())
 total_loads = len(load_export)
 
 if not top4_trailers.empty:
@@ -505,11 +505,11 @@ k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     kpi_card("Trailers Involved", f"{total_trailers}", f"carry items needed today, across {total_waves} waves")
 with k2:
-    kpi_card("Total Demand", f"{total_demand:,}", "cases ordered")
+    kpi_card("Total Cases Short", f"{total_cases_short:,}", "cases ordered")
 with k3:
-    kpi_card("Shortage Cases", f"{total_shortage:,}", "cases still missing")
+    kpi_card("Actual Short Cases", f"{total_shortage:,}", "cases still missing")
 with k4:
-    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total load lines")
+    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads able to load full")
 with k5:
     kpi_card("Move Next", move_next_value, move_next_sub)
 
@@ -565,15 +565,15 @@ with tab_overview:
 
     with c4:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        short_items = load_export[load_export["Shortage_Cases"] > 0]
+        short_items = load_export[load_export["Actual_short_cases"] > 0]
         top_skus = short_items.groupby("Item").agg(
-            Shortage_Cases=("Shortage_Cases", "sum"),
+            Actual_short_cases=("Actual_short_cases", "sum"),
             Trailer=("Trailer", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
         ).reset_index()
-        top_skus = top_skus.sort_values(by="Shortage_Cases", ascending=False).head(10)
+        top_skus = top_skus.sort_values(by="Actual_short_cases", ascending=False).head(10)
         fig4 = px.bar(
-            top_skus, x="Item", y="Shortage_Cases", title="Top Shortage Items",
-            text="Shortage_Cases", color_discrete_sequence=[DANGER],
+            top_skus, x="Item", y="Actual_short_cases", title="Top Shortage Items",
+            text="Actual_short_cases", color_discrete_sequence=[DANGER],
             hover_data={"Trailer": True, "Item": False}
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
@@ -608,7 +608,7 @@ with tab_load:
     st.caption("Status: green = Full, yellow = Partial, red = Short.")
 
     def highlight_status(val):
-        color_map = {"Full ✅": "#C7F0D8", "Partial ⚠️": "#FFE8A3", "Short ❌": "#F5C2C7"}
+        color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
         return f"background-color: {color_map.get(val, '')}"
 
     try:
@@ -653,10 +653,10 @@ with c2:
     st.download_button(
         label="Download Full Report (.pdf)",
         data=build_full_pdf(
-            "Dock Optimization Results",
+            "Shorts Analysis Results",
             kpis=[
                 ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
-                ("Total Demand", f"{total_demand:,}", "cases ordered"),
+                ("Total Demand", f"{total_cases_short:,}", "cases ordered"),
                 ("Shortage Cases", f"{total_shortage:,}", "cases still missing"),
                 ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total load lines"),
                 ("Move Next", move_next_value, move_next_sub),
@@ -670,6 +670,6 @@ with c2:
             wave_df=dock_plan_export.sort_values("Priority"),
             load_df=load_export
         ),
-        file_name="Dock_Optimization_Report.pdf",
+        file_name="Shorts_Analysis_Report.pdf",
         mime="application/pdf"
     )
