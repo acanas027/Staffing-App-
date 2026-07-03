@@ -176,7 +176,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     """One combined PDF: Overview (KPIs + charts), Wave Plan, and Load Coverage — each on its own page."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
-        buffer, pagesize=landscape(letter),
+        buffer, pagesize=portrait(letter),
         topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
     )
     styles = getSampleStyleSheet()
