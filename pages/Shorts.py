@@ -5,6 +5,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from openpyxl.styles import Alignment
 from io import BytesIO
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 # =====================================================================
 # PAGE CONFIG
@@ -138,6 +142,40 @@ def kpi_card(label, value, sub=""):
         <div class="kpi-sub">{sub}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def build_pdf(title, tables):
+    """tables: list of (section_title, dataframe) tuples, rendered as one PDF."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(letter),
+        topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
+    )
+    styles = getSampleStyleSheet()
+    story = [Paragraph(title, styles["Title"]), Spacer(1, 14)]
+
+    for section_title, df in tables:
+        story.append(Paragraph(section_title, styles["Heading2"]))
+        story.append(Spacer(1, 6))
+        if df.empty:
+            story.append(Paragraph("No rows.", styles["Normal"]))
+        else:
+            data = [list(df.columns)] + df.astype(str).values.tolist()
+            table = Table(data, repeatRows=1)
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F6F8")]),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            story.append(table)
+        story.append(Spacer(1, 20))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 
 # =====================================================================
@@ -318,7 +356,8 @@ try:
     # ---- FORMAT EXPORTS ----
     dock_plan_export = trailer_priority.copy()
     dock_plan_export["Priority_Score"] = dock_plan_export["Priority_Score"].round(0)
-    cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
+    dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
+    cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
     dock_plan_export = dock_plan_export[cols]
 
     load_export = load_trailer.copy()
@@ -377,8 +416,8 @@ st.write("")
 # =====================================================================
 # TABS
 # =====================================================================
-tab_overview, tab_wave, tab_load, tab_exceptions, tab_fix = st.tabs(
-    ["Overview", "Wave Plan", "Load Coverage", "Exceptions", "Top Fixes"]
+tab_overview, tab_wave, tab_load, tab_fix = st.tabs(
+    ["Overview", "Wave Plan", "Load Coverage & Exceptions", "Top Fixes"]
 )
 
 # ---------------- OVERVIEW ----------------
@@ -408,13 +447,17 @@ with tab_overview:
     c3, c4 = st.columns(2)
     with c3:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        priority_order = dock_plan_export.sort_values("Priority")
         fig2 = px.bar(
-            top4_trailers, x="Trailer", y="Fix_Cases",
-            title="Top 4 Trailers to Move to Door", text="Fix_Cases",
-            color_discrete_sequence=[SUCCESS]
+            priority_order, x="Demand_Served", y="Trailer", orientation="h",
+            color="Wave", text="Priority", title="Trailer Priority Order — Today",
+            category_orders={"Trailer": priority_order["Trailer"].tolist()},
+            color_continuous_scale=[STEEL, AMBER]
         )
+        fig2.update_yaxes(autorange="reversed")
+        fig2.update_traces(texttemplate="#%{text}", textposition="outside")
         st.plotly_chart(style_fig(fig2), use_container_width=True)
-        st.caption("Unload these trailers next — they resolve the most shortage cases across the most loads.")
+        st.caption("The order to unload trailers today — #1 first. Bar length shows demand tied to that trailer.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c4:
@@ -434,41 +477,43 @@ with tab_overview:
         st.caption("Hover a bar to see which trailer(s), if any, carry that item.")
         st.markdown('</div>', unsafe_allow_html=True)
 
+    st.download_button(
+        "Download PDF",
+        data=build_pdf("Overview", [
+            ("Trailer Priority Order — Today", priority_order),
+            ("Top Shortage Drivers", top_skus)
+        ]),
+        file_name="Overview.pdf", mime="application/pdf"
+    )
+
 # ---------------- WAVE PLAN ----------------
 with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Dock Plan — Trailers by Wave")
-    st.caption("Wave 1 should be unloaded first. Sorted by earliest dispatch time, then priority score.")
+    st.subheader("Dock Plan — Trailers in Priority Order")
+    st.caption("Trailers are listed in the order they should be unloaded today.")
     st.caption(
         "Priority Score = Demand Served ÷ SKU Count — the average cases served per distinct item on "
         "that trailer. A high score means the trailer covers a lot of demand with very few items "
         "(efficient to unload); a lower score means demand is spread across more items."
     )
-    wave_filter = st.multiselect(
-        "Filter by wave", sorted(dock_plan_export["Wave"].unique()),
-        default=sorted(dock_plan_export["Wave"].unique())
-    )
     st.dataframe(
-        dock_plan_export[dock_plan_export["Wave"].isin(wave_filter)],
+        dock_plan_export.sort_values("Priority"),
         use_container_width=True, hide_index=True
     )
     st.markdown('</div>', unsafe_allow_html=True)
+    st.download_button(
+        "Download PDF",
+        data=build_pdf("Wave Plan", [("Dock Plan — Trailers in Priority Order", dock_plan_export.sort_values("Priority"))]),
+        file_name="Wave_Plan.pdf", mime="application/pdf"
+    )
 
-# ---------------- LOAD COVERAGE ----------------
+# ---------------- LOAD COVERAGE & EXCEPTIONS ----------------
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    status_filter = st.multiselect(
-        "Filter by status", list(STATUS_COLORS.keys()), default=list(STATUS_COLORS.keys())
-    )
-    st.dataframe(
-        load_export[load_export["Status"].isin(status_filter)],
-        use_container_width=True, hide_index=True
-    )
+    st.dataframe(load_export, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------------- EXCEPTIONS ----------------
-with tab_exceptions:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Exception Report — Partial & Short Loads")
     st.caption("Sorted by dispatch time. These are the loads that need attention before they ship.")
@@ -478,6 +523,15 @@ with tab_exceptions:
     )
     st.dataframe(exception_export, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
+    st.download_button(
+        "Download PDF",
+        data=build_pdf("Load Coverage & Exceptions", [
+            ("Load Coverage", load_export),
+            ("Exception Report", exception_export)
+        ]),
+        file_name="Load_Coverage_and_Exceptions.pdf", mime="application/pdf"
+    )
 
 # ---------------- TOP FIXES ----------------
 with tab_fix:
@@ -506,6 +560,15 @@ with tab_fix:
     st.subheader("All Optimized Trailers")
     st.dataframe(optimized_trailers, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
+
+    st.download_button(
+        "Download PDF",
+        data=build_pdf("Top Fixes", [
+            ("Top 4 Trailers to Fix Shorts", top4_trailers),
+            ("All Optimized Trailers", optimized_trailers)
+        ]),
+        file_name="Top_Fixes.pdf", mime="application/pdf"
+    )
 
 # =====================================================================
 # EXPORT
