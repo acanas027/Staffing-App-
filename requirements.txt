@@ -18,3 +18,5 @@ streamlit-paste-button>=0.1.2
 tzdata
 pdfplumber
 openpyxl>=3.1
+numpy
+plotly
