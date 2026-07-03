@@ -10,7 +10,7 @@ from io import BytesIO
 # PAGE CONFIG
 # =====================================================================
 st.set_page_config(
-    page_title="Dock Optimization Tool",
+    page_title="Shorts Analysis Tool",
     layout="wide",
     initial_sidebar_state="expanded"
 )
