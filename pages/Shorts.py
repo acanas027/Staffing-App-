@@ -183,11 +183,15 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story = []
 
     # ---- Page 1: Overview ----
-    story.append(Paragraph(f"{title} — Overview", styles["Title"]))
-    story.append(Spacer(1, 14))
+    overview_page = []
+
+    overview_page.append(Paragraph(f"{title} — Overview", styles["Title"]))
+    overview_page.append(Spacer(1, 14))
+
     header_row = [k[0] for k in kpis]
     value_row = [k[1] for k in kpis]
     sub_row = [k[2] for k in kpis]
+
     kpi_table = Table([header_row, value_row, sub_row], colWidths=[150] * len(kpis))
     kpi_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
@@ -205,18 +209,22 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
         ("TOPPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
-    story.append(kpi_table)
-    story.append(Spacer(1, 18))
+
+    overview_page.append(kpi_table)
+    overview_page.append(Spacer(1, 18))
+
     images = []
     for chart_title, fig in figs:
         png_bytes = fig.to_image(format="png", scale=2, width=560, height=340)
         images.append(Image(BytesIO(png_bytes), width=350, height=213))
+
     rows = []
     for i in range(0, len(images), 2):
         pair = images[i:i + 2]
         if len(pair) == 1:
             pair.append("")
         rows.append(pair)
+
     if rows:
         chart_table = Table(rows, colWidths=[360, 360])
         chart_table.setStyle(TableStyle([
@@ -225,7 +233,16 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
             ("TOPPADDING", (0, 0), (-1, -1), 10),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
         ]))
-        story.append(chart_table)
+        overview_page.append(chart_table)
+
+    story.append(
+        KeepInFrame(
+            doc.width,
+            doc.height,
+            overview_page,
+            mode="shrink"
+        )
+    )
 
     # ---- Page 2: Wave Plan ----
     story.append(PageBreak())
