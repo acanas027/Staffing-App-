@@ -41,7 +41,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts / Shorts From Loads — Rep Email Generator")
+st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -338,6 +338,11 @@ def extract_shift_rows(wb, sheet_name):
                 "QUANTITY CASES CUT": qty,
                 "REASON CODE": reason_code,
                 "REASON DESCRIPTION": reason_desc,
+                "_SHEET": sheet_name,
+                "_ROW": r,
+                "_HEADER_ROW": header_row_idx,
+                "_CUSTOMER_COL": col_map.get("CUSTOMER"),
+                "_LAST_COL": max(col_map.values()) if col_map else None,
             }
         )
 
@@ -549,6 +554,11 @@ def parse_daily_cuts_sheet(wb):
                 "QUANTITY CASES CUT": case_count,
                 "REASON CODE": reason_code_out,
                 "REASON DESCRIPTION": reason_description_out,
+                "_SHEET": ws.title,
+                "_ROW": r,
+                "_HEADER_ROW": header_row_idx,
+                "_CUSTOMER_COL": None,  # Daily Cuts has no CUSTOMER column to write into
+                "_LAST_COL": ws.max_column,
             }
         )
 
@@ -979,6 +989,62 @@ def build_mailto(to_addr, subject, body):
     return f"mailto:{(to_addr or '').strip()}?{params}"
 
 
+def build_updated_workbook(uploaded_file, df):
+    """
+    Writes the resolved CUSTOMER (wherever it was UNKNOWN and got filled in
+    by the manifest) and a new REP column back into the ORIGINAL uploaded
+    workbook, at the exact row each line item came from, and returns the
+    saved file as bytes for download.
+
+    Re-opens the uploaded file fresh WITHOUT data_only=True -- the app's
+    main copy is loaded with data_only=True so formula cells (like the
+    sheet's own XLOOKUP-based CS REP column) read as their cached values;
+    saving that copy back out would flatten every formula in the workbook
+    to a static value, silently destroying them. This fresh copy keeps
+    formulas intact everywhere except the specific cells written below.
+
+    A REP column is added one column to the right of the existing data on
+    each affected sheet (only if that sheet doesn't already have one), with
+    its header written on the same header row the rest of that sheet uses.
+    Rows sourced from a Daily Cuts-style sheet (no CUSTOMER column at all)
+    still get the CUSTOMER and REP values -- just added as new columns, since
+    there's nowhere existing to overwrite for CUSTOMER on that layout.
+    """
+    uploaded_file.seek(0)
+    wb_out = openpyxl.load_workbook(uploaded_file)
+
+    rep_cols = {}  # sheet_name -> column index chosen for the REP column
+
+    for _, row in df.iterrows():
+        sheet_name = row.get("_SHEET")
+        r = row.get("_ROW")
+        if not sheet_name or pd.isna(r) or sheet_name not in wb_out.sheetnames:
+            continue
+        ws = wb_out[sheet_name]
+        r = int(r)
+
+        if sheet_name not in rep_cols:
+            last_col = row.get("_LAST_COL")
+            last_col = int(last_col) if last_col and not pd.isna(last_col) else ws.max_column
+            rep_col = last_col + 1
+            header_row = row.get("_HEADER_ROW")
+            if header_row and not pd.isna(header_row):
+                ws.cell(row=int(header_row), column=rep_col).value = "REP"
+            rep_cols[sheet_name] = rep_col
+        rep_col = rep_cols[sheet_name]
+
+        cust_col = row.get("_CUSTOMER_COL")
+        if cust_col and not pd.isna(cust_col):
+            ws.cell(row=r, column=int(cust_col)).value = row["CUSTOMER"]
+
+        ws.cell(row=r, column=rep_col).value = row.get("REP") or ""
+
+    buffer = io.BytesIO()
+    wb_out.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 # --------------------------------------------------------------------------
 # MAIN APP
 # --------------------------------------------------------------------------
@@ -1071,6 +1137,22 @@ if uploaded:
         f"{len(matched)} matched to a rep, {len(unmatched)} need review"
     )
 
+    try:
+        updated_bytes = build_updated_workbook(uploaded, df)
+        st.download_button(
+            "⬇️ Download workbook with CUSTOMER + REP filled in",
+            data=updated_bytes,
+            file_name=f"filled_{uploaded.name}",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.caption(
+            "Your original workbook, unchanged except: CUSTOMER is filled in wherever "
+            "the manifest resolved it, and a new REP column is added showing the match "
+            "(blank where none was found)."
+        )
+    except Exception as e:
+        st.warning(f"Couldn't build the downloadable workbook: {e}")
+
     if not unmatched.empty:
         st.warning(
             f"{len(unmatched)} line item(s) couldn't be matched to a rep "
@@ -1102,7 +1184,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f" {rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
+                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -1121,4 +1203,4 @@ if uploaded:
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
