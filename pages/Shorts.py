@@ -11,7 +11,6 @@ from io import BytesIO
 # =====================================================================
 st.set_page_config(
     page_title="Dock Optimization Tool",
-    page_icon="🚛",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -144,18 +143,18 @@ def kpi_card(label, value, sub=""):
 # =====================================================================
 # HEADER (plain, matches the rest of the app's pages)
 # =====================================================================
-st.title("🚛 Dock Optimization Tool")
+st.title("Dock Optimization Tool")
 st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
 # SIDEBAR — INPUTS (plain, default Streamlit styling)
 # =====================================================================
 with st.sidebar:
-    st.markdown("### 📥 Data Inputs")
-    book_file = st.file_uploader("Trailer inventory (Book1.xlsx)", type=["xlsx"])
+    st.markdown("### Data Inputs")
+    book_file = st.file_uploader("Trailer inventory", type=["xlsx"])
     short_file = st.file_uploader("Order shorts (short sheet.xlsx)", type=["xlsx"])
     st.markdown("---")
-    run = st.button("▶  Run Optimization", use_container_width=True)
+    run = st.button("Run Analysis", use_container_width=True)
     st.markdown("---")
     st.caption(
         "Wave size and priority scoring are fixed at 4 trailers per wave, "
@@ -163,7 +162,7 @@ with st.sidebar:
     )
 
 if not book_file or not short_file:
-    st.info("👈 Upload both files in the sidebar, then click **Run Optimization**.")
+    st.info("Upload both files in the sidebar, then click **Run Optimization**.")
     st.stop()
 
 if not run:
@@ -304,7 +303,7 @@ inject_dashboard_style()
 
 st.markdown("""
 <div class="dock-header">
-    <h1>🚛 Dock Optimization Results</h1>
+    <h1>Dock Optimization Results</h1>
     <p>Prioritized unloading plan generated from your uploaded files.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -340,7 +339,7 @@ st.write("")
 # TABS
 # =====================================================================
 tab_overview, tab_wave, tab_load, tab_exceptions, tab_fix = st.tabs(
-    ["📊 Overview", "🗂️ Wave Plan", "📦 Load Coverage", "🚨 Exceptions", "🟢 Top Fixes"]
+    ["Overview", "Wave Plan", "Load Coverage", "Exceptions", "Top Fixes"]
 )
 
 # ---------------- OVERVIEW ----------------
@@ -472,7 +471,7 @@ def build_excel():
 
 with st.sidebar:
     st.markdown("---")
-    st.markdown("### 📤 Export")
+    st.markdown("### Export")
     st.download_button(
         label="Download Full Report (.xlsx)",
         data=build_excel(),
