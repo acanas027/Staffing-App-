@@ -444,19 +444,24 @@ try:
         0.5 * trailer_priority["Urgency_Score"] + 0.5 * trailer_priority["Fix_Score"]
     )
 
+    # Prioritize only trailers that actually help fix a Short/Partial load.
+    # Trailers with Loads_Impacted = 0 stay available in the background,
+    # but they do not receive a wave priority because they do not solve a current shortage.
+    trailer_priority["Fixes_Shortage"] = trailer_priority["Loads_Impacted"] > 0
     trailer_priority = trailer_priority.sort_values(
-        by=["Blended_Score", "Priority_Score"],
-        ascending=[False, False]
+        by=["Fixes_Shortage", "Loads_Impacted", "Earliest_Dispatch", "Priority_Score"],
+        ascending=[False, False, True, False]
     ).reset_index(drop=True)
 
-    trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
-    trailer_priority["Trailer_Priority"] = trailer_priority.index + 1
+    trailer_priority["Wave"] = np.nan
+    trailer_priority["Trailer_Priority"] = np.nan
+    fix_mask = trailer_priority["Loads_Impacted"] > 0
+    trailer_priority.loc[fix_mask, "Trailer_Priority"] = range(1, int(fix_mask.sum()) + 1)
+    trailer_priority.loc[fix_mask, "Wave"] = ((trailer_priority.loc[fix_mask, "Trailer_Priority"] - 1) // 4) + 1
 
-    # For Load Coverage, keep BOTH pieces of information:
-    # 1) Priority_Trailer = the one trailer that controls the wave/order for that item.
-    #    This keeps Wave 1 limited to 4 priority trailers, Wave 2 to the next 4, etc.
-    # 2) All_Trailers = every trailer where that item exists, so nothing disappears
-    #    from the report when the same item is available in more than one trailer.
+    # For Load Coverage, show only ONE trailer per row.
+    # The selected trailer is the highest-priority shortage-fixing trailer for that item.
+    # This avoids multiple trailers in one cell while keeping the wave count clean.
     trailer_lookup_base = clean_df[["SKU", "Trailer"]].drop_duplicates().merge(
         trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
         on="Trailer",
@@ -469,23 +474,13 @@ try:
     ).groupby("SKU", as_index=False).first()
 
     priority_trailer_lookup = priority_trailer_lookup.rename(
-        columns={"SKU": "Item", "Trailer": "Priority_Trailer"}
+        columns={"SKU": "Item", "Trailer": "Trailer"}
     )
 
-    all_trailer_lookup = trailer_lookup_base.groupby("SKU")["Trailer"].apply(
-        lambda s: ", ".join(sorted(set(s.astype(str))))
-    ).reset_index().rename(columns={"SKU": "Item", "Trailer": "All_Trailers"})
-
-    trailer_lookup = priority_trailer_lookup.merge(
-        all_trailer_lookup,
-        on="Item",
-        how="left"
-    )
-
-    load_trailer = alloc.merge(trailer_lookup, on="Item", how="left")
+    load_trailer = alloc.merge(priority_trailer_lookup, on="Item", how="left")
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
     load_trailer = load_trailer[
-        ["Wave", "Trailer_Priority", "Priority_Trailer", "All_Trailers", "Trip", "Item", "Dispatch", "Demand_Cases",
+        ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
          "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
     ]
 
@@ -493,10 +488,9 @@ try:
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
-    dock_plan_export = trailer_priority.drop(
-        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority"]
+    dock_plan_export = trailer_priority[trailer_priority["Loads_Impacted"] > 0].drop(
+        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority", "Priority_Score", "Loads_Impacted", "Fixes_Shortage"]
     ).copy()
-    dock_plan_export["Priority_Score"] = dock_plan_export["Priority_Score"].round(0)
     dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
     cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
     dock_plan_export = dock_plan_export[cols]
@@ -520,16 +514,14 @@ try:
 
     # Clean display: no more 1.0/2.0 or nan in the report.
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
-    load_export["Priority_Trailer"] = load_export["Priority_Trailer"].fillna("No priority trailer")
-    load_export["All_Trailers"] = load_export["All_Trailers"].fillna("No trailer found")
+    load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
     if "Trailer_Priority" in exception_export.columns:
         exception_export = exception_export.drop(columns=["Trailer_Priority"])
     exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
-    exception_export["Priority_Trailer"] = exception_export["Priority_Trailer"].fillna("No priority trailer")
-    exception_export["All_Trailers"] = exception_export["All_Trailers"].fillna("No trailer found")
+    exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -636,7 +628,7 @@ with tab_overview:
         short_items = load_export[load_export["Actual_short_cases"] > 0]
         top_skus = short_items.groupby("Item").agg(
             Actual_short_cases=("Actual_short_cases", "sum"),
-            Trailer=("All_Trailers", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
+            Trailer=("Trailer", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
         ).reset_index()
         top_skus = top_skus.sort_values(by="Actual_short_cases", ascending=False).head(10)
         fig4 = px.bar(
@@ -645,7 +637,7 @@ with tab_overview:
             hover_data={"Trailer": True, "Item": False}
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
-        st.caption("Hover a bar to see which trailer(s), if any, carry that item.")
+        st.caption("Hover a bar to see the selected trailer, if any, for that item.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- WAVE PLAN ----------------
@@ -654,14 +646,8 @@ with tab_wave:
     st.subheader("Dock Plan — Trailers in Priority Order")
     st.caption("Trailers are listed in the order they should be unloaded today.")
     st.caption(
-        "Priority blends two things equally: how soon the trailer's demand ships (urgency) and "
-        "how many currently-short/partial loads it would help fix (Loads_Impacted). "
-        "Priority_Score (Demand Served ÷ SKU Count — cases served per distinct item) is the tiebreaker."
-    )
-    st.caption(
-        "Loads_Impacted = 0 just means that trailer isn't carrying any item currently causing a "
-        "shortage — it can still rank high on urgency alone. It doesn't mean the trailer is unneeded, "
-        "only that it isn't one of today's shortage-fixers."
+        "Only trailers that help fix a current Short or Partial load are prioritized. "
+        "Trailers are ordered by shortage impact first, then earliest dispatch, then demand efficiency as a tiebreaker."
     )
     st.dataframe(
         dock_plan_export.sort_values("Priority"),
