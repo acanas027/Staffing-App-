@@ -143,7 +143,7 @@ def kpi_card(label, value, sub=""):
 # =====================================================================
 # HEADER (plain, matches the rest of the app's pages)
 # =====================================================================
-st.title("Dock Optimization Tool")
+st.title("Shorts analysis Tool")
 st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
@@ -162,11 +162,11 @@ with st.sidebar:
     )
 
 if not book_file or not short_file:
-    st.info("Upload both files in the sidebar, then click **Run Optimization**.")
+    st.info("Upload both files in the sidebar, then click **Run Analysis**.")
     st.stop()
 
 if not run:
-    st.info("Files loaded. Click **Run Optimization** in the sidebar to generate the dashboard.")
+    st.info("Files loaded. Click **Run Analysis** in the sidebar to generate the dashboard.")
     st.stop()
 
 # =====================================================================
@@ -475,7 +475,7 @@ with st.sidebar:
     st.download_button(
         label="Download Full Report (.xlsx)",
         data=build_excel(),
-        file_name="Dock_Optimization_Output.xlsx",
+        file_name="Short_Analysis.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
