@@ -7,9 +7,9 @@ from openpyxl.styles import Alignment
 from io import BytesIO
 from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak, KeepInFrame 
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import KeepInFrame 
+
 # =====================================================================
 # PAGE CONFIG
 # =====================================================================
