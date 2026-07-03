@@ -611,7 +611,10 @@ with tab_load:
         color_map = {"Full ✅": "#C7F0D8", "Partial ⚠️": "#FFE8A3", "Short ❌": "#F5C2C7"}
         return f"background-color: {color_map.get(val, '')}"
 
-    styled_load = load_export.style.applymap(highlight_status, subset=["Status"])
+    try:
+        styled_load = load_export.style.map(highlight_status, subset=["Status"])
+    except AttributeError:
+        styled_load = load_export.style.applymap(highlight_status, subset=["Status"])
     st.dataframe(styled_load, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
