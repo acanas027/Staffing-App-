@@ -1,5 +1,5 @@
 """
-Cuts / Shorts From Loads — Rep Email Generator
+Cuts From Loads-Rep Email Generator
 ------------------------------------------------
 Same pattern as the "Email this report" button on the Shift Closeout page:
 a mailto: link that opens your default mail app (Outlook) with the message
@@ -41,7 +41,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("📧 Cuts / Shorts From Loads — Rep Email Generator")
+st.title("Cuts From Loads — Rep Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -1091,7 +1091,7 @@ if uploaded:
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
 
             with st.expander(
-                f"✉️  {rep}  —  {email_addr or '⚠️ NO EMAIL ON FILE'}  "
+                f" {rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
@@ -1110,4 +1110,4 @@ if uploaded:
                             "let me know and I'll add a way to split large reps into "
                             "multiple emails."
                         )
-                    st.link_button("📤 Open email (ready to send in Outlook)", mailto_link)
+                    st.link_button("Open email (ready to send in Outlook)", mailto_link)
