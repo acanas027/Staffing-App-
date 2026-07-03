@@ -35,107 +35,83 @@ STATUS_COLORS = {
     "Short ❌": DANGER,
 }
 
-st.markdown(f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
 
-html, body, [class*="css"]  {{
-    font-family: 'Inter', sans-serif;
-}}
+def inject_dashboard_style():
+    """Professional styling — only applied to the results dashboard,
+    never to the upload screen or sidebar, so those stay plain/default."""
+    st.markdown(f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
 
-.stApp {{
-    background-color: {BG};
-}}
+    /* Scope font + heading styling to the main results block only */
+    div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h1,
+    div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h2,
+    div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h3 {{
+        font-family: 'Sora', sans-serif;
+        color: {NAVY};
+    }}
 
-h1, h2, h3 {{
-    font-family: 'Sora', sans-serif;
-    color: {NAVY};
-}}
+    /* Top banner */
+    .dock-header {{
+        background: linear-gradient(90deg, {NAVY} 0%, {STEEL} 100%);
+        padding: 28px 32px;
+        border-radius: 14px;
+        margin-bottom: 24px;
+        font-family: 'Inter', sans-serif;
+    }}
+    .dock-header h1 {{
+        color: #FFFFFF !important;
+        margin: 0;
+        font-size: 1.7rem;
+        font-family: 'Sora', sans-serif;
+    }}
+    .dock-header p {{
+        color: #D7DEE8;
+        margin: 6px 0 0 0;
+        font-size: 0.95rem;
+    }}
 
-/* Top banner */
-.dock-header {{
-    background: linear-gradient(90deg, {NAVY} 0%, {STEEL} 100%);
-    padding: 28px 32px;
-    border-radius: 14px;
-    margin-bottom: 24px;
-}}
-.dock-header h1 {{
-    color: #FFFFFF;
-    margin: 0;
-    font-size: 1.7rem;
-}}
-.dock-header p {{
-    color: #D7DEE8;
-    margin: 6px 0 0 0;
-    font-size: 0.95rem;
-}}
+    /* KPI cards */
+    .kpi-card {{
+        background: {CARD};
+        border-radius: 12px;
+        padding: 18px 20px;
+        box-shadow: 0 1px 3px rgba(18,35,63,0.08);
+        border-left: 4px solid {AMBER};
+        height: 100%;
+        font-family: 'Inter', sans-serif;
+    }}
+    .kpi-label {{
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: {TEXT_MUTED};
+        font-weight: 600;
+        margin-bottom: 4px;
+    }}
+    .kpi-value {{
+        font-family: 'Sora', sans-serif;
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: {NAVY};
+    }}
+    .kpi-sub {{
+        font-size: 0.78rem;
+        color: {TEXT_MUTED};
+        margin-top: 2px;
+    }}
 
-/* KPI cards */
-.kpi-card {{
-    background: {CARD};
-    border-radius: 12px;
-    padding: 18px 20px;
-    box-shadow: 0 1px 3px rgba(18,35,63,0.08);
-    border-left: 4px solid {AMBER};
-    height: 100%;
-}}
-.kpi-label {{
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: {TEXT_MUTED};
-    font-weight: 600;
-    margin-bottom: 4px;
-}}
-.kpi-value {{
-    font-family: 'Sora', sans-serif;
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: {NAVY};
-}}
-.kpi-sub {{
-    font-size: 0.78rem;
-    color: {TEXT_MUTED};
-    margin-top: 2px;
-}}
+    /* Section card wrapper */
+    .section-card {{
+        background: {CARD};
+        border-radius: 12px;
+        padding: 20px 22px;
+        box-shadow: 0 1px 3px rgba(18,35,63,0.06);
+        margin-bottom: 20px;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
-/* Section card wrapper */
-.section-card {{
-    background: {CARD};
-    border-radius: 12px;
-    padding: 20px 22px;
-    box-shadow: 0 1px 3px rgba(18,35,63,0.06);
-    margin-bottom: 20px;
-}}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {{
-    background-color: {NAVY};
-}}
-section[data-testid="stSidebar"] * {{
-    color: #F5F6F8 !important;
-}}
-section[data-testid="stSidebar"] .stButton button {{
-    background-color: {AMBER};
-    color: {NAVY};
-    font-weight: 600;
-    border: none;
-}}
-section[data-testid="stSidebar"] .stDownloadButton button {{
-    background-color: {AMBER};
-    color: {NAVY};
-    font-weight: 600;
-    border: none;
-    width: 100%;
-}}
-
-/* DataFrames */
-[data-testid="stDataFrame"] {{
-    border-radius: 10px;
-    overflow: hidden;
-}}
-</style>
-""", unsafe_allow_html=True)
 
 PLOTLY_TEMPLATE = "plotly_white"
 FONT = dict(family="Inter, sans-serif", color=NAVY)
@@ -166,17 +142,13 @@ def kpi_card(label, value, sub=""):
 
 
 # =====================================================================
-# HEADER
+# HEADER (plain, matches the rest of the app's pages)
 # =====================================================================
-st.markdown("""
-<div class="dock-header">
-    <h1>🚛 Dock Optimization Tool</h1>
-    <p>Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.</p>
-</div>
-""", unsafe_allow_html=True)
+st.title("🚛 Dock Optimization Tool")
+st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
-# SIDEBAR — INPUTS
+# SIDEBAR — INPUTS (plain, default Streamlit styling)
 # =====================================================================
 with st.sidebar:
     st.markdown("### 📥 Data Inputs")
@@ -324,6 +296,18 @@ try:
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
     st.stop()
+
+# =====================================================================
+# RESULTS DASHBOARD — professional styling starts here only
+# =====================================================================
+inject_dashboard_style()
+
+st.markdown("""
+<div class="dock-header">
+    <h1>🚛 Dock Optimization Results</h1>
+    <p>Prioritized unloading plan generated from your uploaded files.</p>
+</div>
+""", unsafe_allow_html=True)
 
 # =====================================================================
 # KPI ROW
