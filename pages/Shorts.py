@@ -7,7 +7,7 @@ from openpyxl.styles import Alignment
 from io import BytesIO
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
 
 # =====================================================================
@@ -77,40 +77,40 @@ def inject_dashboard_style():
     /* KPI cards */
     .kpi-card {{
         background: {CARD};
-        border-radius: 12px;
-        padding: 18px 20px;
+        border-radius: 10px;
+        padding: 10px 14px;
         box-shadow: 0 1px 3px rgba(18,35,63,0.08);
         border-left: 4px solid {AMBER};
         height: 100%;
         font-family: 'Inter', sans-serif;
     }}
     .kpi-label {{
-        font-size: 0.78rem;
+        font-size: 0.72rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
         color: {TEXT_MUTED};
         font-weight: 600;
-        margin-bottom: 4px;
+        margin-bottom: 2px;
     }}
     .kpi-value {{
         font-family: 'Sora', sans-serif;
-        font-size: 1.6rem;
+        font-size: 1.25rem;
         font-weight: 700;
         color: {NAVY};
     }}
     .kpi-sub {{
-        font-size: 0.78rem;
+        font-size: 0.7rem;
         color: {TEXT_MUTED};
-        margin-top: 2px;
+        margin-top: 1px;
     }}
 
     /* Section card wrapper */
     .section-card {{
         background: {CARD};
-        border-radius: 12px;
-        padding: 20px 22px;
+        border-radius: 10px;
+        padding: 8px 12px;
         box-shadow: 0 1px 3px rgba(18,35,63,0.06);
-        margin-bottom: 20px;
+        margin-bottom: 8px;
     }}
     </style>
     """, unsafe_allow_html=True)
@@ -120,12 +120,12 @@ PLOTLY_TEMPLATE = "plotly_white"
 FONT = dict(family="Inter, sans-serif", color=NAVY)
 
 
-def style_fig(fig, height=380):
+def style_fig(fig, height=260):
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
         font=FONT,
-        title_font=dict(family="Sora, sans-serif", size=16, color=NAVY),
-        margin=dict(l=10, r=10, t=50, b=10),
+        title_font=dict(family="Sora, sans-serif", size=14, color=NAVY),
+        margin=dict(l=10, r=10, t=40, b=10),
         height=height,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -144,53 +144,47 @@ def kpi_card(label, value, sub=""):
     """, unsafe_allow_html=True)
 
 
-def build_pdf(title, tables):
-    """tables: list of (section_title, dataframe) tuples, rendered as one PDF."""
+STATUS_PDF_COLORS = {
+    "Full ✅": colors.HexColor("#C7F0D8"),
+    "Partial ⚠️": colors.HexColor("#FFE8A3"),
+    "Short ❌": colors.HexColor("#F5C2C7"),
+}
+
+
+def build_status_table(df, status_col="Status"):
+    """Reportlab Table with the Status column's cells colored green/yellow/red."""
+    data = [list(df.columns)] + df.astype(str).values.tolist()
+    table = Table(data, repeatRows=1)
+    style_commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]
+    if status_col in df.columns:
+        col_idx = list(df.columns).index(status_col)
+        for i, val in enumerate(df[status_col].astype(str).tolist()):
+            color = STATUS_PDF_COLORS.get(val)
+            if color:
+                style_commands.append(("BACKGROUND", (col_idx, i + 1), (col_idx, i + 1), color))
+    table.setStyle(TableStyle(style_commands))
+    return table
+
+
+def build_full_pdf(title, kpis, figs, wave_df, load_df):
+    """One combined PDF: Overview (KPIs + charts), Wave Plan, and Load Coverage — each on its own page."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=landscape(letter),
         topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
     )
     styles = getSampleStyleSheet()
-    story = [Paragraph(title, styles["Title"]), Spacer(1, 14)]
+    story = []
 
-    for section_title, df in tables:
-        story.append(Paragraph(section_title, styles["Heading2"]))
-        story.append(Spacer(1, 6))
-        if df.empty:
-            story.append(Paragraph("No rows.", styles["Normal"]))
-        else:
-            data = [list(df.columns)] + df.astype(str).values.tolist()
-            table = Table(data, repeatRows=1)
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTSIZE", (0, 0), (-1, -1), 7),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F6F8")]),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ]))
-            story.append(table)
-        story.append(Spacer(1, 20))
-
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
-
-
-def build_overview_pdf(title, kpis, figs):
-    """A dashboard-style PDF: KPI cards up top, then the actual charts as images below.
-    kpis: list of (label, value, sub) tuples. figs: list of (title, plotly_fig) tuples.
-    """
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=landscape(letter),
-        topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
-    )
-    styles = getSampleStyleSheet()
-    story = [Paragraph(title, styles["Title"]), Spacer(1, 14)]
-
-    # KPI cards row
+    # ---- Page 1: Overview ----
+    story.append(Paragraph(f"{title} — Overview", styles["Title"]))
+    story.append(Spacer(1, 14))
     header_row = [k[0] for k in kpis]
     value_row = [k[1] for k in kpis]
     sub_row = [k[2] for k in kpis]
@@ -214,19 +208,16 @@ def build_overview_pdf(title, kpis, figs):
     story.append(kpi_table)
     story.append(Spacer(1, 18))
 
-    # Charts, 2 per row, as static images
     images = []
     for chart_title, fig in figs:
         png_bytes = fig.to_image(format="png", scale=2, width=560, height=340)
         images.append(Image(BytesIO(png_bytes), width=350, height=213))
-
     rows = []
     for i in range(0, len(images), 2):
         pair = images[i:i + 2]
         if len(pair) == 1:
             pair.append("")
         rows.append(pair)
-
     if rows:
         chart_table = Table(rows, colWidths=[360, 360])
         chart_table.setStyle(TableStyle([
@@ -236,6 +227,22 @@ def build_overview_pdf(title, kpis, figs):
             ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
         ]))
         story.append(chart_table)
+
+    # ---- Page 2: Wave Plan ----
+    story.append(PageBreak())
+    story.append(Paragraph(f"{title} — Wave Plan", styles["Title"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Dock Plan — Trailers in Priority Order", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    story.append(build_status_table(wave_df))
+
+    # ---- Page 3: Load Coverage ----
+    story.append(PageBreak())
+    story.append(Paragraph(f"{title} — Load Coverage", styles["Title"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    story.append(build_status_table(load_df))
 
     doc.build(story)
     buffer.seek(0)
@@ -483,7 +490,8 @@ total_trailers = dock_plan_export["Trailer"].nunique()
 total_demand = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Shortage_Cases"].clip(lower=0).sum())
 total_waves = dock_plan_export["Wave"].nunique()
-loads_met_pct = (load_export["Status"].eq("Full ✅").mean() * 100) if len(load_export) else 0
+loads_met_count = int(load_export["Status"].eq("Full ✅").sum())
+total_loads = len(load_export)
 
 if not top4_trailers.empty:
     top_trailer = top4_trailers.iloc[0]
@@ -501,17 +509,15 @@ with k2:
 with k3:
     kpi_card("Shortage Cases", f"{total_shortage:,}", "cases still missing")
 with k4:
-    kpi_card("Loads Fully Met", f"{loads_met_pct:.0f}%", "of load lines fully covered")
+    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total load lines")
 with k5:
     kpi_card("Move Next", move_next_value, move_next_sub)
-
-st.write("")
 
 # =====================================================================
 # TABS
 # =====================================================================
 tab_overview, tab_wave, tab_load = st.tabs(
-    ["Overview", "Wave Plan", "Load Coverage & Exceptions"]
+    ["Overview", "Wave Plan", "Load Coverage"]
 )
 
 # ---------------- OVERVIEW ----------------
@@ -552,7 +558,6 @@ with tab_overview:
             category_orders={"Trailer": priority_order_chart_df["Trailer"].tolist()},
             color_discrete_sequence=[STEEL, AMBER]
         )
-        fig2.update_yaxes(autorange="reversed")
         fig2.update_traces(texttemplate="#%{text}", textposition="outside")
         st.plotly_chart(style_fig(fig2), use_container_width=True)
         st.caption("The order to unload trailers today — #1 first. Bar length shows demand tied to that trailer.")
@@ -575,27 +580,6 @@ with tab_overview:
         st.caption("Hover a bar to see which trailer(s), if any, carry that item.")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.download_button(
-        "Download PDF",
-        data=build_overview_pdf(
-            "Dock Optimization Results — Overview",
-            kpis=[
-                ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
-                ("Total Demand", f"{total_demand:,}", "cases ordered"),
-                ("Shortage Cases", f"{total_shortage:,}", "cases still missing"),
-                ("Loads Fully Met", f"{loads_met_pct:.0f}%", "of load lines fully covered"),
-                ("Move Next", move_next_value, move_next_sub),
-            ],
-            figs=[
-                ("Top Trailers by Demand", fig1),
-                ("Load Status Breakdown", fig3),
-                ("Trailer Priority Order — Today", fig2),
-                ("Top Shortage Items", fig4),
-            ]
-        ),
-        file_name="Overview.pdf", mime="application/pdf"
-    )
-
 # ---------------- WAVE PLAN ----------------
 with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -606,42 +590,30 @@ with tab_wave:
         "how many currently-short/partial loads it would help fix (Loads_Impacted). "
         "Priority_Score (Demand Served ÷ SKU Count — cases served per distinct item) is the tiebreaker."
     )
+    st.caption(
+        "Loads_Impacted = 0 just means that trailer isn't carrying any item currently causing a "
+        "shortage — it can still rank high on urgency alone. It doesn't mean the trailer is unneeded, "
+        "only that it isn't one of today's shortage-fixers."
+    )
     st.dataframe(
         dock_plan_export.sort_values("Priority"),
         use_container_width=True, hide_index=True
     )
     st.markdown('</div>', unsafe_allow_html=True)
-    st.download_button(
-        "Download PDF",
-        data=build_pdf("Wave Plan", [("Dock Plan — Trailers in Priority Order", dock_plan_export.sort_values("Priority"))]),
-        file_name="Wave_Plan.pdf", mime="application/pdf"
-    )
 
-# ---------------- LOAD COVERAGE & EXCEPTIONS ----------------
+# ---------------- LOAD COVERAGE ----------------
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    st.dataframe(load_export, use_container_width=True, hide_index=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.caption("Status: green = Full, yellow = Partial, red = Short.")
 
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Exception Report — Partial & Short Loads")
-    st.caption("Sorted by dispatch time. These are the loads that need attention before they ship.")
-    st.caption(
-        "Only load lines that did NOT get 100% of what they needed. Use this to see, at a glance, "
-        "exactly which shipments are at risk before they go out the door."
-    )
-    st.dataframe(exception_export, use_container_width=True, hide_index=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    def highlight_status(val):
+        color_map = {"Full ✅": "#C7F0D8", "Partial ⚠️": "#FFE8A3", "Short ❌": "#F5C2C7"}
+        return f"background-color: {color_map.get(val, '')}"
 
-    st.download_button(
-        "Download PDF",
-        data=build_pdf("Load Coverage & Exceptions", [
-            ("Load Coverage", load_export),
-            ("Exception Report", exception_export)
-        ]),
-        file_name="Load_Coverage_and_Exceptions.pdf", mime="application/pdf"
-    )
+    styled_load = load_export.style.applymap(highlight_status, subset=["Status"])
+    st.dataframe(styled_load, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 
@@ -666,9 +638,35 @@ def build_excel():
     return buffer
 
 st.markdown("### Export")
-st.download_button(
-    label="Download Full Report (.xlsx)",
-    data=build_excel(),
-    file_name="Short_Analysis.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button(
+        label="Download Full Report (.xlsx)",
+        data=build_excel(),
+        file_name="Short_Analysis.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+with c2:
+    st.download_button(
+        label="Download Full Report (.pdf)",
+        data=build_full_pdf(
+            "Dock Optimization Results",
+            kpis=[
+                ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
+                ("Total Demand", f"{total_demand:,}", "cases ordered"),
+                ("Shortage Cases", f"{total_shortage:,}", "cases still missing"),
+                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total load lines"),
+                ("Move Next", move_next_value, move_next_sub),
+            ],
+            figs=[
+                ("Top Trailers by Demand", fig1),
+                ("Load Status Breakdown", fig3),
+                ("Trailer Priority Order — Today", fig2),
+                ("Top Shortage Items", fig4),
+            ],
+            wave_df=dock_plan_export.sort_values("Priority"),
+            load_df=load_export
+        ),
+        file_name="Dock_Optimization_Report.pdf",
+        mime="application/pdf"
+    )
