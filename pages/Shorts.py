@@ -239,20 +239,26 @@ try:
 
     trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
 
-    # ---- LOAD COVERAGE + FILL ----
-    match_with_wave = match_df.merge(
-        trailer_priority[["Trailer", "Wave"]], on="Trailer", how="left"
-    )
+    # ---- LOAD COVERAGE + FILL (with real inventory allocation) ----
+    # An item's total inventory is shared across every load that needs it — two loads
+    # can't both get credit for the same physical cases. Demand is allocated item-by-item
+    # in dispatch order (earliest-shipping load first), so once an item's cases run out,
+    # later loads correctly show as Partial/Short instead of both showing Full.
+    item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
+    item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
-    load_trailer = match_with_wave.groupby(
-        ["Wave", "Trailer", "Trip", "Item", "Dispatch"]
-    ).agg(
-        Demand_Cases=("Cases", "sum"),
-        Available_Cases=("Quantity", "sum")
-    ).reset_index()
+    alloc = short_clean.sort_values(["Item", "Dispatch", "Trip"]).copy()
+    alloc = alloc.merge(item_totals, on="Item", how="left")
+    alloc["Total_Item_Inventory"] = alloc["Total_Item_Inventory"].fillna(0)
 
-    load_trailer["Fill_Rate"] = (
-        load_trailer["Available_Cases"] / load_trailer["Demand_Cases"]
+    alloc["Cum_Demand"] = alloc.groupby("Item")["Cases"].cumsum()
+    alloc["Cum_Allocated"] = alloc[["Cum_Demand", "Total_Item_Inventory"]].min(axis=1)
+    alloc["Prev_Cum_Allocated"] = alloc.groupby("Item")["Cum_Allocated"].shift(fill_value=0)
+    alloc["Allocated_Cases"] = alloc["Cum_Allocated"] - alloc["Prev_Cum_Allocated"]
+    alloc["Shortage_Cases"] = alloc["Cases"] - alloc["Allocated_Cases"]
+
+    alloc["Fill_Rate"] = (
+        alloc["Allocated_Cases"] / alloc["Cases"]
     ).replace([np.inf, -np.inf], 0).fillna(0)
 
     def get_status(x):
@@ -263,19 +269,43 @@ try:
         else:
             return "Short ❌"
 
-    load_trailer["Status"] = load_trailer["Fill_Rate"].apply(get_status)
+    alloc["Status"] = alloc["Fill_Rate"].apply(get_status)
+
+    # Which trailer(s) actually carry this item, and the earliest wave any of them
+    # unload in — shown for reference alongside the allocation result.
+    sku_to_wave = clean_df.merge(trailer_priority[["Trailer", "Wave"]], on="Trailer", how="left")
+    trailer_lookup = sku_to_wave.groupby("SKU").agg(
+        Trailer=("Trailer", lambda s: ", ".join(sorted(set(s.astype(str))))),
+        Wave=("Wave", "min")
+    ).reset_index().rename(columns={"SKU": "Item"})
+
+    load_trailer = alloc.merge(trailer_lookup, on="Item", how="left")
+    load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
+    load_trailer = load_trailer[
+        ["Wave", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
+         "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Shortage_Cases"]
+    ]
 
     # ---- EXCEPTIONS ----
     exceptions = load_trailer[load_trailer["Status"] != "Full ✅"].copy()
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- OPTIMIZED TRAILERS ----
+    # For each item still short/partial, find the physical trailers that carry it and
+    # how many cases each one holds (Fix_Cases), and how many distinct loads are waiting
+    # on that item (Loads_Impacted) — without multiplying a trailer's cases once per load.
     problem_items = exceptions["Item"].unique()
-    fix_df = load_trailer[load_trailer["Item"].isin(problem_items)]
 
-    optimized_trailers = fix_df.groupby("Trailer").agg(
-        Fix_Cases=("Available_Cases", "sum"),
-        Loads_Impacted=("Trip", "nunique")
+    trailer_item_avail = clean_df[clean_df["SKU"].isin(problem_items)][
+        ["Trailer", "SKU", "Quantity"]
+    ].drop_duplicates().rename(columns={"SKU": "Item"})
+
+    loads_per_item = exceptions.groupby("Item")["Trip"].nunique()
+    trailer_item_avail["Loads_Impacted"] = trailer_item_avail["Item"].map(loads_per_item).fillna(0).astype(int)
+
+    optimized_trailers = trailer_item_avail.groupby("Trailer").agg(
+        Fix_Cases=("Quantity", "sum"),
+        Loads_Impacted=("Loads_Impacted", "sum")
     ).reset_index().sort_values(by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False])
 
     top5_trailers = optimized_trailers.head(5).copy()
@@ -289,7 +319,6 @@ try:
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
-    load_export["Shortage_Cases"] = load_export["Demand_Cases"] - load_export["Available_Cases"]
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
@@ -317,11 +346,11 @@ total_trailers = dock_plan_export["Trailer"].nunique()
 total_demand = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Shortage_Cases"].clip(lower=0).sum())
 overall_fill = (
-    load_export["Available_Cases"].sum() / load_export["Demand_Cases"].sum()
+    load_export["Allocated_Cases"].sum() / load_export["Demand_Cases"].sum()
     if load_export["Demand_Cases"].sum() else 0
 )
 total_waves = dock_plan_export["Wave"].nunique()
-short_pct = (load_export["Status"].eq("Short ❌").mean() * 100) if len(load_export) else 0
+loads_met_pct = (load_export["Status"].eq("Full ✅").mean() * 100) if len(load_export) else 0
 
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
@@ -333,7 +362,7 @@ with k3:
 with k4:
     kpi_card("Shortage Cases", f"{total_shortage:,}", "cases still missing")
 with k5:
-    kpi_card("Short Loads", f"{short_pct:.0f}%", "of load lines at 0% fill")
+    kpi_card("Loads Fully Met", f"{loads_met_pct:.0f}%", "of load lines fully covered")
 
 st.write("")
 
@@ -396,6 +425,11 @@ with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Dock Plan — Trailers by Wave")
     st.caption("Wave 1 should be unloaded first. Sorted by earliest dispatch time, then priority score.")
+    st.caption(
+        "Priority Score = Demand Served ÷ SKU Count — the average cases served per distinct item on "
+        "that trailer. A high score means the trailer covers a lot of demand with very few items "
+        "(efficient to unload); a lower score means demand is spread across more items."
+    )
     wave_filter = st.multiselect(
         "Filter by wave", sorted(dock_plan_export["Wave"].unique()),
         default=sorted(dock_plan_export["Wave"].unique())
@@ -424,6 +458,10 @@ with tab_exceptions:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Exception Report — Partial & Short Loads")
     st.caption("Sorted by dispatch time. These are the loads that need attention before they ship.")
+    st.caption(
+        "Only load lines that did NOT get 100% of what they needed. Use this to see, at a glance, "
+        "exactly which shipments are at risk before they go out the door."
+    )
     st.dataframe(exception_export, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -443,6 +481,10 @@ with tab_fix:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.subheader("Ranked Trailers")
         st.caption("Prioritize these trailers first — they resolve the most shortage cases across the most loads.")
+        st.caption(
+            "Fix_Cases = cases of shortage-causing items this trailer has on board. "
+            "Loads_Impacted = how many different shipments that inventory could help complete."
+        )
         st.dataframe(top5_trailers, use_container_width=True, hide_index=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
