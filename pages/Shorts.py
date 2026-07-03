@@ -442,20 +442,31 @@ try:
     ).reset_index(drop=True)
 
     trailer_priority["Wave"] = (trailer_priority.index // 4) + 1
+    trailer_priority["Trailer_Priority"] = trailer_priority.index + 1
 
-    # Which trailer(s) actually carry this exact item, and the earliest wave any of
-    # them unload in — this is "where to find it," shown for reference. Blank means no
-    # trailer currently carries this item at all (a genuine inventory gap).
-    trailer_lookup = clean_df.merge(trailer_priority[["Trailer", "Wave"]], on="Trailer", how="left")
-    trailer_lookup = trailer_lookup.groupby("SKU").agg(
-        Trailer=("Trailer", lambda s: ", ".join(sorted(set(s.astype(str))))),
-        Wave=("Wave", "min")
-    ).reset_index().rename(columns={"SKU": "Item"})
+    # For Load Coverage, show the ONE priority trailer that should be unloaded first
+    # for each item. Some items exist on multiple trailers. The previous version showed
+    # all trailers for the item but used the earliest wave, which made Wave 1 look like
+    # it had more than 4 trailers. This keeps the wave logic clean: max 4 unique
+    # priority trailers per wave.
+    trailer_lookup = clean_df[["SKU", "Trailer"]].drop_duplicates().merge(
+        trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
+        on="Trailer",
+        how="left"
+    )
+
+    trailer_lookup = trailer_lookup.sort_values(
+        by=["SKU", "Trailer_Priority"],
+        na_position="last"
+    )
+
+    trailer_lookup = trailer_lookup.groupby("SKU", as_index=False).first()
+    trailer_lookup = trailer_lookup.rename(columns={"SKU": "Item"})
 
     load_trailer = alloc.merge(trailer_lookup, on="Item", how="left")
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
     load_trailer = load_trailer[
-        ["Wave", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
+        ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
          "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
     ]
 
@@ -463,7 +474,9 @@ try:
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
-    dock_plan_export = trailer_priority.drop(columns=["Urgency_Score", "Fix_Score", "Blended_Score"]).copy()
+    dock_plan_export = trailer_priority.drop(
+        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority"]
+    ).copy()
     dock_plan_export["Priority_Score"] = dock_plan_export["Priority_Score"].round(0)
     dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
     cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
@@ -472,19 +485,30 @@ try:
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
 
-    # Sort Load Coverage in the same practical order as the unloading waves:
+    # Sort Load Coverage in true unload priority order:
     # Wave 1 first, then Wave 2, Wave 3, and so on.
-    # Items with no wave/no trailer found are pushed to the bottom because
-    # unloading a trailer cannot currently add value for those rows.
+    # Inside each wave, rows follow the exact trailer priority.
+    # Items with no trailer/no wave are pushed to the bottom.
     load_export["_Wave_Sort"] = load_export["Wave"].fillna(9999)
+    load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
-        ascending=[True, True, True, True, True, False]
-    ).drop(columns=["_Wave_Sort", "_No_Value_Sort"]).reset_index(drop=True)
+        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
+        ascending=[True, True, True, True, True, True, False]
+    ).drop(
+        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
+    ).reset_index(drop=True)
+
+    # Clean display: no more 1.0/2.0 or nan in the report.
+    load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
+    load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
+    if "Trailer_Priority" in exception_export.columns:
+        exception_export = exception_export.drop(columns=["Trailer_Priority"])
+    exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
+    exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
