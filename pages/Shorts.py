@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from openpyxl.styles import Alignment
 from io import BytesIO
-from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
