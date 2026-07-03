@@ -674,7 +674,7 @@ with c2:
                 ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
                 ("Total Demand", f"{total_cases_short:,}", "cases ordered"),
                 ("Shortage Cases", f"{total_shortage:,}", "cases still missing"),
-                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total load lines"),
+                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total loads met"),
                 ("Move Next", move_next_value, move_next_sub),
             ],
             figs=[
