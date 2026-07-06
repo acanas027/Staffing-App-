@@ -607,6 +607,34 @@ with st.expander("Report details (shown on the PDF)", expanded=False):
 
 if "raw_text" not in st.session_state:
     st.session_state.raw_text = ""
+if "ocr_box" not in st.session_state:
+    st.session_state.ocr_box = ""
+
+
+def clear_screenshots_and_ocr():
+    """Clear every temporary input created from screenshots/OCR.
+
+    This is used as a button callback because Streamlit only lets us safely
+    reset widget-backed session_state keys before the widgets are rebuilt.
+    """
+    # Images collected from paste button + uploader
+    st.session_state["collected_images"] = {}
+
+    # Force Streamlit to rebuild the file_uploader as a brand-new empty widget
+    st.session_state["uploader_version"] = st.session_state.get("uploader_version", 0) + 1
+
+    # Clear OCR/edit boxes and manual pasted text
+    st.session_state["ocr_box"] = ""
+    st.session_state["raw_text"] = ""
+
+    # Clear anything already built from the old screenshots/text
+    st.session_state.pop("picker_df", None)
+    st.session_state.pop("applied_combo", None)
+
+    # Clear old per-worker hour widgets and old uploader widget state
+    for key in list(st.session_state.keys()):
+        if key.startswith("hrs::") or key.startswith("screenshot_uploader_"):
+            st.session_state.pop(key, None)
 
 tab_image, tab_text = st.tabs(["Paste / upload screenshot", "Paste text"])
 
@@ -672,15 +700,19 @@ with tab_image:
             if file_key not in st.session_state["collected_images"]:
                 st.session_state["collected_images"][file_key] = uf.read()
 
-        if st.session_state["collected_images"] and st.button(
-            "Clear uploaded images", use_container_width=True
-        ):
-            st.session_state["collected_images"] = {}
-            st.session_state["uploader_version"] += 1   # resets the uploader widget too
-            st.session_state["ocr_box"] = ""            # wipe stale OCR text
-            st.session_state.pop("picker_df", None)     # wipe any already-built roster
-            st.session_state.pop("applied_combo", None)
-            st.rerun()
+        has_clearable_input = (
+            bool(st.session_state.get("collected_images"))
+            or bool((st.session_state.get("ocr_box") or "").strip())
+            or bool((st.session_state.get("raw_text") or "").strip())
+            or ("picker_df" in st.session_state)
+        )
+
+        st.button(
+            "Clear screenshots + OCR text",
+            use_container_width=True,
+            disabled=not has_clearable_input,
+            on_click=clear_screenshots_and_ocr,
+        )
 
         img_bytes_list = list(st.session_state["collected_images"].values())
 
