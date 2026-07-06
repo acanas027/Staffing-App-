@@ -620,8 +620,11 @@ def clear_screenshots_and_ocr():
     # Images collected from paste button + uploader
     st.session_state["collected_images"] = {}
 
-    # Force Streamlit to rebuild the file_uploader as a brand-new empty widget
+    # Force Streamlit to rebuild the file_uploader and paste button as
+    # brand-new empty widgets. This prevents old browser/component state from
+    # silently re-adding the last screenshot on the next rerun.
     st.session_state["uploader_version"] = st.session_state.get("uploader_version", 0) + 1
+    st.session_state["paste_button_version"] = st.session_state.get("paste_button_version", 0) + 1
 
     # Clear OCR/edit boxes and manual pasted text
     st.session_state["ocr_box"] = ""
@@ -631,9 +634,13 @@ def clear_screenshots_and_ocr():
     st.session_state.pop("picker_df", None)
     st.session_state.pop("applied_combo", None)
 
-    # Clear old per-worker hour widgets and old uploader widget state
+    # Clear old per-worker hour widgets and old widget states
     for key in list(st.session_state.keys()):
-        if key.startswith("hrs::") or key.startswith("screenshot_uploader_"):
+        if (
+            key.startswith("hrs::")
+            or key.startswith("screenshot_uploader_")
+            or (key.startswith("paste_button_") and key != "paste_button_version")
+        ):
             st.session_state.pop(key, None)
 
 tab_image, tab_text = st.tabs(["Paste / upload screenshot", "Paste text"])
@@ -675,9 +682,18 @@ with tab_image:
             st.session_state["collected_images"] = {}   # key -> bytes
         if "uploader_version" not in st.session_state:
             st.session_state["uploader_version"] = 0
+        if "paste_button_version" not in st.session_state:
+            st.session_state["paste_button_version"] = 0
 
         if PASTE_OK:
-            res = paste_image_button("Paste image from clipboard", errors="ignore")
+            # Give the paste component a versioned key. When we clear, the
+            # version changes, so Streamlit mounts a brand-new paste button
+            # instead of returning the last pasted image again.
+            res = paste_image_button(
+                "Paste image from clipboard",
+                key=f"paste_button_{st.session_state['paste_button_version']}",
+                errors="ignore",
+            )
             if res is not None and getattr(res, "image_data", None) is not None:
                 b = io.BytesIO()
                 res.image_data.save(b, format="PNG")
