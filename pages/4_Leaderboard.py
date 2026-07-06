@@ -724,7 +724,7 @@ with tab_image:
         )
 
         st.button(
-            "Clear screenshots + OCR text",
+            "Clear screenshots + text",
             use_container_width=True,
             disabled=not has_clearable_input,
             on_click=clear_screenshots_and_ocr,
