@@ -130,7 +130,7 @@ def parse_rows(text: str) -> pd.DataFrame:
     return df
 
 
-def ocr_image(file_bytes: bytes) -> str:
+def _image(file_bytes: bytes) -> str:
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img).convert("L")
     if max(img.size) < 1600:
@@ -607,11 +607,11 @@ with st.expander("Report details (shown on the PDF)", expanded=False):
 
 if "raw_text" not in st.session_state:
     st.session_state.raw_text = ""
-if "ocr_box" not in st.session_state:
-    st.session_state.ocr_box = ""
+if "_box" not in st.session_state:
+    st.session_state._box = ""
 
 
-def clear_screenshots_and_ocr():
+def clear_screenshots_and_():
     """Clear every temporary input created from screenshots/OCR.
 
     This is used as a button callback because Streamlit only lets us safely
@@ -724,7 +724,7 @@ with tab_image:
         )
 
         st.button(
-            "Clear screenshots + OCR text",
+            "Clear screenshots + text",
             use_container_width=True,
             disabled=not has_clearable_input,
             on_click=clear_screenshots_and_ocr,
