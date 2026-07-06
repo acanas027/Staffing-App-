@@ -2365,6 +2365,7 @@ def compute_throughput_optimal_allocation(
     picks_left, pulls_left, total_loads, hours_remaining, present_total,
     min_unload=MIN_UNLOADERS, min_receive=MIN_RECEIVERS, task_floor=TASK_FLOOR,
     already_controlled_loads=0,
+    max_pickers=None, max_loaders=None, max_pull_taskers=None,
 ):
     """
     Distribute present workers to MAXIMIZE what can actually be controlled by shift end,
@@ -2374,7 +2375,8 @@ def compute_throughput_optimal_allocation(
     1. Protect Unloading and Receiving minimums.
     2. Protect Tasking floor first for replenishment + putaway.
     3. Test every possible split of the remaining crew across Picking, extra Tasking
-       for full-pallet pulls, and Loading.
+       for full-pallet pulls, and Loading — respecting real skill-availability caps
+       when given (see below).
     4. Pick the split that controls the most loads by shift end.
     5. If two splits control the same number of loads, prefer the one with less idle
        loading capacity and more Picking/Tasking feed for 2nd shift.
@@ -2383,9 +2385,16 @@ def compute_throughput_optimal_allocation(
     Tasking/Pulls (total_loads minus loads already controlled — Completed/Loaded/RTL/R-S) —
     not the fixed 52%-of-day loading goal, and not the full-day total_loads. The 52% goal
     is a MINIMUM staffing target (calculate_needed() still sizes headcount that way); it is
-    not a ceiling on what a given allocation can actually control. Scoring Loading against
-    total_loads instead of the remaining pool also understated its true capacity relative
-    to Picking/Pulls, which could stop this optimizer short of the best real split.
+    not a ceiling on what a given allocation can actually control.
+
+    max_pickers / max_loaders / max_pull_taskers (optional): how many present workers
+    actually hold the P / L / T skill (see count_present_skill_capacity()). When given,
+    the search only considers splits that are actually staffable — it will never choose
+    a target it can't realize. This matters because clamping an ALREADY-CHOSEN target down
+    to available skills after the fact (the old approach) silently drops the clamped
+    headcount instead of re-searching where it should go, which can land far short of the
+    true best achievable split. Passing the caps in up front lets the search redirect that
+    headcount to whichever other stream is actually the bottleneck, in the same pass.
 
     Returns a dict: Unloading, Receiving, Picking, Tasking, Loading.
     """
@@ -2434,7 +2443,8 @@ def compute_throughput_optimal_allocation(
 
     # If there are outbound loads, keep at least one loader. More loaders must be
     # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
-    min_loading = 1 if remaining_candidate_loads > 0 else 0
+    # Never reserve that first loader if skill data says nobody present can load.
+    min_loading = 1 if (remaining_candidate_loads > 0 and (max_loaders is None or max_loaders >= 1)) else 0
     if min_loading and remaining > 0:
         alloc["Loading"] = 1
         remaining -= 1
@@ -2458,15 +2468,24 @@ def compute_throughput_optimal_allocation(
 
     # Brute force all integer allocations of the flexible crew. This is small and
     # reliable, and it prevents the old issue where Loading took too many people
-    # just because total day loads were high.
-    for add_picking in range(remaining + 1):
-        for add_loading in range(remaining - add_picking + 1):
-            add_pull_extra = remaining - add_picking - add_loading
+    # just because total day loads were high. Skill caps (when given) bound the
+    # loop directly so an infeasible split is never even scored, let alone chosen.
+    max_add_picking = remaining if max_pickers is None else max(0, min(remaining, int(max_pickers) - alloc["Picking"]))
+
+    for add_picking in range(max_add_picking + 1):
+        left_after_picking = remaining - add_picking
+        max_add_loading = left_after_picking if max_loaders is None else max(0, min(left_after_picking, int(max_loaders) - alloc["Loading"]))
+
+        for add_loading in range(max_add_loading + 1):
+            add_pull_extra = left_after_picking - add_loading
+
+            taskers = alloc["Tasking"] + add_pull_extra
+            if max_pull_taskers is not None and taskers > int(max_pull_taskers):
+                continue  # this split needs more T-skilled people than are present — infeasible, skip it
 
             pickers = alloc["Picking"] + add_picking
             loaders = alloc["Loading"] + add_loading
             pull_extra = add_pull_extra
-            taskers = alloc["Tasking"] + pull_extra
 
             pick_feed = _loads_feedable_by_pick(pickers)
             pull_feed = _loads_feedable_by_pull(pull_extra)
@@ -4210,6 +4229,13 @@ def compute_recommended_allocation(
             already_controlled_now = sum(
                 1 for r in _sel if status_is_controlled_appointment(r.get("status"))
             )
+
+            # Bound the search by who can ACTUALLY be placed in each flexible task.
+            # Passing these caps into the optimizer (instead of clamping its answer
+            # afterward with cap_allocation_to_available_skills) means any headcount
+            # that can't go into one stream gets explored in the others within the
+            # SAME search, rather than being silently dropped after the fact.
+            skill_caps = count_present_skill_capacity(staff)
             optimal = compute_throughput_optimal_allocation(
                 picks_left=pdf_number(_today.get("picks_left_today", 0)),
                 pulls_left=pdf_number(_today.get("pulls_left_today", 0)),
@@ -4217,6 +4243,9 @@ def compute_recommended_allocation(
                 hours_remaining=hours_remaining,
                 present_total=len(present_recommendations),
                 already_controlled_loads=already_controlled_now,
+                max_pickers=skill_caps.get("Picking"),
+                max_loaders=skill_caps.get("Loading"),
+                max_pull_taskers=skill_caps.get("Tasking"),
             )
 
             def _named_counts_for_targets(targets):
@@ -4224,6 +4253,8 @@ def compute_recommended_allocation(
                 _present, _summary = build_summary(trial, needed)
                 return trial, _present, _summary, assigned_counts_from_summary(_summary)
 
+            # The search above already respects skill caps, so this is now just a
+            # defense-in-depth safety net — it should rarely change anything.
             optimal_capped = cap_allocation_to_available_skills(optimal, staff)
 
             needed["Loading"] = min(needed["Loading"], optimal_capped.get("Loading", needed["Loading"]))
