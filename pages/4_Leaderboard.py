@@ -634,22 +634,44 @@ with tab_image:
         # the results are stitched together into one block of text below, so
         # rosters that span multiple screenshots (e.g. a scrollable report)
         # still build into a single leaderboard.
-        img_bytes_list = []
+        #
+        # IMPORTANT: st.file_uploader (even with accept_multiple_files=True)
+        # reports only whatever is CURRENTLY selected in the widget — if you
+        # upload screenshot #1, then separately drag in screenshot #2, the
+        # widget's return value swaps to just #2 and #1 is gone. To let people
+        # add screenshots one at a time, we accumulate everything we've seen
+        # into session_state (keyed by name+size so re-running the script
+        # doesn't create duplicates) instead of trusting the widget's return
+        # value as the full set.
+        if "collected_images" not in st.session_state:
+            st.session_state["collected_images"] = {}   # key -> bytes
 
         if PASTE_OK:
             res = paste_image_button("Paste image from clipboard", errors="ignore")
             if res is not None and getattr(res, "image_data", None) is not None:
                 b = io.BytesIO()
                 res.image_data.save(b, format="PNG")
-                img_bytes_list.append(b.getvalue())
+                paste_bytes = b.getvalue()
+                paste_key = f"pasted::{len(paste_bytes)}::{hash(paste_bytes)}"
+                st.session_state["collected_images"][paste_key] = paste_bytes
 
         uploaded_files = st.file_uploader(
-            "…or upload / drag one or more screenshots",
+            "…or upload / drag screenshots (add them one at a time or all at once)",
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
         )
         for uf in uploaded_files or []:
-            img_bytes_list.append(uf.read())
+            file_key = f"{uf.name}::{uf.size}"
+            if file_key not in st.session_state["collected_images"]:
+                st.session_state["collected_images"][file_key] = uf.read()
+
+        if st.session_state["collected_images"] and st.button(
+            "Clear uploaded images", use_container_width=True
+        ):
+            st.session_state["collected_images"] = {}
+            st.rerun()
+
+        img_bytes_list = list(st.session_state["collected_images"].values())
 
         if img_bytes_list:
             n_imgs = len(img_bytes_list)
