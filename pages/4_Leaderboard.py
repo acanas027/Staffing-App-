@@ -677,6 +677,9 @@ with tab_image:
         ):
             st.session_state["collected_images"] = {}
             st.session_state["uploader_version"] += 1   # resets the uploader widget too
+            st.session_state["ocr_box"] = ""            # wipe stale OCR text
+            st.session_state.pop("picker_df", None)     # wipe any already-built roster
+            st.session_state.pop("applied_combo", None)
             st.rerun()
 
         img_bytes_list = list(st.session_state["collected_images"].values())
