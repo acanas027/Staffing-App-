@@ -664,8 +664,15 @@ with tab_image:
                 with st.spinner(f"Reading text from {n_imgs} image{'s' if n_imgs != 1 else ''}…"):
                     extracted_parts = [ocr_image(ib) for ib in img_bytes_list]
                 combined_text = "\n".join(part.strip() for part in extracted_parts)
+                # IMPORTANT: once a widget's `key` exists in session_state, Streamlit
+                # ignores any `value=` passed to it on later reruns — so adding a 2nd
+                # screenshot would OCR it but the box would keep showing only the
+                # 1st image's text. Writing to session_state directly (before the
+                # widget is created) forces it to pick up the freshly combined text
+                # every time the image set changes.
+                st.session_state["ocr_box"] = combined_text
                 st.text_area("OCR result (edit if needed, then build below):",
-                             value=combined_text, height=200, key="ocr_box")
+                             height=200, key="ocr_box")
             except Exception as e:
                 st.error(f"Couldn't read one of the images ({type(e).__name__}). "
                          "Use the Paste text tab instead.")
