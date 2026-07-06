@@ -2364,7 +2364,7 @@ def status_is_excluded_from_new_control(status):
 def compute_throughput_optimal_allocation(
     picks_left, pulls_left, total_loads, hours_remaining, present_total,
     min_unload=MIN_UNLOADERS, min_receive=MIN_RECEIVERS, task_floor=TASK_FLOOR,
-    completed_or_loaded_now=0,
+    already_controlled_loads=0,
 ):
     """
     Distribute present workers to MAXIMIZE what can actually be controlled by shift end,
@@ -2378,6 +2378,14 @@ def compute_throughput_optimal_allocation(
     4. Pick the split that controls the most loads by shift end.
     5. If two splits control the same number of loads, prefer the one with less idle
        loading capacity and more Picking/Tasking feed for 2nd shift.
+
+    Loading is scored against the SAME remaining-candidate-load pool as Picking and
+    Tasking/Pulls (total_loads minus loads already controlled — Completed/Loaded/RTL/R-S) —
+    not the fixed 52%-of-day loading goal, and not the full-day total_loads. The 52% goal
+    is a MINIMUM staffing target (calculate_needed() still sizes headcount that way); it is
+    not a ceiling on what a given allocation can actually control. Scoring Loading against
+    total_loads instead of the remaining pool also understated its true capacity relative
+    to Picking/Pulls, which could stop this optimizer short of the best real split.
 
     Returns a dict: Unloading, Receiving, Picking, Tasking, Loading.
     """
@@ -2396,23 +2404,14 @@ def compute_throughput_optimal_allocation(
     except Exception:
         total_loads = 0
 
-    # Loading is not optimized against the entire day board.
-    # New rule: the loading goal is everything already completed/loaded now
-    # PLUS 52% of the selected-day loads. Completed/loaded loads are already banked,
-    # so the loader allocation is aimed at the remaining loading goal.
     try:
-        completed_or_loaded_now = max(0, int(round(float(completed_or_loaded_now or 0))))
+        already_controlled_loads = max(0, int(round(float(already_controlled_loads or 0))))
     except Exception:
-        completed_or_loaded_now = 0
+        already_controlled_loads = 0
 
-    base_loading_goal = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
-    if total_loads > 0 and base_loading_goal <= 0:
-        base_loading_goal = 1
-
-    # Loading goal is a flat 52% of selected-day loads. Completed loads are no longer
-    # added to inflate the goal, nor subtracted from it.
-    loading_target_loads = min(total_loads, base_loading_goal)
-    remaining_loading_goal = loading_target_loads
+    # The pool every stream (Picking, Pulls, Loading) is scored against — loads not
+    # already banked as controlled regardless of staffing.
+    remaining_candidate_loads = max(0, total_loads - already_controlled_loads)
 
     picks_left = max(0.0, float(picks_left or 0))
     pulls_left = max(0.0, float(pulls_left or 0))
@@ -2435,7 +2434,7 @@ def compute_throughput_optimal_allocation(
 
     # If there are outbound loads, keep at least one loader. More loaders must be
     # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
-    min_loading = 1 if remaining_loading_goal > 0 else 0
+    min_loading = 1 if remaining_candidate_loads > 0 else 0
     if min_loading and remaining > 0:
         alloc["Loading"] = 1
         remaining -= 1
@@ -2444,18 +2443,18 @@ def compute_throughput_optimal_allocation(
     best_score = None
 
     def _loads_feedable_by_pick(pickers):
-        if total_loads <= 0:
+        if remaining_candidate_loads <= 0:
             return 0.0
         if picks_left <= 0:
-            return float(total_loads)
-        return min(float(total_loads), (pickers * PICK_RATE * hrs / picks_left) * total_loads)
+            return float(remaining_candidate_loads)
+        return min(float(remaining_candidate_loads), (pickers * PICK_RATE * hrs / picks_left) * remaining_candidate_loads)
 
     def _loads_feedable_by_pull(extra_pull_taskers):
-        if total_loads <= 0:
+        if remaining_candidate_loads <= 0:
             return 0.0
         if pulls_left <= 0:
-            return float(total_loads)
-        return min(float(total_loads), (extra_pull_taskers * PULL_RATE * hrs / pulls_left) * total_loads)
+            return float(remaining_candidate_loads)
+        return min(float(remaining_candidate_loads), (extra_pull_taskers * PULL_RATE * hrs / pulls_left) * remaining_candidate_loads)
 
     # Brute force all integer allocations of the flexible crew. This is small and
     # reliable, and it prevents the old issue where Loading took too many people
@@ -2471,11 +2470,10 @@ def compute_throughput_optimal_allocation(
 
             pick_feed = _loads_feedable_by_pick(pickers)
             pull_feed = _loads_feedable_by_pull(pull_extra)
-            freight_feed = min(pick_feed, pull_feed, float(total_loads))
-            # Loading target is completed/loaded now + 52% of selected-day loads.
-            # The completed/loaded portion is already banked; the flexible loader
-            # allocation only covers the remaining loading goal.
-            loading_capacity = min(float(remaining_loading_goal), loaders * LOAD_RATE * hrs)
+            freight_feed = min(pick_feed, pull_feed, float(remaining_candidate_loads))
+            # Loading capacity is bounded only by the remaining candidate pool — the
+            # same pool Picking/Pulls use — not the fixed 52% goal.
+            loading_capacity = min(float(remaining_candidate_loads), loaders * LOAD_RATE * hrs)
             controlled = min(freight_feed, loading_capacity)
 
             # Do not reward loaders that cannot be fed by Picking/Tasking.
@@ -2605,31 +2603,40 @@ def appointment_controlled_by_allocation(
         total_loads - already_controlled - excluded_from_new_control,
     )
 
-    # Loading goal = Completed/Loaded already banked + 52% of total selected-day loads.
-    # RTL is NOT included in completed_or_loaded_now because it still needs loader work.
+    # loading_target_loads / base_loading_goal_loads = the fixed 52%-of-day MINIMUM
+    # staffing target (same role as calculate_needed()'s sizing for every other
+    # function). Kept below only for the "Loading goal" display line — it must NOT
+    # cap how much a given allocation can actually control, and Loading's coverage
+    # fraction must NOT be measured against it either. Doing either previously (a)
+    # silenced extra loaders even when Picking/Pulls had spare capacity to feed them,
+    # and (b) made load_frac incomparable to pick_frac/pull_frac (different
+    # denominators), which could mislabel the real bottleneck.
     base_loading_goal_loads = int(round(total_loads * LOAD_TARGET_SHARE)) if total_loads > 0 else 0
     if total_loads > 0 and base_loading_goal_loads <= 0:
         base_loading_goal_loads = 1
-    # Loading goal is a flat 52% of selected-day loads (completed not added or subtracted).
     loading_target_loads = min(total_loads, base_loading_goal_loads)
-    remaining_loading_goal = loading_target_loads
 
     pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
 
     pick_frac = min(1.0, (pickers * PICK_RATE * hrs) / picks_left) if picks_left > 0 else 1.0
     pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
 
+    # Loading's coverage % now uses the SAME remaining pool as Picking and Pulls
+    # (remaining_candidate_loads) instead of the fixed loading goal, so all three
+    # fractions are apples-to-apples and the lowest one is always the true bottleneck.
     loading_capacity_left = loaders * LOAD_RATE * hrs
     load_frac = (
-        min(1.0, loading_capacity_left / loading_target_loads)
-        if loading_target_loads > 0 else 1.0
+        min(1.0, loading_capacity_left / remaining_candidate_loads)
+        if remaining_candidate_loads > 0 else 1.0
     )
 
     # Convert each stream into ADDITIONAL load ceilings.
     # Already-controlled loads are banked and never removed by a later bottleneck.
     pick_supported_additional = int(round(pick_frac * remaining_candidate_loads))
     pull_supported_additional = int(round(pull_frac * remaining_candidate_loads))
-    load_supported_additional = int(round(min(loading_capacity_left, remaining_loading_goal, remaining_candidate_loads)))
+    # No more remaining_loading_goal cap here — Loading supports up to its real
+    # capacity or the remaining pool, exactly like Picking and Pulls do.
+    load_supported_additional = int(round(min(loading_capacity_left, remaining_candidate_loads)))
 
     additional_controlled = max(
         0,
@@ -2724,11 +2731,20 @@ def render_allocation_controls_preview(label, controlled):
         f"but their status should resolve before departure as product arrives."
         if rs_count > 0 else ""
     )
+    remaining_pool = max(
+        0,
+        int(controlled.get("selected_day_loads", 0) or 0) - int(controlled.get("already_controlled_loads", 0) or 0),
+    )
     st.caption(
-        f"Coverage — picking {int(controlled['pick_frac']*100)}%, "
-        f"pulls {int(controlled['pull_frac']*100)}%, loading {int(controlled['load_frac']*100)}%. "
+        f"Coverage of the {remaining_pool} remaining load(s) — "
+        f"picking {int(controlled['pick_frac']*100)}%, "
+        f"pulls {int(controlled['pull_frac']*100)}%, "
+        f"loading {int(controlled['load_frac']*100)}%. "
+        f"All three are measured against the same remaining pool, so the lowest "
+        f"percentage above is always the true bottleneck. "
         f"Already controlled: Completed/Loaded/RTL/R/S ({controlled.get('already_controlled_loads', 0)}). "
-        f"Loading goal = 52% of selected-day loads = {controlled.get('loading_target_loads', 0)}."
+        f"Loading goal (minimum staffing target, not a cap on what this allocation can control) "
+        f"= 52% of selected-day loads = {controlled.get('loading_target_loads', 0)}."
         + rs_note
     )
 
@@ -4176,9 +4192,6 @@ def compute_recommended_allocation(
         for t in task_order
     }
     total_present = len(present_recommendations)
-    lead_extra = int(
-        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
-    )
 
     board_text_for_preview = ""
     python_shift_goal_preview = None
@@ -4190,8 +4203,12 @@ def compute_recommended_allocation(
             _payload = json.loads(board_text_for_preview or "{}")
             _today = _payload.get("python_verified_today_totals", {}) or {}
             _sel = rows_for_selected_day(_payload.get("all_outbound_rows", []) or [], day)
-            completed_or_loaded_now = sum(
-                1 for r in _sel if status_is_completed_or_loaded(r.get("status"))
+            # Use the SAME "already controlled" definition as appointment_controlled_by_allocation
+            # (Completed/Loaded/RTL/R-S), not just Completed/Loaded — otherwise this optimizer's
+            # remaining pool doesn't match the pool the reported metric scores against, and it can
+            # settle for an allocation that scores lower than the true best split.
+            already_controlled_now = sum(
+                1 for r in _sel if status_is_controlled_appointment(r.get("status"))
             )
             optimal = compute_throughput_optimal_allocation(
                 picks_left=pdf_number(_today.get("picks_left_today", 0)),
@@ -4199,7 +4216,7 @@ def compute_recommended_allocation(
                 total_loads=len(_sel),
                 hours_remaining=hours_remaining,
                 present_total=len(present_recommendations),
-                completed_or_loaded_now=completed_or_loaded_now,
+                already_controlled_loads=already_controlled_now,
             )
 
             def _named_counts_for_targets(targets):
@@ -4247,9 +4264,13 @@ def compute_recommended_allocation(
                 pass
 
     total_present = len(present_recommendations)
-    lead_extra = int(
-        (present_recommendations["Recommended Task"].astype(str).str.strip() == "Lead/Extra").sum()
-    )
+    # "Bench" = workers with nowhere else productive to go right now: anyone still
+    # literally labeled Lead/Extra, PLUS every worker sitting in a function that's
+    # overstaffed vs need (generate_recommendations() never leaves anyone unassigned
+    # if they have a skilled task to fill, so overstaffing — not an unfilled
+    # Lead/Extra bucket — is where real bench capacity actually shows up).
+    bench_availability = compute_labor_availability(summary_table, present_recommendations)
+    bench = int(bench_availability["total_surplus_workers"])
 
     return {
         "needed": needed,
@@ -4260,7 +4281,8 @@ def compute_recommended_allocation(
         "total_present": total_present,
         "total_recommended": sum(recommended_counts.values()),
         "short_by": max(0, int(pd.Series(needed).sum()) - total_present),
-        "lead_extra": lead_extra,
+        "bench": bench,
+        "lead_extra": bench,  # kept for backward compatibility with any old references
     }
 
 def run_full_generation(
@@ -4695,7 +4717,7 @@ if reco:
     st.subheader("Recommended Allocation")
     st.caption(
         f"Built from {reco['total_present']} present. "
-        f"Extra over today's workload (bench): {reco['lead_extra']}. "
+        f"Extra over today's workload (bench): {reco['bench']}. "
         "If you change any input on the left, click Compute again to refresh."
     )
     reco_df = pd.DataFrame(
