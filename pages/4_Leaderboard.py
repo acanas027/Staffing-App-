@@ -645,6 +645,8 @@ with tab_image:
         # value as the full set.
         if "collected_images" not in st.session_state:
             st.session_state["collected_images"] = {}   # key -> bytes
+        if "uploader_version" not in st.session_state:
+            st.session_state["uploader_version"] = 0
 
         if PASTE_OK:
             res = paste_image_button("Paste image from clipboard", errors="ignore")
@@ -655,10 +657,15 @@ with tab_image:
                 paste_key = f"pasted::{len(paste_bytes)}::{hash(paste_bytes)}"
                 st.session_state["collected_images"][paste_key] = paste_bytes
 
+        # The uploader's key includes "uploader_version" so that clicking
+        # "Clear uploaded images" below can force a brand-new, empty widget
+        # instance — otherwise Streamlit keeps whatever files are still sitting
+        # in the upload box and silently re-adds them right back on rerun.
         uploaded_files = st.file_uploader(
             "…or upload / drag screenshots (add them one at a time or all at once)",
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
+            key=f"screenshot_uploader_{st.session_state['uploader_version']}",
         )
         for uf in uploaded_files or []:
             file_key = f"{uf.name}::{uf.size}"
@@ -669,6 +676,7 @@ with tab_image:
             "Clear uploaded images", use_container_width=True
         ):
             st.session_state["collected_images"] = {}
+            st.session_state["uploader_version"] += 1   # resets the uploader widget too
             st.rerun()
 
         img_bytes_list = list(st.session_state["collected_images"].values())
