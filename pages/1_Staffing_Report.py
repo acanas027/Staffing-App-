@@ -4250,7 +4250,13 @@ def compute_recommended_allocation(
 
             def _named_counts_for_targets(targets):
                 trial = generate_recommendations(staff.copy(), targets)
-                _present, _summary = build_summary(trial, needed)
+                # Must check against THIS candidate's own targets, not the outer `needed`
+                # dict — otherwise a candidate with a legitimately higher Loading target
+                # (like the throughput-optimal split) gets its correctly-placed extra
+                # loaders silently demoted back to Picking by build_summary()'s safety
+                # cap, because that cap compares against whatever `needed` happens to be
+                # in scope rather than the target actually being tested.
+                _present, _summary = build_summary(trial, targets)
                 return trial, _present, _summary, assigned_counts_from_summary(_summary)
 
             # The search above already respects skill caps, so this is now just a
@@ -4371,7 +4377,11 @@ def run_full_generation(
     if recommended_counts:
         rec_targets = cap_allocation_to_available_skills(recommended_counts, staff)
         rec_board_staff = generate_recommendations(staff.copy(), rec_targets)
-        recommended_present_board, _ = build_summary(rec_board_staff, needed)
+        # Check against rec_targets (what this board was actually built to hit), not the
+        # unrelated `needed` dict — same bug class as _named_counts_for_targets above:
+        # using the wrong dict here would demote correctly-placed extra loaders back to
+        # Picking whenever rec_targets calls for more loaders than the fixed-ratio `needed`.
+        recommended_present_board, _ = build_summary(rec_board_staff, rec_targets)
         recommended_present_board = recommended_present_board.copy()
     else:
         recommended_present_board = present_recommendations.copy()
@@ -4381,7 +4391,12 @@ def run_full_generation(
     if override_mode and actual_counts:
         actual_counts = cap_allocation_to_available_skills(actual_counts, staff)
         staff = generate_recommendations(staff, actual_counts)
-        present_recommendations, summary_table = build_summary(staff, needed)
+        # Same fix: this is the branch that actually builds the final report for BOTH
+        # "Yes, run recommended" and "No, run mine" (the UI sends both through
+        # override_mode with actual_counts set) — it must check against actual_counts,
+        # not `needed`, or the real allocation you confirmed gets silently overwritten
+        # right before the PDF is built.
+        present_recommendations, summary_table = build_summary(staff, actual_counts)
 
         availability = compute_labor_availability(summary_table, present_recommendations, lead_extra_count=0)
         ai_recommended = recommended_counts
