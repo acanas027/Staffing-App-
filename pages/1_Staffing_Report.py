@@ -746,7 +746,9 @@ def calculate_needed(
         "Loading":       total_outbound_loads_actual / (LOAD_RATE * _hrs_for_loading),
     }
     needed = {
-        "Unloading": max(MIN_UNLOADERS, whole_workers(raw_needed["Unloading"])),
+        # Unloading's floor shrinks as plants close (see effective_min_unloaders) —
+        # Receiving's floor is intentionally unaffected by plant status.
+        "Unloading": max(effective_min_unloaders(crossroads_open, deer_creek_open, msb_open), whole_workers(raw_needed["Unloading"])),
         "Receiving":  max(MIN_RECEIVERS, whole_workers(raw_needed["Receiving"])),
         "Picking":    whole_workers(raw_needed["Picking"]),
         "Tasking":    whole_workers(
@@ -1099,16 +1101,33 @@ def generate_recommendations(staff, needed):
     return staff
 
 
-def build_summary(staff, needed):
+def build_summary(staff, needed, loading_cap=None):
+    """
+    needed: the fixed 52%-of-day MINIMUM staffing target — always what's displayed
+    in the "Needed" column, regardless of which allocation is being tested. This
+    must stay stable so Assigned-vs-Needed keeps meaning something (both here and
+    in every downstream function — compute_labor_availability, build_recommendations,
+    derive_shift_health — that reads "Difference"/"Status" to find real gaps/surplus).
+
+    loading_cap: what generate_recommendations was ACTUALLY given as the Loading
+    target for this specific trial (e.g. the throughput-optimal split's Loading
+    count). Defaults to needed["Loading"] when not given. This must be separate
+    from `needed`, or a trial that correctly places more loaders than the fixed
+    minimum requires gets those extra loaders wrongly demoted back to Picking here
+    — while ALSO losing the meaningful "Needed" baseline if `needed` itself is
+    swapped in for the display column just to avoid that.
+    """
     present_recommendations = staff[
         staff["Present"].astype(str).str.strip().str.lower().eq("x")
         & staff["Recommended Task"].astype(str).str.strip().ne("")
     ].copy()
 
-    # Hard cap: if more workers ended up assigned to Loading than needed, move the
-    # excess to Picking (the typical bottleneck). This corrects any overspill from
-    # generate_recommendations regardless of how it occurred.
-    loading_needed = int(needed.get("Loading", 0))
+    # Hard cap: if more workers ended up assigned to Loading than THIS TRIAL actually
+    # targeted, move the excess to Picking (the typical bottleneck). This corrects any
+    # overspill from generate_recommendations regardless of how it occurred — but must
+    # check against what was actually asked for (loading_cap), not the unrelated fixed
+    # minimum, or a legitimately higher Loading target gets silently undone right here.
+    loading_needed = int(loading_cap) if loading_cap is not None else int(needed.get("Loading", 0))
     loading_assigned_idx = present_recommendations.index[
         present_recommendations["Recommended Task"] == "Loading"
     ].tolist()
@@ -2329,6 +2348,26 @@ TASK_FLOOR = dc_config.TASK_FLOOR            # always-on replenishment + putaway
 MIN_UNLOADERS = dc_config.MIN_UNLOADERS      # reserved inbound crew before the split
 MIN_RECEIVERS = dc_config.MIN_RECEIVERS      # reserved inbound crew before the split
 LOAD_TARGET_SHARE = dc_config.LOAD_TARGET_SHARE  # 1st-shift loading target = share of selected-day outbound loads
+
+
+def effective_min_unloaders(crossroads_open, deer_creek_open, msb_open):
+    """
+    MIN_UNLOADERS (from dc_config) is the reserved Unloading floor on a normal day
+    when most/all of Crossroads, Deer Creek, and MSB are open. That floor should
+    shrink as fewer of those plants are actually sending inbound freight:
+      - 0 or 1 of the 3 closed  -> floor stays at MIN_UNLOADERS (normal day)
+      - 2 of the 3 closed       -> floor drops to 1
+      - all 3 closed            -> floor drops to 0 (nothing to unload)
+    Receiving's floor (MIN_RECEIVERS) is intentionally unaffected — receiving still
+    happens regardless of which of these three specific plants are open.
+    """
+    plants = [crossroads_open, deer_creek_open, msb_open]
+    closed_count = sum(1 for p in plants if str(p or "").strip().upper() != "YES")
+    if closed_count >= 3:
+        return 0
+    if closed_count == 2:
+        return 1
+    return MIN_UNLOADERS
 
 
 def status_is_completed_or_loaded(status):
@@ -4189,6 +4228,7 @@ def compute_recommended_allocation(
         total_loads=int(total_outbound_loads_day),
         hours_remaining=hours_remaining,
         present_total=_early_present,
+        min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
     )
     needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
 
@@ -4243,6 +4283,7 @@ def compute_recommended_allocation(
                 hours_remaining=hours_remaining,
                 present_total=len(present_recommendations),
                 already_controlled_loads=already_controlled_now,
+                min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
                 max_pickers=skill_caps.get("Picking"),
                 max_loaders=skill_caps.get("Loading"),
                 max_pull_taskers=skill_caps.get("Tasking"),
@@ -4250,13 +4291,14 @@ def compute_recommended_allocation(
 
             def _named_counts_for_targets(targets):
                 trial = generate_recommendations(staff.copy(), targets)
-                # Must check against THIS candidate's own targets, not the outer `needed`
-                # dict — otherwise a candidate with a legitimately higher Loading target
-                # (like the throughput-optimal split) gets its correctly-placed extra
-                # loaders silently demoted back to Picking by build_summary()'s safety
-                # cap, because that cap compares against whatever `needed` happens to be
-                # in scope rather than the target actually being tested.
-                _present, _summary = build_summary(trial, targets)
+                # Needed column stays the true fixed-minimum `needed` dict, so
+                # Assigned-vs-Needed still means something (surplus/shortage) no
+                # matter which candidate is being tested. Only the Loading safety-cap
+                # check uses this trial's own target (targets["Loading"]) — otherwise
+                # a candidate with a legitimately higher Loading target (like the
+                # throughput-optimal split) gets its correctly-placed extra loaders
+                # silently demoted back to Picking by the unrelated fixed minimum.
+                _present, _summary = build_summary(trial, needed, loading_cap=targets.get("Loading"))
                 return trial, _present, _summary, assigned_counts_from_summary(_summary)
 
             # The search above already respects skill caps, so this is now just a
@@ -4355,6 +4397,7 @@ def run_full_generation(
         total_loads=int(total_outbound_loads_day),
         hours_remaining=hours_remaining,
         present_total=_early_present,
+        min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
     )
     needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
     if recommended_counts and "Loading" in recommended_counts:
@@ -4377,11 +4420,11 @@ def run_full_generation(
     if recommended_counts:
         rec_targets = cap_allocation_to_available_skills(recommended_counts, staff)
         rec_board_staff = generate_recommendations(staff.copy(), rec_targets)
-        # Check against rec_targets (what this board was actually built to hit), not the
-        # unrelated `needed` dict — same bug class as _named_counts_for_targets above:
-        # using the wrong dict here would demote correctly-placed extra loaders back to
-        # Picking whenever rec_targets calls for more loaders than the fixed-ratio `needed`.
-        recommended_present_board, _ = build_summary(rec_board_staff, rec_targets)
+        # Needed column stays the fixed-minimum `needed` dict (so it means the same
+        # thing as everywhere else in the report); only the Loading safety-cap uses
+        # rec_targets — what this board was actually built to hit — so a legitimately
+        # higher recommended Loading count doesn't get silently demoted back to Picking.
+        recommended_present_board, _ = build_summary(rec_board_staff, needed, loading_cap=rec_targets.get("Loading"))
         recommended_present_board = recommended_present_board.copy()
     else:
         recommended_present_board = present_recommendations.copy()
@@ -4391,12 +4434,15 @@ def run_full_generation(
     if override_mode and actual_counts:
         actual_counts = cap_allocation_to_available_skills(actual_counts, staff)
         staff = generate_recommendations(staff, actual_counts)
-        # Same fix: this is the branch that actually builds the final report for BOTH
+        # Same pattern: this is the branch that builds the final report for BOTH
         # "Yes, run recommended" and "No, run mine" (the UI sends both through
-        # override_mode with actual_counts set) — it must check against actual_counts,
-        # not `needed`, or the real allocation you confirmed gets silently overwritten
-        # right before the PDF is built.
-        present_recommendations, summary_table = build_summary(staff, actual_counts)
+        # override_mode with actual_counts set). Needed stays the fixed-minimum
+        # `needed` dict so Assigned-vs-Needed keeps meaning "surplus/shortage vs the
+        # real requirement" throughout the report (AI recommendations, shift health,
+        # labor-availability math all depend on that gap being real) — only the
+        # Loading safety-cap uses actual_counts, the target this trial was built for.
+        present_recommendations, summary_table = build_summary(staff, needed, loading_cap=actual_counts.get("Loading"))
+
 
         availability = compute_labor_availability(summary_table, present_recommendations, lead_extra_count=0)
         ai_recommended = recommended_counts
