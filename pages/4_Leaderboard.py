@@ -141,7 +141,7 @@ def ocr_image(file_bytes: bytes) -> str:
 
 
 # =============================================================================
-# Rate math  (NEW — single source of truth for screen + PDF)
+# Rate math  (single source of truth for screen + PDF)
 # =============================================================================
 STANDARD_RATE = 210   # cases/hr; at/above = OK, below = red flag
 
@@ -629,26 +629,45 @@ with tab_image:
             "tab works regardless."
         )
     else:
-        img_bytes = None
+        # Collect bytes from every source: one pasted-from-clipboard image, plus
+        # any number of uploaded/dragged files. Each gets OCR'd separately and
+        # the results are stitched together into one block of text below, so
+        # rosters that span multiple screenshots (e.g. a scrollable report)
+        # still build into a single leaderboard.
+        img_bytes_list = []
+
         if PASTE_OK:
             res = paste_image_button("Paste image from clipboard", errors="ignore")
             if res is not None and getattr(res, "image_data", None) is not None:
                 b = io.BytesIO()
                 res.image_data.save(b, format="PNG")
-                img_bytes = b.getvalue()
-        uploaded = st.file_uploader("…or upload / drag a screenshot",
-                                    type=["png", "jpg", "jpeg", "webp"])
-        if uploaded is not None:
-            img_bytes = uploaded.read()
-        if img_bytes:
-            st.image(img_bytes, caption="Source image", use_container_width=True)
+                img_bytes_list.append(b.getvalue())
+
+        uploaded_files = st.file_uploader(
+            "…or upload / drag one or more screenshots",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+        )
+        for uf in uploaded_files or []:
+            img_bytes_list.append(uf.read())
+
+        if img_bytes_list:
+            n_imgs = len(img_bytes_list)
+            st.caption(f"{n_imgs} image{'s' if n_imgs != 1 else ''} loaded — "
+                       "each is read separately and combined below.")
+            preview_cols = st.columns(min(n_imgs, 4))
+            for i, ib in enumerate(img_bytes_list):
+                preview_cols[i % len(preview_cols)].image(
+                    ib, use_container_width=True, caption=f"Image {i + 1}")
+
             try:
-                with st.spinner("Reading text from image…"):
-                    extracted = ocr_image(img_bytes)
+                with st.spinner(f"Reading text from {n_imgs} image{'s' if n_imgs != 1 else ''}…"):
+                    extracted_parts = [ocr_image(ib) for ib in img_bytes_list]
+                combined_text = "\n".join(part.strip() for part in extracted_parts)
                 st.text_area("OCR result (edit if needed, then build below):",
-                             value=extracted, height=200, key="ocr_box")
+                             value=combined_text, height=200, key="ocr_box")
             except Exception as e:
-                st.error(f"Couldn't read the image ({type(e).__name__}). "
+                st.error(f"Couldn't read one of the images ({type(e).__name__}). "
                          "Use the Paste text tab instead.")
 
 st.divider()
