@@ -11,6 +11,7 @@ Run with:
 """
 
 import io
+import re
 import streamlit as st
 import pandas as pd
 from openpyxl import Workbook
@@ -34,9 +35,60 @@ def _clean(v):
     return str(v).strip()
 
 
+def order_sort_key(order_no):
+    """
+    Creates a reliable numeric sort key for Order #.
+
+    Handles:
+    - 3700007249
+    - 3700007249.0
+    - "3700007249"
+    - blanks
+    """
+    if pd.isna(order_no):
+        return float("inf")
+
+    text = str(order_no).strip().replace(",", "")
+
+    if text == "":
+        return float("inf")
+
+    try:
+        return int(float(text))
+    except (ValueError, TypeError):
+        digits = re.sub(r"\D", "", text)
+        if digits:
+            return int(digits)
+        return float("inf")
+
+
+def normalize_order_no(order_no):
+    """
+    Keeps Order # clean for display.
+    Converts 3700007249.0 into 3700007249.
+    """
+    if pd.isna(order_no):
+        return ""
+
+    text = str(order_no).strip().replace(",", "")
+
+    if text == "":
+        return ""
+
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    except (ValueError, TypeError):
+        pass
+
+    return text
+
+
 def build_sku(h, i):
     if pd.isna(h) or pd.isna(i):
         return None
+
     try:
         h = float(h)
         i = float(i)
@@ -65,12 +117,14 @@ def load_tkreserve(file) -> pd.DataFrame:
 
     h = pd.to_numeric(raw.iloc[:, COL_SKU_H], errors="coerce")
     i = pd.to_numeric(raw.iloc[:, COL_SKU_I], errors="coerce")
+
     sku = [build_sku(a, b) for a, b in zip(h, i)]
 
     qty = pd.to_numeric(raw.iloc[:, COL_QTY], errors="coerce").fillna(0)
 
     date2 = pd.to_numeric(raw.iloc[:, COL_DATE2], errors="coerce").fillna(0)
     time2 = pd.to_numeric(raw.iloc[:, COL_TIME2], errors="coerce").fillna(0)
+
     tx_time = date2 * 1_000_000 + time2
 
     df = pd.DataFrame({
@@ -82,12 +136,17 @@ def load_tkreserve(file) -> pd.DataFrame:
     })
 
     df = df.dropna(subset=["SKU"])
+
     return df[df["SKU"] != ""]
 
 
 def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     def summarize(g):
-        loc_qty = g.groupby("Location")["Quantity"].sum().sort_values(ascending=False)
+        loc_qty = (
+            g.groupby("Location")["Quantity"]
+            .sum()
+            .sort_values(ascending=False)
+        )
 
         loc_str = "; ".join(
             f"{loc} ({int(q)})"
@@ -108,7 +167,9 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
 
 def format_qty(qty, um):
     qty = 0 if pd.isna(qty) else qty
+
     qty_str = str(int(qty)) if float(qty).is_integer() else str(qty)
+
     um = _clean(um)
 
     return f"{qty_str} {um}".strip()
@@ -116,31 +177,35 @@ def format_qty(qty, um):
 
 def load_sample_orders(file) -> pd.DataFrame:
     xl = pd.ExcelFile(file)
+
     frames = []
 
-    for sheet in xl.sheet_names:
+    for sheet_index, sheet in enumerate(xl.sheet_names):
         df = pd.read_excel(xl, sheet_name=sheet, header=0)
 
         if df.empty or "Item no" not in df.columns:
             continue
 
-        df = df.dropna(subset=["Item no"])
+        df = df.dropna(subset=["Item no"]).copy()
 
         if df.empty:
             continue
 
-        order_no = pd.to_numeric(df.get("CO no"), errors="coerce")
-        qty_num = pd.to_numeric(df.get("Order qty"), errors="coerce").fillna(0)
-        um = df.get("U/M")
+        co_no = df["CO no"] if "CO no" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
+        qty_num = pd.to_numeric(df["Order qty"] if "Order qty" in df.columns else 0, errors="coerce").fillna(0)
+        um = df["U/M"] if "U/M" in df.columns else pd.Series([""] * len(df), index=df.index)
+        name = df["Name"] if "Name" in df.columns else pd.Series([""] * len(df), index=df.index)
 
-        frames.append(pd.DataFrame({
+        temp = pd.DataFrame({
             "Order Date": sheet,
-            "Order #": order_no.apply(lambda v: str(int(v)) if pd.notna(v) else ""),
+            "Order #": co_no.apply(normalize_order_no),
             "Item No": df["Item no"].astype(str).str.strip(),
-            "Item Name": df.get("Name"),
+            "Item Name": name,
             "Order Qty Num": qty_num,
             "Order Qty": [format_qty(q, u) for q, u in zip(qty_num, um)],
-        }))
+        })
+
+        frames.append(temp)
 
     if not frames:
         return pd.DataFrame(columns=[
@@ -152,7 +217,12 @@ def load_sample_orders(file) -> pd.DataFrame:
             "Order Qty"
         ])
 
-    return pd.concat(frames, ignore_index=True)
+    orders = pd.concat(frames, ignore_index=True)
+
+    # This preserves the original order of the rows from the sample orders workbook.
+    orders["_original_line_seq"] = range(len(orders))
+
+    return orders
 
 
 def is_sample_item(item_no: str) -> bool:
@@ -175,6 +245,22 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result["Current Location"] = result["Current Location"].fillna("Not found in inventory")
     result["Previous Location"] = result["Previous Location"].fillna("")
 
+    # -----------------------------------------------------------------------
+    # IMPORTANT SORTING FIX
+    # -----------------------------------------------------------------------
+    # The output is sorted by Order # first.
+    # This keeps every item from the same order together.
+    # Inside each order, it keeps the original line order from the sample file.
+    # -----------------------------------------------------------------------
+    result["_order_sort_key"] = result["Order #"].apply(order_sort_key)
+
+    result = result.sort_values(
+        by=["_order_sort_key", "Order #", "_original_line_seq"],
+        ascending=[True, True, True],
+        na_position="last",
+        kind="mergesort"
+    ).reset_index(drop=True)
+
     cols = [
         "Order Date",
         "Order #",
@@ -188,18 +274,6 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     ]
 
     result = result[cols]
-
-    # Keep the original row order inside each order
-    result["_line_seq"] = range(len(result))
-
-    # Sort by Order # first so every line from the same order stays together
-    result["_order_num"] = pd.to_numeric(result["Order #"], errors="coerce")
-
-    result = result.sort_values(
-        by=["_order_num", "Order #", "_line_seq"],
-        ascending=[True, True, True],
-        na_position="last"
-    ).drop(columns=["_order_num", "_line_seq"]).reset_index(drop=True)
 
     return result
 
@@ -226,6 +300,7 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 
     for offset, (_, row) in enumerate(result.iterrows()):
         r = offset + 2
+
         item_no = row["Item No"]
         qty_avail = row["Quantity Available"]
 
