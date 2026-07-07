@@ -180,10 +180,12 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
     order_qty_col = headers.index("Order Qty") + 1
 
     for r in range(2, ws.max_row + 1):
+        item_no = ws.cell(row=r, column=headers.index("Item No") + 1).value
         qty_avail = ws.cell(row=r, column=qty_avail_col).value
         order_qty = ws.cell(row=r, column=order_qty_col).value
+        is_sample = str(item_no)[:1].isalpha() if item_no is not None else False
         if qty_avail == 0:
-            fill = zero_fill
+            fill = None if is_sample else zero_fill
         elif qty_avail is not None and order_qty is not None and qty_avail < order_qty:
             fill = shortage_fill
         else:
@@ -243,8 +245,9 @@ if orders_file and tk_file:
     m3.metric("Short on stock", int(short))
 
     def highlight(row):
+        is_sample = str(row["Item No"])[:1].isalpha()
         if row["Quantity Available"] == 0:
-            return ["background-color: #fff2cc"] * len(row)
+            return [""] * len(row) if is_sample else ["background-color: #fff2cc"] * len(row)
         if row["Quantity Available"] < row["Order Qty"]:
             return ["background-color: #ffe0e0"] * len(row)
         return [""] * len(row)
