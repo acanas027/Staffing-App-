@@ -12,13 +12,16 @@ Run with:
 import io
 import streamlit as st
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Order vs Inventory Matcher", layout="wide")
 
 # ---------------------------------------------------------------------------
 # TKRESERVE_QPORT layout (0-based column positions, header row = row 1)
 #   A-F : Location hierarchy (zone, aisle, rack, shelf, position, level)
-#         -> combined into one "Location" string, e.g. "BL-A-C-KH-O-L"
+#         -> combined into one "Location" string, e.g. "RC2A6X3"
 #   H   : Sku Number prefix + 2-digit fraction (e.g. 71117.00)
 #   I   : Sku Number last 3 digits of the suffix (e.g. 225)
 #         Full SKU = f"{int(H)}.{frac:02d}{int(I):03d}" -> "71117.00225"
@@ -58,7 +61,7 @@ def load_tkreserve(file) -> pd.DataFrame:
     raw = pd.read_excel(file, sheet_name=0, header=0)
 
     loc = raw.iloc[:, COL_LOC].apply(
-        lambda row: "-".join([_clean(v) for v in row if _clean(v) != ""]), axis=1
+        lambda row: "".join([_clean(v) for v in row if _clean(v) != ""]), axis=1
     )
 
     h = pd.to_numeric(raw.iloc[:, COL_SKU_H], errors="coerce")
@@ -76,7 +79,7 @@ def load_tkreserve(file) -> pd.DataFrame:
 def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     """One row per SKU:
     - Quantity Available = sum of all quantities for that SKU
-    - Current Location   = every distinct location with its quantity, e.g. 'BL-A-C-KH-O-L (67); RC-2-A-1-X-2 (91)'
+    - Current Location   = every distinct location with its quantity, e.g. 'RC2A6X3 (105); RC2F27A (47)'
     - Previous Location  = every distinct previous-location code seen for that SKU
     """
     def summarize(g):
@@ -93,7 +96,7 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_sample_orders(file) -> pd.DataFrame:
-    """Stack every non-empty sheet -> Order Date, CO No, Item No, Item Name, Order Qty"""
+    """Stack every non-empty sheet -> Order Date, Order #, Item No, Item Name, Order Qty"""
     xl = pd.ExcelFile(file)
     frames = []
     for sheet in xl.sheet_names:
@@ -103,17 +106,23 @@ def load_sample_orders(file) -> pd.DataFrame:
         df = df.dropna(subset=["Item no"])
         if df.empty:
             continue
-        co = pd.to_numeric(df.get("CO no"), errors="coerce")
+        order_no = pd.to_numeric(df.get("CO no"), errors="coerce")
         frames.append(pd.DataFrame({
             "Order Date": sheet,
-            "CO No": co.apply(lambda v: str(int(v)) if pd.notna(v) else ""),
+            "Order #": order_no.apply(lambda v: str(int(v)) if pd.notna(v) else ""),
             "Item No": df["Item no"].astype(str).str.strip(),
             "Item Name": df.get("Name"),
             "Order Qty": pd.to_numeric(df.get("Order qty"), errors="coerce").fillna(0),
         }))
     if not frames:
-        return pd.DataFrame(columns=["Order Date", "CO No", "Item No", "Item Name", "Order Qty"])
+        return pd.DataFrame(columns=["Order Date", "Order #", "Item No", "Item Name", "Order Qty"])
     return pd.concat(frames, ignore_index=True)
+
+
+def is_sample_item(item_no: str) -> bool:
+    """Sample items are coded like 'S12150' (letter prefix) instead of a numeric SKU."""
+    item_no = str(item_no).strip()
+    return not item_no[:1].isdigit()
 
 
 def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
@@ -125,15 +134,69 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result["Current Location"] = result["Current Location"].fillna("Not found in inventory")
     result["Previous Location"] = result["Previous Location"].fillna("")
 
-    cols = ["Order Date", "CO No", "Item No", "Item Name", "Order Qty",
+    cols = ["Order Date", "Order #", "Item No", "Item Name", "Order Qty",
             "Quantity Available", "Current Location", "Previous Location"]
-    return result[cols].sort_values(["Order Date", "Item No"]).reset_index(drop=True)
+    result = result[cols]
+
+    result["_is_sample"] = result["Item No"].apply(is_sample_item)
+    result = result.sort_values(
+        ["_is_sample", "Order Date", "Item No"]
+    ).drop(columns=["_is_sample"]).reset_index(drop=True)
+    return result
+
+
+def build_excel(result: pd.DataFrame) -> io.BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Order vs Inventory"
+
+    headers = list(result.columns)
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", start_color="2F5496")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    zero_fill = PatternFill("solid", start_color="FFF2CC")
+    shortage_fill = PatternFill("solid", start_color="FFE0E0")
+
+    for _, row in result.iterrows():
+        ws.append(list(row))
+
+    qty_avail_col = headers.index("Quantity Available") + 1
+    order_qty_col = headers.index("Order Qty") + 1
+
+    for r in range(2, ws.max_row + 1):
+        qty_avail = ws.cell(row=r, column=qty_avail_col).value
+        order_qty = ws.cell(row=r, column=order_qty_col).value
+        if qty_avail == 0:
+            fill = zero_fill
+        elif qty_avail is not None and order_qty is not None and qty_avail < order_qty:
+            fill = shortage_fill
+        else:
+            fill = None
+        if fill:
+            for c in range(1, len(headers) + 1):
+                ws.cell(row=r, column=c).fill = fill
+
+    widths = {"Order Date": 11, "Order #": 13, "Item No": 13, "Item Name": 40,
+              "Order Qty": 10, "Quantity Available": 16, "Current Location": 30,
+              "Previous Location": 16}
+    for idx, h in enumerate(headers, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = widths.get(h, 14)
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.title("📦 Sample Orders → TKRESERVE Inventory Matcher")
+st.title("Sample Orders to TKRESERVE Inventory Matcher")
 st.write(
     "Upload the **sample orders** workbook and the **TKRESERVE_QPORT** inventory "
     "report. The app matches every ordered item to its available quantity and "
@@ -158,16 +221,16 @@ if orders_file and tk_file:
         st.error(f"Something went wrong while processing the files: {e}")
         st.stop()
 
-    not_found = (result["Current Location"] == "Not found in inventory").sum()
-    short = (result["Quantity Available"] < result["Order Qty"]).sum()
+    zero_avail = (result["Quantity Available"] == 0).sum()
+    short = ((result["Quantity Available"] > 0) & (result["Quantity Available"] < result["Order Qty"])).sum()
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Order lines", len(result))
-    m2.metric("Not found in inventory", int(not_found))
+    m2.metric("Zero available", int(zero_avail))
     m3.metric("Short on stock", int(short))
 
     def highlight(row):
-        if row["Current Location"] == "Not found in inventory":
+        if row["Quantity Available"] == 0:
             return ["background-color: #fff2cc"] * len(row)
         if row["Quantity Available"] < row["Order Qty"]:
             return ["background-color: #ffe0e0"] * len(row)
@@ -175,14 +238,10 @@ if orders_file and tk_file:
 
     st.dataframe(result.style.apply(highlight, axis=1), use_container_width=True, height=500)
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        result.to_excel(writer, index=False, sheet_name="Order vs Inventory")
-    buf.seek(0)
-
+    excel_buf = build_excel(result)
     st.download_button(
-        "⬇️ Download results as Excel",
-        data=buf,
+        "Download results as Excel",
+        data=excel_buf,
         file_name="order_vs_inventory.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
