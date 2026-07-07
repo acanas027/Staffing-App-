@@ -18,25 +18,13 @@ from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Order vs Inventory Matcher", layout="wide")
 
-# ---------------------------------------------------------------------------
-# TKRESERVE_QPORT layout (0-based column positions, header row = row 1)
-#   A-F : Location hierarchy (zone, aisle, rack, shelf, position, level)
-#         -> combined into one "Location" string, e.g. "RC2A6X3"
-#   H   : Sku Number prefix + 2-digit fraction (e.g. 71117.00)
-#   I   : Sku Number last 3 digits of the suffix (e.g. 225)
-#         Full SKU = f"{int(H)}.{frac:02d}{int(I):03d}" -> "71117.00225"
-#   J   : QUANTITY (units available for that location/lot)
-#   K-P : Previous location hierarchy (same shape as A-F)
-#         -> combined into one "Previous Location" string per row, e.g. "RC2A1X1"
-#         The single most recent one (by the Y/Z transaction date-time) is kept per item.
-# ---------------------------------------------------------------------------
 COL_LOC = [0, 1, 2, 3, 4, 5]
 COL_SKU_H = 7
 COL_SKU_I = 8
 COL_QTY = 9
 COL_PREV = [10, 11, 12, 13, 14, 15]
-COL_DATE2 = 24   # Y - most recent transaction date
-COL_TIME2 = 25   # Z - most recent transaction time
+COL_DATE2 = 24
+COL_TIME2 = 25
 
 
 def _clean(v):
@@ -46,7 +34,6 @@ def _clean(v):
 
 
 def build_sku(h, i):
-    """Reconstruct the full SKU number from the H (prefix.fraction) and I (suffix) columns."""
     if pd.isna(h) or pd.isna(i):
         return None
     try:
@@ -61,7 +48,6 @@ def build_sku(h, i):
 
 
 def load_tkreserve(file) -> pd.DataFrame:
-    """Read TKRESERVE_QPORT.xlsx -> ['SKU', 'Location', 'Quantity', 'Previous Location', 'TxTime']"""
     raw = pd.read_excel(file, sheet_name=0, header=0)
 
     loc = raw.iloc[:, COL_LOC].apply(
@@ -90,11 +76,6 @@ def load_tkreserve(file) -> pd.DataFrame:
 
 
 def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
-    """One row per SKU:
-    - Quantity Available = sum of all quantities for that SKU
-    - Current Location   = every distinct location with its quantity, e.g. 'RC2A6X3 (105); RC2F27A (47)'
-    - Previous Location  = the single most recent previous location recorded for that SKU
-    """
     def summarize(g):
         loc_qty = g.groupby("Location")["Quantity"].sum().sort_values(ascending=False)
         loc_str = "; ".join(f"{loc} ({int(q)})" for loc, q in loc_qty.items() if loc)
@@ -116,7 +97,6 @@ def format_qty(qty, um):
 
 
 def load_sample_orders(file) -> pd.DataFrame:
-    """Stack every non-empty sheet -> Order Date, Order #, Item No, Item Name, Order Qty"""
     xl = pd.ExcelFile(file)
     frames = []
     for sheet in xl.sheet_names:
@@ -143,7 +123,6 @@ def load_sample_orders(file) -> pd.DataFrame:
 
 
 def is_sample_item(item_no: str) -> bool:
-    """Sample items are coded like 'S12150' (letter prefix) instead of a numeric SKU."""
     item_no = str(item_no).strip()
     return not item_no[:1].isdigit()
 
@@ -162,8 +141,9 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result = result[cols]
 
     result["_is_sample"] = result["Item No"].apply(is_sample_item)
+    # Sort: samples last, then by Order # so all lines per order are grouped, then by Item No
     result = result.sort_values(
-        ["_is_sample", "Order Date", "Item No"]
+        ["_is_sample", "Order #", "Item No"]
     ).drop(columns=["_is_sample"]).reset_index(drop=True)
     return result
 
@@ -182,29 +162,20 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     zero_fill = PatternFill("solid", start_color="FFF2CC")
-    shortage_fill = PatternFill("solid", start_color="FFE0E0")
 
     for _, row in result.iterrows():
         ws.append([row[c] for c in display_cols])
 
     qty_avail_col = headers.index("Quantity Available") + 1
-    item_no_col = headers.index("Item No") + 1
 
     for offset, (_, row) in enumerate(result.iterrows()):
         r = offset + 2
         item_no = row["Item No"]
         qty_avail = row["Quantity Available"]
-        order_qty_num = row["Order Qty Num"]
         is_sample = str(item_no)[:1].isalpha() if item_no is not None else False
-        if qty_avail == 0:
-            fill = None if is_sample else zero_fill
-        elif qty_avail < order_qty_num:
-            fill = shortage_fill
-        else:
-            fill = None
-        if fill:
+        if qty_avail == 0 and not is_sample:
             for c in range(1, len(headers) + 1):
-                ws.cell(row=r, column=c).fill = fill
+                ws.cell(row=r, column=c).fill = zero_fill
 
     widths = {"Order Date": 11, "Order #": 13, "Item No": 13, "Item Name": 40,
               "Order Qty": 10, "Quantity Available": 16, "Current Location": 30,
@@ -261,10 +232,8 @@ if orders_file and tk_file:
     row_styles = []
     for _, row in result.iterrows():
         is_sample = str(row["Item No"])[:1].isalpha()
-        if row["Quantity Available"] == 0:
-            style = [""] * n_cols if is_sample else ["background-color: #fff2cc"] * n_cols
-        elif row["Quantity Available"] < row["Order Qty Num"]:
-            style = ["background-color: #ffe0e0"] * n_cols
+        if row["Quantity Available"] == 0 and not is_sample:
+            style = ["background-color: #fff2cc"] * n_cols
         else:
             style = [""] * n_cols
         row_styles.append(style)
