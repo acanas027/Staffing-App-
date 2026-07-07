@@ -1,7 +1,7 @@
 """
 Order vs Inventory Matcher — single-file Streamlit app.
 
-Upload a sample-orders workbook and a TKRESERVE_QPORT inventory report.
+Upload a sample-orders workbook and a QPORT inventory report.
 The app matches every ordered item to its available quantity and locations,
 one row per item, with every stocking location and its quantity listed together.
 
@@ -108,6 +108,13 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     return inv.groupby("SKU").apply(summarize, include_groups=False).reset_index()
 
 
+def format_qty(qty, um):
+    qty = 0 if pd.isna(qty) else qty
+    qty_str = str(int(qty)) if float(qty).is_integer() else str(qty)
+    um = _clean(um)
+    return f"{qty_str} {um}".strip()
+
+
 def load_sample_orders(file) -> pd.DataFrame:
     """Stack every non-empty sheet -> Order Date, Order #, Item No, Item Name, Order Qty"""
     xl = pd.ExcelFile(file)
@@ -120,15 +127,18 @@ def load_sample_orders(file) -> pd.DataFrame:
         if df.empty:
             continue
         order_no = pd.to_numeric(df.get("CO no"), errors="coerce")
+        qty_num = pd.to_numeric(df.get("Order qty"), errors="coerce").fillna(0)
+        um = df.get("U/M")
         frames.append(pd.DataFrame({
             "Order Date": sheet,
             "Order #": order_no.apply(lambda v: str(int(v)) if pd.notna(v) else ""),
             "Item No": df["Item no"].astype(str).str.strip(),
             "Item Name": df.get("Name"),
-            "Order Qty": pd.to_numeric(df.get("Order qty"), errors="coerce").fillna(0),
+            "Order Qty Num": qty_num,
+            "Order Qty": [format_qty(q, u) for q, u in zip(qty_num, um)],
         }))
     if not frames:
-        return pd.DataFrame(columns=["Order Date", "Order #", "Item No", "Item Name", "Order Qty"])
+        return pd.DataFrame(columns=["Order Date", "Order #", "Item No", "Item Name", "Order Qty Num", "Order Qty"])
     return pd.concat(frames, ignore_index=True)
 
 
@@ -148,7 +158,7 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result["Previous Location"] = result["Previous Location"].fillna("")
 
     cols = ["Order Date", "Order #", "Item No", "Item Name", "Order Qty",
-            "Quantity Available", "Current Location", "Previous Location"]
+            "Current Location", "Previous Location", "Quantity Available", "Order Qty Num"]
     result = result[cols]
 
     result["_is_sample"] = result["Item No"].apply(is_sample_item)
@@ -163,7 +173,8 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
     ws = wb.active
     ws.title = "Order vs Inventory"
 
-    headers = list(result.columns)
+    display_cols = [c for c in result.columns if c != "Order Qty Num"]
+    headers = display_cols
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
@@ -174,19 +185,20 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
     shortage_fill = PatternFill("solid", start_color="FFE0E0")
 
     for _, row in result.iterrows():
-        ws.append(list(row))
+        ws.append([row[c] for c in display_cols])
 
     qty_avail_col = headers.index("Quantity Available") + 1
-    order_qty_col = headers.index("Order Qty") + 1
+    item_no_col = headers.index("Item No") + 1
 
-    for r in range(2, ws.max_row + 1):
-        item_no = ws.cell(row=r, column=headers.index("Item No") + 1).value
-        qty_avail = ws.cell(row=r, column=qty_avail_col).value
-        order_qty = ws.cell(row=r, column=order_qty_col).value
+    for offset, (_, row) in enumerate(result.iterrows()):
+        r = offset + 2
+        item_no = row["Item No"]
+        qty_avail = row["Quantity Available"]
+        order_qty_num = row["Order Qty Num"]
         is_sample = str(item_no)[:1].isalpha() if item_no is not None else False
         if qty_avail == 0:
             fill = None if is_sample else zero_fill
-        elif qty_avail is not None and order_qty is not None and qty_avail < order_qty:
+        elif qty_avail < order_qty_num:
             fill = shortage_fill
         else:
             fill = None
@@ -211,7 +223,7 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.title("Sample Orders to TKRESERVE Inventory Matcher")
+st.title("Sample Orders to Inventory Matcher")
 st.write(
     "Upload the **sample orders** workbook and the **TKRESERVE_QPORT** inventory "
     "report. The app matches every ordered item to its available quantity and "
@@ -222,7 +234,7 @@ col1, col2 = st.columns(2)
 with col1:
     orders_file = st.file_uploader("Sample Orders (.xlsx)", type=["xlsx"], key="orders")
 with col2:
-    tk_file = st.file_uploader("TKRESERVE_QPORT (.xlsx)", type=["xlsx"], key="tk")
+    tk_file = st.file_uploader("QPORT Inventory Report (.xlsx)", type=["xlsx"], key="tk")
 
 if orders_file and tk_file:
     try:
@@ -237,22 +249,30 @@ if orders_file and tk_file:
         st.stop()
 
     zero_avail = (result["Quantity Available"] == 0).sum()
-    short = ((result["Quantity Available"] > 0) & (result["Quantity Available"] < result["Order Qty"])).sum()
+    short = ((result["Quantity Available"] > 0) & (result["Quantity Available"] < result["Order Qty Num"])).sum()
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Order lines", len(result))
     m2.metric("Zero available", int(zero_avail))
     m3.metric("Short on stock", int(short))
 
-    def highlight(row):
+    display_df = result.drop(columns=["Order Qty Num"])
+    n_cols = len(display_df.columns)
+    row_styles = []
+    for _, row in result.iterrows():
         is_sample = str(row["Item No"])[:1].isalpha()
         if row["Quantity Available"] == 0:
-            return [""] * len(row) if is_sample else ["background-color: #fff2cc"] * len(row)
-        if row["Quantity Available"] < row["Order Qty"]:
-            return ["background-color: #ffe0e0"] * len(row)
-        return [""] * len(row)
+            style = [""] * n_cols if is_sample else ["background-color: #fff2cc"] * n_cols
+        elif row["Quantity Available"] < row["Order Qty Num"]:
+            style = ["background-color: #ffe0e0"] * n_cols
+        else:
+            style = [""] * n_cols
+        row_styles.append(style)
 
-    st.dataframe(result.style.apply(highlight, axis=1), use_container_width=True, height=500)
+    def highlight(row):
+        return row_styles[row.name]
+
+    st.dataframe(display_df.style.apply(highlight, axis=1), use_container_width=True, height=500)
 
     excel_buf = build_excel(result)
     st.download_button(
