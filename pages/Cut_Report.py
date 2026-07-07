@@ -39,7 +39,7 @@ import streamlit as st
 # --------------------------------------------------------------------------
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
-MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
+MAILTO_SAFE_LENGTH = 3000  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
 st.title("Cuts From Loads — CSR Email Generator")
