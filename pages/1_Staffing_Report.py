@@ -2777,8 +2777,14 @@ def render_allocation_controls_preview(label, controlled):
         return
     st.markdown(f"**{label}**")
     a, b, c = st.columns(3)
-    a.metric("Loads controlled by shift end",
-             f"{controlled['loads_controlled']} / {controlled['selected_day_loads']}")
+    already = int(controlled.get("already_controlled_loads", 0) or 0)
+    additional = int(controlled.get("additional_loads_controlled", 0) or 0)
+    a.metric(
+        "Loads controlled by shift end",
+        f"{controlled['loads_controlled']} / {controlled['selected_day_loads']}",
+        delta=f"{already} already + {additional} this shift",
+        delta_color="off",
+    )
     b.metric("Controlled through appt", controlled["cutoff"])
     c.metric("Bottleneck", controlled["binding"])
     rs_count = int(controlled.get("rs_count", 0) or 0)
@@ -3405,7 +3411,7 @@ def build_email_draft(
     all_rows = payload.get("all_outbound_rows", [])
 
     pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
-    health = derive_shift_health(summary_table, pacing, py_out)
+    health, health_reason = derive_shift_health(summary_table, pacing, py_out)
 
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     total_present = len(present_recommendations)
@@ -3450,7 +3456,7 @@ def build_email_draft(
     pull_pct = int(float(controlled.get("pull_frac", 0) or 0) * 100)
     load_pct = int(float(controlled.get("load_frac", 0) or 0) * 100)
 
-    lines = [f"Shift health: {health}."]
+    lines = [f"Shift health: {health} — {health_reason}"]
     if goal:
         lines.append(f"Goal: {goal}")
     lines.append(
@@ -3550,17 +3556,38 @@ def pdf_status_color(health):
 
 
 def derive_shift_health(summary_table, pacing, py_out):
-    """Simple transparent health rule for the PDF headline."""
+    """
+    Simple transparent health rule for the PDF headline.
+    Returns (health, reason) — reason names the SPECIFIC number(s) that actually
+    tripped the threshold for this shift, not a generic canned sentence, so the
+    report says exactly why (e.g. "4 load(s) due by now are still not RTL"),
+    not just "RED".
+    """
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     due_not_RTL = pdf_number(pacing.get("due_not_RTL", 0)) if pacing else 0
     loaded_short = pdf_number(py_out.get("loaded_short_loads", 0)) if py_out else 0
     picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
+    pacing_status = str(pacing.get("pacing", "")).upper() if pacing else ""
 
     if due_not_RTL > 3 or net_gap <= -5:
-        return "RED"
-    if net_gap < 2 or picking_short > 1 or str(pacing.get("pacing", "")).upper() == "BEHIND":
-        return "YELLOW"
-    return "GREEN"
+        reasons = []
+        if due_not_RTL > 3:
+            reasons.append(f"{due_not_RTL} load(s) due by now are still not RTL")
+        if net_gap <= -5:
+            reasons.append(f"staffing is short {net_gap:+d}")
+        return "RED", " and ".join(reasons) + "."
+
+    if net_gap < 2 or picking_short > 1 or pacing_status == "BEHIND":
+        reasons = []
+        if net_gap < 2:
+            reasons.append(f"net staffing gap is only {net_gap:+d}")
+        if picking_short > 1:
+            reasons.append(f"{picking_short} load(s) are Picking/Short")
+        if pacing_status == "BEHIND":
+            reasons.append("pacing is behind schedule")
+        return "YELLOW", " and ".join(reasons) + "."
+
+    return "GREEN", "staffing meets need and pacing is on track."
 
 
 def appointment_cutoff_from_rows(rows):
@@ -3706,6 +3733,51 @@ def extract_ai_shift_goal(board_analysis_text):
                     return nxt_clean
     return ""
     
+def extract_ai_bottom_line(board_analysis_text):
+    """
+    Pull the AI's own Bottom Line sentence (pace status + appointment cutoff +
+    biggest threat) for display on the Prioritization page. The model is
+    prompted to start its response with "SHIFT HEALTH: GREEN/YELLOW/RED."
+    immediately followed by the bottom line, all before the numbered
+    Prioritization section — so this captures everything in between, including
+    any trailing text that shares the same line as the SHIFT HEALTH call-out.
+    """
+    text = str(board_analysis_text or "")
+    if not text.strip():
+        return ""
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    collected = []
+    started = False
+
+    for line in lines:
+        raw = line.strip()
+        upper = raw.upper()
+
+        if not started:
+            if upper.startswith("SHIFT HEALTH"):
+                started = True
+                # Capture any text sharing the same line, e.g. "SHIFT HEALTH: RED. Behind 5 loads..."
+                after = re.sub(
+                    r"^[#\-*\s]*SHIFT\s*HEALTH\s*:?\s*(GREEN|YELLOW|RED)\.?",
+                    "", raw, flags=re.IGNORECASE
+                ).strip()
+                after = clean_pdf_text(after)
+                if after:
+                    collected.append(after)
+            continue
+
+        if "PRIORITIZATION" in upper or re.search(r"\b3\.\s+PRIORITIZATION", upper, re.IGNORECASE):
+            break
+
+        if raw and not _is_markdown_table_line(raw):
+            clean = clean_pdf_text(raw)
+            if clean:
+                collected.append(clean)
+
+    return " ".join(collected).strip()
+
+
 def _is_markdown_table_line(text):
     """True for markdown-table rows/separators (e.g. '| Load | Customer |' or '|---|---|')
     so stray table fragments never print as garbled pipe rows in the PDF.
@@ -3805,7 +3877,7 @@ def build_pdf_board_summary_rows(selected_rows):
     """Small first-page board summary table for the selected day only."""
     counts = {
         "Total loads": 0,
-        "Completed": 0,
+        "Completed/Loaded": 0,
         "RTL": 0,
         "R/S + Loaded Short": 0,
         "Picking/Short": 0,
@@ -3818,8 +3890,8 @@ def build_pdf_board_summary_rows(selected_rows):
         status = str(row.get("status", "") or "").strip()
         status_upper = status.upper()
 
-        if status_upper in {"COMPLETED", "COMPLETE"}:
-            counts["Completed"] += 1
+        if status_upper in {"COMPLETED", "COMPLETE", "LOADED"}:
+            counts["Completed/Loaded"] += 1
         elif status_upper == "RTL" or "READY TO LOAD" in status_upper:
             counts["RTL"] += 1
         elif (
@@ -3832,8 +3904,6 @@ def build_pdf_board_summary_rows(selected_rows):
             counts["Picking/Short"] += 1
         elif status_upper == "PICKING":
             counts["Picking no short"] += 1
-        elif status_upper == "LOADED":
-            pass
         elif not status:
             counts["Blank/Not Started"] += 1
         else:
@@ -3843,7 +3913,7 @@ def build_pdf_board_summary_rows(selected_rows):
     return [
         ["Outbound - selected day", ""],
         ["Total loads", counts["Total loads"]],
-        ["Completed", counts["Completed"]],
+        ["Completed/Loaded", counts["Completed/Loaded"]],
         ["RTL", counts["RTL"]],
         ["R/S + Loaded Short", counts["R/S + Loaded Short"]],
         ["Picking/Short", counts["Picking/Short"]],
@@ -3853,7 +3923,11 @@ def build_pdf_board_summary_rows(selected_rows):
 
 
 def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, crossdock_matches, tt4_matches):
-    """First-page service risk level based on actual allocation gaps and selected-day board risk."""
+    """
+    First-page service risk level based on actual allocation gaps and selected-day
+    board risk. Reason text names the SPECIFIC number(s) that tripped the
+    threshold for this shift, not a generic canned sentence.
+    """
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     due_not_RTL = pdf_number(pacing.get("due_not_RTL", 0)) if pacing else 0
     picking_short = pdf_number(py_out.get("picking_short_loads", 0)) if py_out else 0
@@ -3861,9 +3935,23 @@ def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, cr
     alert_count = len(oc_load_matches or []) + len(crossdock_matches or []) + len(tt4_matches or [])
 
     if due_not_RTL > 2 or loaded_short > 0 or net_gap <= -5:
-        return "HIGH", "Past-due/short exposure or a major actual staffing gap is present."
+        reasons = []
+        if due_not_RTL > 2:
+            reasons.append(f"{due_not_RTL} load(s) due by now are still not RTL")
+        if loaded_short > 0:
+            reasons.append(f"{loaded_short} load(s) shipped Loaded Short")
+        if net_gap <= -5:
+            reasons.append(f"staffing is short {net_gap:+d}")
+        return "HIGH", " and ".join(reasons) + "."
     if picking_short > 2 or net_gap < 0 or alert_count > 0:
-        return "MEDIUM", "Execution is controllable, but staffing gaps or customer/load alerts require follow-up."
+        reasons = []
+        if picking_short > 2:
+            reasons.append(f"{picking_short} load(s) are Picking/Short")
+        if net_gap < 0:
+            reasons.append(f"staffing is short {net_gap:+d}")
+        if alert_count > 0:
+            reasons.append(f"{alert_count} OC/Cross Dock/TT4 alert(s) need follow-up")
+        return "MEDIUM", " and ".join(reasons) + "."
     return "LOW", "No major service risk detected from current pacing, staffing, or direct alerts."
 
 
@@ -3959,7 +4047,7 @@ def build_pdf_report(
     all_rows = payload.get("all_outbound_rows", [])
     selected_rows = rows_for_selected_day(all_rows, day)
     pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
-    health = derive_shift_health(summary_table, pacing, py_out)
+    health, health_reason = derive_shift_health(summary_table, pacing, py_out)
     cutoff = appointment_cutoff_from_rows(selected_rows)
 
     ai_shift_goal = ""
@@ -4027,7 +4115,7 @@ def build_pdf_report(
             Paragraph("SHIFT GOAL - PYTHON SOURCE OF TRUTH", styles["Tiny"]),
         ],
         [
-            Paragraph(f"<b>{pdf_safe(health)}</b>", styles["Body"]),
+            Paragraph(f"<b>{pdf_safe(health)}</b><br/>{pdf_safe(health_reason)}", styles["BodySmall"]),
             Paragraph(f"<b>{pdf_safe(service_risk)}</b><br/>{pdf_safe(service_risk_reason)}", styles["BodySmall"]),
             Paragraph(pdf_safe(ai_shift_goal), styles["BodySmall"]),
         ],
@@ -4047,9 +4135,24 @@ def build_pdf_report(
     story.append(health_table)
     story.append(Spacer(1, 6))
 
+    completed_or_loaded_combined = pdf_number(pacing.get("completed_count", 0)) + pdf_number(pacing.get("loaded_count", 0))
+
+    # "Loads Controlled by Shift End" — the headline number from the appointment
+    # target math (see compute_python_shift_goal_preview), with a small breakdown
+    # of how much of it is already banked vs. newly earned by this shift's staffing.
+    loads_controlled_display = "not provided"
+    if python_shift_goal_preview:
+        _lc = python_shift_goal_preview.get("loads_controlled")
+        _sel = python_shift_goal_preview.get("selected_day_loads")
+        _already = python_shift_goal_preview.get("already_controlled_loads")
+        if _lc is not None and _sel:
+            _already = pdf_number(_already, 0)
+            _additional = max(0, pdf_number(_lc, 0) - _already)
+            loads_controlled_display = f"{_lc} / {_sel} ({_already} already + {_additional} this shift)"
+
     fact_rows = [
         ["Selected-day loads", pacing.get("selected_day_total_loads", "not provided"), "Pacing", pacing.get("pacing", "not provided")],
-        ["Completed", pacing.get("completed_count", 0), "Loaded", pacing.get("loaded_count", 0)],
+        ["Completed/Loaded", completed_or_loaded_combined, "Loads Controlled by Shift End", loads_controlled_display],
         ["Due by now", pacing.get("due_by_now", 0), "Due now not RTL", pacing.get("due_not_RTL", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
         ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
@@ -4175,6 +4278,15 @@ def build_pdf_report(
 
     # 5. Prioritization - AI only.
     story.append(Paragraph("5. Prioritization", styles["Section"]))
+
+    bottom_line = extract_ai_bottom_line(board_analysis_text)
+    if bottom_line:
+        story.append(Paragraph(
+            f"<b>Bottom Line:</b> {pdf_safe(bottom_line)}",
+            styles["Box"]
+        ))
+        story.append(Spacer(1, 6))
+
     priority_lines = extract_ai_prioritization_lines(board_analysis_text)
     if priority_lines:
         story.append(Paragraph("AI prioritization and board execution insight", styles["Subsection"]))
@@ -5017,26 +5129,13 @@ if result:
 
     st.success("PDF staffing report generated successfully.")
 
-    # ============================================================
-    # FIX 3: Debug expander — shows raw AI output so you can verify
-    # the model is actually returning text and what format it uses.
-    # Remove this block once the PDF sections are rendering correctly.
-    # ============================================================
-    with st.expander("DEBUG: Raw AI board analysis text (remove after fixing)", expanded=False):
-        if board_analysis_text:
-            st.text(board_analysis_text[:3000])
-            if len(board_analysis_text) > 3000:
-                st.caption(f"... (truncated, full length: {len(board_analysis_text)} chars)")
-        else:
-            st.warning("board_analysis_text is empty or None — the AI call failed or returned nothing.")
-
     if result["override_mode"]:
         st.info(
             "This report reflects the ACTUAL allocation you entered, not the tool's recommendation. "
             "The 'Recommended Staffing Board' below is the tool's suggested placement, shown for comparison."
         )
         if result.get("deviation_reason"):
-            st.caption(f"Your stated reason: {result['deviation_reason']}")
+            st.caption(f"{result['deviation_reason']}")
 
     st.subheader("Staffing Summary")
     st.dataframe(summary_table, use_container_width=True)
