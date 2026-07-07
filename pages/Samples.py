@@ -35,15 +35,33 @@ def _clean(v):
     return str(v).strip()
 
 
+def normalize_order_no(order_no):
+    """
+    Cleans Order # for display.
+    Converts values like 3700007249.0 into 3700007249.
+    """
+    if pd.isna(order_no):
+        return ""
+
+    text = str(order_no).strip().replace(",", "")
+
+    if text == "":
+        return ""
+
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    except (ValueError, TypeError):
+        pass
+
+    return text
+
+
 def order_sort_key(order_no):
     """
-    Creates a reliable numeric sort key for Order #.
-
-    Handles:
-    - 3700007249
-    - 3700007249.0
-    - "3700007249"
-    - blanks
+    Creates a numeric sort key from Order #.
+    This is what keeps all rows from the same order together.
     """
     if pd.isna(order_no):
         return float("inf")
@@ -62,27 +80,29 @@ def order_sort_key(order_no):
         return float("inf")
 
 
-def normalize_order_no(order_no):
+def force_order_sort(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Keeps Order # clean for display.
-    Converts 3700007249.0 into 3700007249.
+    Final forced sort.
+
+    Sorts by Order # only.
+    Does NOT sort by Item No.
+    Keeps the current row order inside each order.
     """
-    if pd.isna(order_no):
-        return ""
+    df = df.copy()
 
-    text = str(order_no).strip().replace(",", "")
+    df["_line_order"] = range(len(df))
+    df["_order_sort"] = df["Order #"].apply(order_sort_key)
 
-    if text == "":
-        return ""
+    df = df.sort_values(
+        by=["_order_sort", "_line_order"],
+        ascending=[True, True],
+        na_position="last",
+        kind="mergesort"
+    )
 
-    try:
-        number = float(text)
-        if number.is_integer():
-            return str(int(number))
-    except (ValueError, TypeError):
-        pass
+    df = df.drop(columns=["_order_sort", "_line_order"]).reset_index(drop=True)
 
-    return text
+    return df
 
 
 def build_sku(h, i):
@@ -162,13 +182,16 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
             "Previous Location": latest,
         })
 
-    return inv.groupby("SKU").apply(summarize, include_groups=False).reset_index()
+    return inv.groupby("SKU").apply(summarize).reset_index()
 
 
 def format_qty(qty, um):
     qty = 0 if pd.isna(qty) else qty
 
-    qty_str = str(int(qty)) if float(qty).is_integer() else str(qty)
+    try:
+        qty_str = str(int(qty)) if float(qty).is_integer() else str(qty)
+    except (ValueError, TypeError):
+        qty_str = str(qty)
 
     um = _clean(um)
 
@@ -180,7 +203,7 @@ def load_sample_orders(file) -> pd.DataFrame:
 
     frames = []
 
-    for sheet_index, sheet in enumerate(xl.sheet_names):
+    for sheet in xl.sheet_names:
         df = pd.read_excel(xl, sheet_name=sheet, header=0)
 
         if df.empty or "Item no" not in df.columns:
@@ -191,21 +214,34 @@ def load_sample_orders(file) -> pd.DataFrame:
         if df.empty:
             continue
 
-        co_no = df["CO no"] if "CO no" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
-        qty_num = pd.to_numeric(df["Order qty"] if "Order qty" in df.columns else 0, errors="coerce").fillna(0)
-        um = df["U/M"] if "U/M" in df.columns else pd.Series([""] * len(df), index=df.index)
-        name = df["Name"] if "Name" in df.columns else pd.Series([""] * len(df), index=df.index)
+        if "CO no" in df.columns:
+            order_no = df["CO no"]
+        else:
+            order_no = pd.Series([""] * len(df), index=df.index)
 
-        temp = pd.DataFrame({
+        if "Order qty" in df.columns:
+            qty_num = pd.to_numeric(df["Order qty"], errors="coerce").fillna(0)
+        else:
+            qty_num = pd.Series([0] * len(df), index=df.index)
+
+        if "U/M" in df.columns:
+            um = df["U/M"]
+        else:
+            um = pd.Series([""] * len(df), index=df.index)
+
+        if "Name" in df.columns:
+            item_name = df["Name"]
+        else:
+            item_name = pd.Series([""] * len(df), index=df.index)
+
+        frames.append(pd.DataFrame({
             "Order Date": sheet,
-            "Order #": co_no.apply(normalize_order_no),
+            "Order #": order_no.apply(normalize_order_no),
             "Item No": df["Item no"].astype(str).str.strip(),
-            "Item Name": name,
+            "Item Name": item_name,
             "Order Qty Num": qty_num,
             "Order Qty": [format_qty(q, u) for q, u in zip(qty_num, um)],
-        })
-
-        frames.append(temp)
+        }))
 
     if not frames:
         return pd.DataFrame(columns=[
@@ -218,9 +254,6 @@ def load_sample_orders(file) -> pd.DataFrame:
         ])
 
     orders = pd.concat(frames, ignore_index=True)
-
-    # This preserves the original order of the rows from the sample orders workbook.
-    orders["_original_line_seq"] = range(len(orders))
 
     return orders
 
@@ -245,22 +278,6 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result["Current Location"] = result["Current Location"].fillna("Not found in inventory")
     result["Previous Location"] = result["Previous Location"].fillna("")
 
-    # -----------------------------------------------------------------------
-    # IMPORTANT SORTING FIX
-    # -----------------------------------------------------------------------
-    # The output is sorted by Order # first.
-    # This keeps every item from the same order together.
-    # Inside each order, it keeps the original line order from the sample file.
-    # -----------------------------------------------------------------------
-    result["_order_sort_key"] = result["Order #"].apply(order_sort_key)
-
-    result = result.sort_values(
-        by=["_order_sort_key", "Order #", "_original_line_seq"],
-        ascending=[True, True, True],
-        na_position="last",
-        kind="mergesort"
-    ).reset_index(drop=True)
-
     cols = [
         "Order Date",
         "Order #",
@@ -275,10 +292,19 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
 
     result = result[cols]
 
+    # IMPORTANT:
+    # This is the only sort.
+    # It groups everything by Order #.
+    # It does not sort by Item No.
+    result = force_order_sort(result)
+
     return result
 
 
 def build_excel(result: pd.DataFrame) -> io.BytesIO:
+    # Force the same order again before exporting.
+    result = force_order_sort(result)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Order vs Inventory"
@@ -338,6 +364,7 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 
 st.title("Sample Orders to Inventory Matcher")
+st.caption("Version: forced Order # sort enabled")
 
 st.write(
     "Upload the **sample orders** workbook and the **TKRESERVE_QPORT** inventory "
@@ -374,6 +401,9 @@ if orders_file and tk_file:
                 st.stop()
 
             result = match_orders_to_inventory(orders, tk_file)
+
+            # Force the sort again before showing it on screen.
+            result = force_order_sort(result)
 
     except Exception as e:
         st.error(f"Something went wrong while processing the files: {e}")
@@ -421,7 +451,7 @@ if orders_file and tk_file:
     st.download_button(
         "Download results as Excel",
         data=excel_buf,
-        file_name="order_vs_inventory.xlsx",
+        file_name="order_vs_inventory_SORTED_BY_ORDER.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
