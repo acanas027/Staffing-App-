@@ -26,13 +26,17 @@ st.set_page_config(page_title="Order vs Inventory Matcher", layout="wide")
 #   I   : Sku Number last 3 digits of the suffix (e.g. 225)
 #         Full SKU = f"{int(H)}.{frac:02d}{int(I):03d}" -> "71117.00225"
 #   J   : QUANTITY (units available for that location/lot)
-#   K   : Previous  (previous location/zone code, e.g. RC, TK, TR, BL, RE, RF)
+#   K-P : Previous location hierarchy (same shape as A-F)
+#         -> combined into one "Previous Location" string per row, e.g. "RC2A1X1"
+#         The single most recent one (by the Y/Z transaction date-time) is kept per item.
 # ---------------------------------------------------------------------------
 COL_LOC = [0, 1, 2, 3, 4, 5]
 COL_SKU_H = 7
 COL_SKU_I = 8
 COL_QTY = 9
-COL_PREV = 10
+COL_PREV = [10, 11, 12, 13, 14, 15]
+COL_DATE2 = 24   # Y - most recent transaction date
+COL_TIME2 = 25   # Z - most recent transaction time
 
 
 def _clean(v):
@@ -57,10 +61,13 @@ def build_sku(h, i):
 
 
 def load_tkreserve(file) -> pd.DataFrame:
-    """Read TKRESERVE_QPORT.xlsx -> ['SKU', 'Location', 'Quantity', 'Previous Location']"""
+    """Read TKRESERVE_QPORT.xlsx -> ['SKU', 'Location', 'Quantity', 'Previous Location', 'TxTime']"""
     raw = pd.read_excel(file, sheet_name=0, header=0)
 
     loc = raw.iloc[:, COL_LOC].apply(
+        lambda row: "".join([_clean(v) for v in row if _clean(v) != ""]), axis=1
+    )
+    prev_loc = raw.iloc[:, COL_PREV].apply(
         lambda row: "".join([_clean(v) for v in row if _clean(v) != ""]), axis=1
     )
 
@@ -69,9 +76,15 @@ def load_tkreserve(file) -> pd.DataFrame:
     sku = [build_sku(a, b) for a, b in zip(h, i)]
 
     qty = pd.to_numeric(raw.iloc[:, COL_QTY], errors="coerce").fillna(0)
-    prev = raw.iloc[:, COL_PREV].apply(_clean)
 
-    df = pd.DataFrame({"SKU": sku, "Location": loc, "Quantity": qty, "Previous Location": prev})
+    date2 = pd.to_numeric(raw.iloc[:, COL_DATE2], errors="coerce").fillna(0)
+    time2 = pd.to_numeric(raw.iloc[:, COL_TIME2], errors="coerce").fillna(0)
+    tx_time = date2 * 1_000_000 + time2
+
+    df = pd.DataFrame({
+        "SKU": sku, "Location": loc, "Quantity": qty,
+        "Previous Location": prev_loc, "TxTime": tx_time,
+    })
     df = df.dropna(subset=["SKU"])
     return df[df["SKU"] != ""]
 
@@ -80,16 +93,16 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     """One row per SKU:
     - Quantity Available = sum of all quantities for that SKU
     - Current Location   = every distinct location with its quantity, e.g. 'RC2A6X3 (105); RC2F27A (47)'
-    - Previous Location  = every distinct previous-location code seen for that SKU
+    - Previous Location  = the single most recent previous location recorded for that SKU
     """
     def summarize(g):
         loc_qty = g.groupby("Location")["Quantity"].sum().sort_values(ascending=False)
         loc_str = "; ".join(f"{loc} ({int(q)})" for loc, q in loc_qty.items() if loc)
-        prev_vals = sorted(set(v for v in g["Previous Location"] if v))
+        latest = g.loc[g["TxTime"].idxmax(), "Previous Location"]
         return pd.Series({
             "Quantity Available": g["Quantity"].sum(),
             "Current Location": loc_str,
-            "Previous Location": "; ".join(prev_vals),
+            "Previous Location": latest,
         })
 
     return inv.groupby("SKU").apply(summarize, include_groups=False).reset_index()
