@@ -29,6 +29,7 @@ import urllib.parse
 import zipfile
 
 import openpyxl
+from openpyxl.styles import PatternFill
 import pandas as pd
 import pdfplumber
 import streamlit as st
@@ -41,7 +42,7 @@ MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 1800  # links longer than this may fail to open in some clients
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
-st.title("Cuts / Shorts From Loads — Rep Email Generator")
+st.title("Cuts From Loads — CSR Email Generator")
 st.caption(
     "Upload the workbook → one email per Customer Service rep is built. "
     "Click Open email, it opens in Outlook ready to send — just press Send."
@@ -262,6 +263,102 @@ def build_rep_directory(wb):
             rep_to_email[current_rep] = str(email_cell).strip()
 
     return customer_to_rep, rep_to_email
+
+
+def build_rep_color_lookup(wb):
+    """
+    Reads each rep's fill color from their section block in the
+    CUSTOMER SERVICE MASTER LIST sheet (e.g. Kathy Boquist's block is
+    filled yellow, Elisabeth Jordan's is filled lavender). Returns
+    {rep_name: "RRGGBB" hex string}, used to color-code that rep's rows in
+    the downloadable workbook. Some fills use a theme/indexed color instead
+    of a plain RGB value (accessing .rgb raises in that case) -- those reps
+    are simply left uncolored rather than guessing a color.
+    """
+    ws = wb[MASTER_SHEET]
+    rep_to_color = {}
+    current_rep = None
+
+    for r in range(1, ws.max_row + 1):
+        section_header = ws.cell(row=r, column=1).value
+        rep_cell = ws.cell(row=r, column=2).value
+
+        header_rep_name = None
+        if section_header and "@" in str(section_header):
+            m = NAME_EMAIL_RE.match(str(section_header))
+            if m:
+                header_rep_name = m.group(1).strip()
+
+        if header_rep_name:
+            current_rep = header_rep_name
+        elif rep_cell:
+            current_rep = str(rep_cell).strip()
+
+        if current_rep and current_rep not in rep_to_color:
+            for c in (1, 2, 3):
+                fill = ws.cell(row=r, column=c).fill
+                if not fill or fill.patternType != "solid":
+                    continue
+                try:
+                    rgb = fill.fgColor.rgb
+                except Exception:
+                    continue
+                if isinstance(rgb, str) and rgb not in ("00000000",):
+                    rep_to_color[current_rep] = rgb[-6:]  # drop alpha prefix -> RRGGBB
+                    break
+
+    return rep_to_color
+
+
+def sort_and_color_sheet(ws, tracked_rows, rep_to_color):
+    """
+    Physically reorders a sheet's tracked data rows so rows with the same
+    REP end up adjacent (grouped together), and fills each row with that
+    rep's color from the master list. tracked_rows is a list of
+    {"row": original_row_number, "REP": rep_name_or_None} for this sheet,
+    in original top-to-bottom order.
+
+    Only cells holding a plain value are physically moved -- any cell that's
+    a formula (e.g. an XLOOKUP-based CS REP or DESCRIPTION column) is left
+    exactly where it is, so it keeps referencing "this same row" and
+    automatically recalculates against whatever moved into that row once
+    the file is opened in Excel, rather than the formula itself being
+    relocated (which would just move the same lookup elsewhere, not sort
+    anything). Unmatched rows (no rep) sort to the end.
+    """
+    if not tracked_rows:
+        return
+
+    row_numbers = sorted(info["row"] for info in tracked_rows)
+    last_col = ws.max_column
+    sample_row = row_numbers[0]
+
+    value_cols = [
+        c for c in range(1, last_col + 1)
+        if ws.cell(row=sample_row, column=c).data_type != "f"
+    ]
+
+    captured = {
+        info["row"]: {c: ws.cell(row=info["row"], column=c).value for c in value_cols}
+        for info in tracked_rows
+    }
+
+    sorted_infos = sorted(
+        tracked_rows,
+        key=lambda info: (info["REP"] is None or info["REP"] == "", str(info["REP"] or "")),
+    )
+
+    for slot_row, info in zip(row_numbers, sorted_infos):
+        data = captured[info["row"]]
+        for c, val in data.items():
+            ws.cell(row=slot_row, column=c).value = val
+
+        color = rep_to_color.get(info["REP"]) if info["REP"] else None
+        if color:
+            argb = "FF" + color  # opaque -- a bare 6-digit hex defaults to fully transparent
+            fill = PatternFill(start_color=argb, end_color=argb, fill_type="solid")
+            for c in range(1, last_col + 1):
+                ws.cell(row=slot_row, column=c).fill = fill
 
 
 def extract_shift_rows(wb, sheet_name):
@@ -1009,9 +1106,14 @@ def build_updated_workbook(uploaded_file, df):
     Rows sourced from a Daily Cuts-style sheet (no CUSTOMER column at all)
     still get the CUSTOMER and REP values -- just added as new columns, since
     there's nowhere existing to overwrite for CUSTOMER on that layout.
+
+    After writing values, each sheet's data rows are physically reordered so
+    every rep's items are grouped together (see sort_and_color_sheet), and
+    each row is filled with that rep's color from the master list.
     """
     uploaded_file.seek(0)
     wb_out = openpyxl.load_workbook(uploaded_file)
+    rep_to_color = build_rep_color_lookup(wb_out)
 
     rep_cols = {}  # sheet_name -> column index chosen for the REP column
 
@@ -1038,6 +1140,19 @@ def build_updated_workbook(uploaded_file, df):
             ws.cell(row=r, column=int(cust_col)).value = row["CUSTOMER"]
 
         ws.cell(row=r, column=rep_col).value = row.get("REP") or ""
+
+    tracked_by_sheet = {}
+    for _, row in df.iterrows():
+        sheet_name = row.get("_SHEET")
+        r = row.get("_ROW")
+        if not sheet_name or pd.isna(r) or sheet_name not in wb_out.sheetnames:
+            continue
+        tracked_by_sheet.setdefault(sheet_name, []).append(
+            {"row": int(r), "REP": row.get("REP")}
+        )
+
+    for sheet_name, tracked_rows in tracked_by_sheet.items():
+        sort_and_color_sheet(wb_out[sheet_name], tracked_rows, rep_to_color)
 
     buffer = io.BytesIO()
     wb_out.save(buffer)
@@ -1171,24 +1286,26 @@ if uploaded:
 
     st.markdown("---")
     st.subheader("Emails")
+    st.caption("One email per rep per load — a rep with items on 2 different loads gets 2 separate emails.")
 
     if matched.empty:
         st.info("No rows matched a rep yet — nothing to generate.")
     else:
-        for rep, group in matched.groupby("REP"):
+        for (rep, load), group in matched.groupby(["REP", "LOAD"], sort=False, dropna=False):
             email_addr = rep_to_email.get(rep, "")
             subject = build_subject(group)
             plain_table = build_plain_text_table(group)
             body = f"{plain_table}\n\nThank you."
             mailto_link = build_mailto(email_addr, subject, body)
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
+            widget_key = f"{rep}_{load}"
 
             with st.expander(
-                f"{rep}  —  {email_addr or 'NO EMAIL ON FILE'}  "
+                f"{rep}  —  Load {load}  —  {email_addr or 'NO EMAIL ON FILE'}  "
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
-                st.text_input("To", value=email_addr, disabled=True, key=f"to_{rep}")
-                st.text_input("Subject", value=subject, disabled=True, key=f"subj_{rep}")
+                st.text_input("To", value=email_addr, disabled=True, key=f"to_{widget_key}")
+                st.text_input("Subject", value=subject, disabled=True, key=f"subj_{widget_key}")
                 st.code(body, language=None)
 
                 if not email_addr:
