@@ -141,10 +141,11 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     result = result[cols]
 
     result["_is_sample"] = result["Item No"].apply(is_sample_item)
-    # Sort: samples last, then by Order # so all lines per order are grouped, then by Item No
+    # Sort numerically by Order # so all lines per order are grouped correctly
+    result["_order_num"] = pd.to_numeric(result["Order #"], errors="coerce")
     result = result.sort_values(
-        ["_is_sample", "Order #", "Item No"]
-    ).drop(columns=["_is_sample"]).reset_index(drop=True)
+        ["_is_sample", "_order_num", "Item No"]
+    ).drop(columns=["_is_sample", "_order_num"]).reset_index(drop=True)
     return result
 
 
