@@ -11,7 +11,6 @@ Run with:
 """
 
 import io
-import re
 import streamlit as st
 import pandas as pd
 from openpyxl import Workbook
@@ -35,73 +34,37 @@ def _clean(v):
     return str(v).strip()
 
 
-def normalize_order_no(order_no):
+def normalize_order_no(order_no_numeric, raw_text):
     """
-    Cleans Order # for display.
-    Converts values like 3700007249.0 into 3700007249.
+    Display text for Order #.
+    Uses the already-parsed numeric value when available (e.g. 3700007249.0 -> "3700007249"),
+    otherwise falls back to the original raw text (trimmed).
     """
-    if pd.isna(order_no):
-        return ""
-
-    text = str(order_no).strip().replace(",", "")
-
-    if text == "":
-        return ""
-
-    try:
-        number = float(text)
-        if number.is_integer():
-            return str(int(number))
-    except (ValueError, TypeError):
-        pass
-
-    return text
-
-
-def order_sort_key(order_no):
-    """
-    Creates a numeric sort key from Order #.
-    This is what keeps all rows from the same order together.
-    """
-    if pd.isna(order_no):
-        return float("inf")
-
-    text = str(order_no).strip().replace(",", "")
-
-    if text == "":
-        return float("inf")
-
-    try:
-        return int(float(text))
-    except (ValueError, TypeError):
-        digits = re.sub(r"\D", "", text)
-        if digits:
-            return int(digits)
-        return float("inf")
+    if pd.notna(order_no_numeric):
+        return str(int(order_no_numeric))
+    return _clean(raw_text)
 
 
 def force_order_sort(df: pd.DataFrame) -> pd.DataFrame:
     """
     Final forced sort.
 
-    Sorts by Order # only.
+    Sorts by the numeric "_OrderSortKey" only (computed once, at load time).
     Does NOT sort by Item No.
-    Keeps the current row order inside each order.
+    Keeps the original row order for ties / rows within the same order.
+    Rows with no parseable Order # sort to the end.
     """
     df = df.copy()
-
     df["_line_order"] = range(len(df))
-    df["_order_sort"] = df["Order #"].apply(order_sort_key)
 
     df = df.sort_values(
-        by=["_order_sort", "_line_order"],
+        by=["_OrderSortKey", "_line_order"],
         ascending=[True, True],
         na_position="last",
-        kind="mergesort"
+        kind="mergesort",  # stable sort so ties keep their original relative order
     )
 
-    df = df.drop(columns=["_order_sort", "_line_order"]).reset_index(drop=True)
-
+    df = df.drop(columns=["_line_order"]).reset_index(drop=True)
     return df
 
 
@@ -182,7 +145,7 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
             "Previous Location": latest,
         })
 
-    return inv.groupby("SKU").apply(summarize).reset_index()
+    return inv.groupby("SKU").apply(summarize, include_groups=False).reset_index()
 
 
 def format_qty(qty, um):
@@ -215,9 +178,14 @@ def load_sample_orders(file) -> pd.DataFrame:
             continue
 
         if "CO no" in df.columns:
-            order_no = df["CO no"]
+            order_no_raw = df["CO no"]
         else:
-            order_no = pd.Series([""] * len(df), index=df.index)
+            order_no_raw = pd.Series([""] * len(df), index=df.index)
+
+        # Parse the numeric sort key ONCE here. Everything downstream
+        # (display text and sort order) is derived from this same value,
+        # so they can never disagree.
+        order_no_numeric = pd.to_numeric(order_no_raw, errors="coerce")
 
         if "Order qty" in df.columns:
             qty_num = pd.to_numeric(df["Order qty"], errors="coerce").fillna(0)
@@ -236,7 +204,8 @@ def load_sample_orders(file) -> pd.DataFrame:
 
         frames.append(pd.DataFrame({
             "Order Date": sheet,
-            "Order #": order_no.apply(normalize_order_no),
+            "Order #": [normalize_order_no(n, r) for n, r in zip(order_no_numeric, order_no_raw)],
+            "_OrderSortKey": order_no_numeric,
             "Item No": df["Item no"].astype(str).str.strip(),
             "Item Name": item_name,
             "Order Qty Num": qty_num,
@@ -247,6 +216,7 @@ def load_sample_orders(file) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             "Order Date",
             "Order #",
+            "_OrderSortKey",
             "Item No",
             "Item Name",
             "Order Qty Num",
@@ -281,6 +251,7 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     cols = [
         "Order Date",
         "Order #",
+        "_OrderSortKey",
         "Item No",
         "Item Name",
         "Order Qty",
@@ -309,7 +280,8 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
     ws = wb.active
     ws.title = "Order vs Inventory"
 
-    display_cols = [c for c in result.columns if c != "Order Qty Num"]
+    hidden_cols = {"Order Qty Num", "_OrderSortKey"}
+    display_cols = [c for c in result.columns if c not in hidden_cols]
     headers = display_cols
 
     ws.append(headers)
@@ -364,7 +336,6 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 
 st.title("Sample Orders to Inventory Matcher")
-st.caption("Version: forced Order # sort enabled")
 
 st.write(
     "Upload the **sample orders** workbook and the **TKRESERVE_QPORT** inventory "
@@ -402,9 +373,6 @@ if orders_file and tk_file:
 
             result = match_orders_to_inventory(orders, tk_file)
 
-            # Force the sort again before showing it on screen.
-            result = force_order_sort(result)
-
     except Exception as e:
         st.error(f"Something went wrong while processing the files: {e}")
         st.stop()
@@ -422,7 +390,7 @@ if orders_file and tk_file:
     m2.metric("Zero available", int(zero_avail))
     m3.metric("Short on stock", int(short))
 
-    display_df = result.drop(columns=["Order Qty Num"])
+    display_df = result.drop(columns=["Order Qty Num", "_OrderSortKey"])
 
     n_cols = len(display_df.columns)
     row_styles = []
@@ -451,7 +419,7 @@ if orders_file and tk_file:
     st.download_button(
         "Download results as Excel",
         data=excel_buf,
-        file_name="order_vs_inventory_SORTED_BY_ORDER.xlsx",
+        file_name="order_vs_inventory.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
