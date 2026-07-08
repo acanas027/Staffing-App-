@@ -7,7 +7,7 @@ from openpyxl.styles import Alignment
 from io import BytesIO
 from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak, KeepInFrame
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak, KeepInFrame 
 from reportlab.lib.styles import getSampleStyleSheet
 
 # =====================================================================
@@ -40,10 +40,13 @@ STATUS_COLORS = {
 
 
 def inject_dashboard_style():
+    """Professional styling — only applied to the results dashboard,
+    never to the upload screen, so that one stays plain/default."""
     st.markdown(f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
 
+    /* Scope font + heading styling to the main results block only */
     div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h1,
     div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h2,
     div[data-testid="stAppViewContainer"] div[data-testid="block-container"] h3 {{
@@ -51,6 +54,7 @@ def inject_dashboard_style():
         color: {NAVY};
     }}
 
+    /* Top banner */
     .dock-header {{
         background: linear-gradient(90deg, {NAVY} 0%, {STEEL} 100%);
         padding: 28px 32px;
@@ -70,6 +74,7 @@ def inject_dashboard_style():
         font-size: 0.95rem;
     }}
 
+    /* KPI cards */
     .kpi-card {{
         background: {CARD};
         border-radius: 10px;
@@ -99,6 +104,7 @@ def inject_dashboard_style():
         margin-top: 1px;
     }}
 
+    /* Section card wrapper */
     .section-card {{
         background: {CARD};
         border-radius: 10px;
@@ -146,6 +152,7 @@ STATUS_PDF_COLORS = {
 
 
 def build_status_table(df, status_col="Status"):
+    """Reportlab Table with the Status column's cells colored green/yellow/red."""
     data = [list(df.columns)] + df.astype(str).values.tolist()
     table = Table(data, repeatRows=1)
     style_commands = [
@@ -166,6 +173,7 @@ def build_status_table(df, status_col="Status"):
 
 
 def build_full_pdf(title, kpis, figs, wave_df, load_df):
+    """One combined PDF: Overview, Wave Plan, and Load Coverage."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=portrait(letter),
@@ -174,7 +182,9 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     styles = getSampleStyleSheet()
     story = []
 
+    # ---- Page 1: Overview ----
     overview_page = []
+
     overview_page.append(Paragraph(f"{title} — Overview", styles["Title"]))
     overview_page.append(Spacer(1, 14))
 
@@ -182,7 +192,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     value_row = [k[1] for k in kpis]
     sub_row = [k[2] for k in kpis]
 
-    kpi_table = Table([header_row, value_row, sub_row], colWidths=[87] * len(kpis))
+    kpi_table = Table([header_row, value_row, sub_row], colWidths=[105] * len(kpis))
     kpi_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -225,9 +235,16 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
         ]))
         overview_page.append(chart_table)
 
-    story.append(KeepInFrame(doc.width, doc.height, overview_page, mode="shrink"))
+    story.append(
+        KeepInFrame(
+            doc.width,
+            doc.height,
+            overview_page,
+            mode="shrink"
+        )
+    )
 
-    # Wave Plan — Priority column removed
+    # ---- Page 2: Wave Plan ----
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Wave Plan", styles["Title"]))
     story.append(Spacer(1, 10))
@@ -235,6 +252,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 6))
     story.append(build_status_table(wave_df))
 
+    # ---- Page 3: Load Coverage ----
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Load Coverage", styles["Title"]))
     story.append(Spacer(1, 10))
@@ -250,20 +268,18 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
 # =====================================================================
 # HEADER
 # =====================================================================
-st.title("Shorts Analysis Tool")
+st.title("Shorts analysis Tool")
 st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
 # INPUTS
 # =====================================================================
 st.markdown("### Data Inputs")
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 with col1:
     book_file = st.file_uploader("Trailer inventory", type=["xlsx"])
 with col2:
     short_file = st.file_uploader("Order shorts (short sheet.xlsx)", type=["xlsx"])
-with col3:
-    transfers_file = st.file_uploader("Transfers file (optional)", type=["xlsx"])
 
 run = st.button("Run Analysis")
 st.caption(
@@ -284,7 +300,7 @@ if not run:
 # PROCESSING
 # =====================================================================
 try:
-    # ---- LOAD INVENTORY (BOOK) ----
+    # ---- LOAD BOOK1 ----
     df = pd.read_excel(book_file)
     df = df.iloc[2:].reset_index(drop=True)
     df = df.iloc[:, 4:]
@@ -299,6 +315,7 @@ try:
     df["ColE"] = pd.to_numeric(df["ColE"], errors="coerce").fillna(0).astype(int)
     df["ColF"] = pd.to_numeric(df["ColF"], errors="coerce").fillna(0).astype(int)
     df["ColG"] = pd.to_numeric(df["ColG"], errors="coerce").fillna(0).astype(int)
+
     df["Trailer"] = df["ColE"].astype(str) + df["ColF"].astype(str) + df["ColG"].astype(str)
 
     def _build_sku(j, k):
@@ -313,47 +330,24 @@ try:
     clean_df["Quantity"] = pd.to_numeric(clean_df["Quantity"], errors="coerce")
     clean_df = clean_df.dropna(subset=["SKU", "Quantity"])
 
-    # ---- LOAD TRANSFERS (optional) — count unique trailers ----
-    total_transfer_trailers = None
-    if transfers_file is not None:
-        try:
-            tr_raw = pd.read_excel(transfers_file)
-            tr_data = tr_raw.iloc[2:].reset_index(drop=True)
-            tr_data = tr_data.iloc[:, 4:]
-            tr_data.columns = [
-                "ColE", "ColF", "ColG", "ColH", "ColI",
-                "ColJ", "ColK", "ColL",
-                "Date1", "Time1", "Date2", "Time2", "User", "ExtraDate"
-            ]
-            tr_data["ColE"] = tr_data["ColE"].astype(str).str.replace("L", "", regex=False)
-            tr_data["ColE"] = pd.to_numeric(tr_data["ColE"], errors="coerce").fillna(0).astype(int)
-            tr_data["ColF"] = pd.to_numeric(tr_data["ColF"], errors="coerce").fillna(0).astype(int)
-            tr_data["ColG"] = pd.to_numeric(tr_data["ColG"], errors="coerce").fillna(0).astype(int)
-            tr_data["Trailer"] = tr_data["ColE"].astype(str) + tr_data["ColF"].astype(str) + tr_data["ColG"].astype(str)
-            total_transfer_trailers = tr_data["Trailer"].nunique()
-        except Exception:
-            total_transfer_trailers = None
-
     # ---- LOAD SHORT SHEET ----
     short_df = pd.read_excel(short_file, header=2)
     short_df = short_df.iloc[:, :11].reset_index(drop=True)
+
     short_df.columns = [
         "Trip", "Destination", "Dispatch", "Status", "Order",
         "Item", "Description", "Cases", "W", "ProdETA", "Comments"
     ]
 
     short_clean = short_df[["Trip", "Dispatch", "Item", "Cases"]].copy()
+
     short_clean["Item"] = pd.to_numeric(short_clean["Item"], errors="coerce").map(
         lambda v: f"{v:.5f}" if pd.notna(v) else None
     )
+
     short_clean["Cases"] = pd.to_numeric(short_clean["Cases"], errors="coerce")
     short_clean["Dispatch"] = pd.to_numeric(short_clean["Dispatch"], errors="coerce")
     short_clean = short_clean.dropna(subset=["Item", "Cases"])
-
-    # FIX: Drop rows where Trip is blank/empty string — these are sub-rows without a
-    # real trip number and should not be counted as separate loads.
-    short_clean["Trip"] = short_clean["Trip"].astype(str).str.strip()
-    short_clean = short_clean[short_clean["Trip"] != ""].copy()
 
     # ---- MATCH ----
     match_df = short_clean.merge(clean_df, left_on="Item", right_on="SKU", how="left")
@@ -450,7 +444,10 @@ try:
         by=["SKU", "Selection_Rank"],
         na_position="last"
     ).groupby("SKU", as_index=False).first()
-    priority_trailer_lookup = priority_trailer_lookup.rename(columns={"SKU": "Item"})
+
+    priority_trailer_lookup = priority_trailer_lookup.rename(
+        columns={"SKU": "Item", "Trailer": "Trailer"}
+    )
 
     load_trailer = alloc.merge(priority_trailer_lookup[["Item", "Trailer"]], on="Item", how="left")
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
@@ -461,24 +458,19 @@ try:
 
     # =====================================================================
     # FINAL WAVE PLAN RANKING
-    # Primary: earliest dispatch → more short cases breaks ties → loads impacted
-    # FIX: only include trailers that have Fix_Cases > 0, i.e. they actually
-    # carry shortage inventory. Trailers that only cover Full-status loads
-    # (Fix_Cases = 0) are excluded from the Wave Plan entirely.
+    # Primary: earliest dispatch → more Fix_Cases breaks ties → loads impacted
     # =====================================================================
     trailer_priority = trailer_priority.sort_values(
         by=["Solves_Load", "Fixes_Shortage", "Earliest_Dispatch", "Fix_Cases", "Loads_Impacted", "Priority_Score"],
         ascending=[False, False, True, False, False, False]
     ).reset_index(drop=True)
 
-    # Only trailers with actual short/partial cases make the wave plan
-    wave_mask = trailer_priority["Solves_Load"] & (trailer_priority["Fix_Cases"] > 0)
-
     trailer_priority["Wave"] = np.nan
     trailer_priority["Trailer_Priority"] = np.nan
-    trailer_priority.loc[wave_mask, "Trailer_Priority"] = range(1, int(wave_mask.sum()) + 1)
-    trailer_priority.loc[wave_mask, "Wave"] = (
-        (trailer_priority.loc[wave_mask, "Trailer_Priority"] - 1) // 4
+    solve_mask = trailer_priority["Solves_Load"]
+    trailer_priority.loc[solve_mask, "Trailer_Priority"] = range(1, int(solve_mask.sum()) + 1)
+    trailer_priority.loc[solve_mask, "Wave"] = (
+        (trailer_priority.loc[solve_mask, "Trailer_Priority"] - 1) // 4
     ) + 1
 
     load_trailer = load_trailer.merge(
@@ -496,16 +488,15 @@ try:
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
-    # Wave Plan: Priority column removed, only Fix_Cases > 0 trailers
-    dock_plan_export = trailer_priority[wave_mask].drop(
+    dock_plan_export = trailer_priority[trailer_priority["Solves_Load"]].drop(
         columns=[
             "Trailer_Priority", "Priority_Score", "Loads_Impacted",
             "Fixes_Shortage", "Selection_Rank", "Loads_Solved", "Solves_Load"
         ]
     ).copy()
-    # No Priority column — Wave + order is self-evident
-    cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
-    dock_plan_export = dock_plan_export[cols].reset_index(drop=True)
+    dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
+    cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
+    dock_plan_export = dock_plan_export[cols]
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
@@ -535,7 +526,7 @@ except Exception as e:
     st.stop()
 
 # =====================================================================
-# RESULTS DASHBOARD
+# RESULTS DASHBOARD — professional styling starts here only
 # =====================================================================
 inject_dashboard_style()
 
@@ -554,8 +545,6 @@ total_cases_short = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Actual_short_cases"].clip(lower=0).sum())
 total_waves = dock_plan_export["Wave"].nunique()
 
-# FIX: only count trips that are real (non-blank) — already handled upstream,
-# but this ensures the KPI reflects the corrected trip_status groupby.
 trip_status = load_export.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
@@ -568,29 +557,24 @@ else:
     move_next_value = "—"
     move_next_sub = "no shortages to fix"
 
-# KPI columns: 6 if transfers loaded, 5 if not
-if total_transfer_trailers is not None:
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    with k6:
-        kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "unique trailers in today's transfers")
-else:
-    k1, k2, k3, k4, k5 = st.columns(5)
-
+k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    kpi_card("Trailers Involved", f"{total_trailers}", f"carry shortage items, across {total_waves} waves")
+    kpi_card("Trailers Involved", f"{total_trailers}", f"carry items needed today, across {total_waves} waves")
 with k2:
-    kpi_card("Total Cases Ordered", f"{total_cases_short:,}", "cases on the short sheet")
+    kpi_card("Total Cases Short", f"{total_cases_short:,}", "cases ordered")
 with k3:
-    kpi_card("Actual Short Cases", f"{total_shortage:,}", "cases still missing after allocation")
+    kpi_card("Actual Short Cases", f"{total_shortage:,}", "cases still missing")
 with k4:
-    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total loads")
+    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads able to load full")
 with k5:
     kpi_card("Move Next", move_next_value, move_next_sub)
 
 # =====================================================================
 # TABS
 # =====================================================================
-tab_overview, tab_wave, tab_load = st.tabs(["Overview", "Wave Plan", "Load Coverage"])
+tab_overview, tab_wave, tab_load = st.tabs(
+    ["Overview", "Wave Plan", "Load Coverage"]
+)
 
 # ---------------- OVERVIEW ----------------
 with tab_overview:
@@ -621,15 +605,16 @@ with tab_overview:
     c3, c4 = st.columns(2)
     with c3:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        priority_order = dock_plan_export.sort_values("Wave")
+        priority_order = dock_plan_export.sort_values("Priority")
         priority_order_chart_df = priority_order.copy()
         priority_order_chart_df["Wave"] = priority_order_chart_df["Wave"].astype(str)
         fig2 = px.bar(
             priority_order_chart_df, x="Demand_Served", y="Trailer", orientation="h",
-            color="Wave", title="Trailer Priority Order — Today",
+            color="Wave", text="Priority", title="Trailer Priority Order — Today",
             category_orders={"Trailer": priority_order_chart_df["Trailer"].tolist()},
             color_discrete_sequence=[STEEL, AMBER]
         )
+        fig2.update_traces(texttemplate="#%{text}", textposition="outside")
         st.plotly_chart(style_fig(fig2), use_container_width=True)
         st.caption("Earliest dispatch drives the ranking; cases solved breaks ties.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -655,12 +640,15 @@ with tab_overview:
 with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Dock Plan — Trailers in Priority Order")
+    st.caption("Trailers are listed in the order they should be unloaded today.")
     st.caption(
-        "Only trailers carrying actual shortage inventory appear here. "
-        "Priority: earliest dispatch first; ties broken by most short cases carried. "
-        "Waves are groups of 4."
+        "Priority: earliest dispatch on a short load first. "
+        "Ties broken by most short cases carried. Waves are groups of 4."
     )
-    st.dataframe(dock_plan_export, use_container_width=True, hide_index=True)
+    st.dataframe(
+        dock_plan_export.sort_values("Priority"),
+        use_container_width=True, hide_index=True
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- LOAD COVERAGE ----------------
@@ -701,7 +689,6 @@ def build_excel():
     buffer.seek(0)
     return buffer
 
-
 st.markdown("### Export")
 c1, c2 = st.columns(2)
 with c1:
@@ -718,18 +705,18 @@ with c2:
             "Shorts Analysis Results",
             kpis=[
                 ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
-                ("Cases Ordered", f"{total_cases_short:,}", "on short sheet"),
-                ("Short Cases", f"{total_shortage:,}", "still missing"),
-                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads"),
+                ("Total Demand", f"{total_cases_short:,}", "cases ordered"),
+                ("Shortage Cases", f"{total_shortage:,}", "cases still missing"),
+                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} total loads met"),
                 ("Move Next", move_next_value, move_next_sub),
-            ] + ([("Transfer Trailers", str(total_transfer_trailers), "today's transfers")] if total_transfer_trailers is not None else []),
+            ],
             figs=[
                 ("Top Trailers by Demand", fig1),
                 ("Load Status Breakdown", fig3),
                 ("Trailer Priority Order — Today", fig2),
                 ("Top Shortage Items", fig4),
             ],
-            wave_df=dock_plan_export,
+            wave_df=dock_plan_export.sort_values("Priority"),
             load_df=load_export
         ),
         file_name="Shorts_Analysis_Report.pdf",
