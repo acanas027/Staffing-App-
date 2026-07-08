@@ -557,10 +557,16 @@ trip_status = load_export.groupby("Trip")["Status"].apply(lambda s: (s == "Full"
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
 
-if not top4_trailers.empty:
-    top_trailer = top4_trailers.iloc[0]
-    move_next_value = f"Trailer {top_trailer['Trailer']}"
-    move_next_sub = f"fixes {int(top_trailer['Fix_Cases']):,} cases across {int(top_trailer['Loads_Impacted'])} load(s)"
+# Move Next should match the first trailer in the Wave Plan,
+# not the trailer with the highest Fix_Cases.
+if not dock_plan_export.empty:
+    next_trailer = dock_plan_export.iloc[0]
+
+    move_next_value = f"Trailer {next_trailer['Trailer']}"
+    move_next_sub = (
+        f"fixes {int(next_trailer['Fix_Cases']):,} cases "
+        f"across {int(next_trailer['Loads_Impacted'])} load(s)"
+    )
 else:
     move_next_value = "—"
     move_next_sub = "no shortages to fix"
