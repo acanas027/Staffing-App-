@@ -369,6 +369,12 @@ try:
     # item number used on the short sheet, e.g. "68820.13" + "081" = "68820.13081".
     match_df = short_clean.merge(clean_df, left_on="Item", right_on="SKU", how="left")
 
+    # --- visible sanity check: how many short lines found trailer inventory ---
+    # If this shows 0, the J+K combine isn't reaching the merge (wrong file / stale run).
+    # Delete this line once you've confirmed the match is working.
+    _matched = int(match_df["SKU"].notna().sum())
+    st.success(f"Matched {_matched} of {len(match_df)} short lines to trailer inventory.")
+
     # ---- LOAD COVERAGE + FILL (with real inventory allocation) ----
     # An item's total inventory is shared across every load that needs it — two loads
     # can't both get credit for the same physical cases. Demand is allocated item-by-item
