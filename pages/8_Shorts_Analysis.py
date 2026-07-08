@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 from io import BytesIO
 from reportlab.lib.pagesizes import letter, landscape, portrait
 from reportlab.lib import colors
@@ -31,6 +31,7 @@ DANGER = "#D64545"
 BG = "#F5F6F8"
 CARD = "#FFFFFF"
 TEXT_MUTED = "#6B7280"
+PURPLE = "#D9C2F0"
 
 STATUS_COLORS = {
     "Full": SUCCESS,
@@ -147,8 +148,21 @@ STATUS_PDF_COLORS = {
 }
 
 
-def build_status_table(df, status_col="Status"):
-    """Reportlab Table with the Status column's cells colored green/yellow/red."""
+def get_multi_trailer_item_keys(df):
+    """Find Trip + Item combinations in Load Coverage that are supplied by more than one trailer."""
+    required_cols = {"Trip", "Item", "Trailer"}
+    if not required_cols.issubset(df.columns):
+        return set()
+
+    tmp = df[list(required_cols)].copy()
+    tmp["Trailer"] = tmp["Trailer"].astype(str)
+    tmp = tmp[tmp["Trailer"].ne("No trailer found")]
+    multi = tmp.groupby(["Trip", "Item"])["Trailer"].nunique()
+    return set(multi[multi > 1].index)
+
+
+def build_status_table(df, status_col="Status", highlight_multi_trailer_items=False):
+    """Reportlab Table with Status colored and repeated multi-trailer Item cells highlighted purple."""
     data = [list(df.columns)] + df.astype(str).values.tolist()
     table = Table(data, repeatRows=1)
     style_commands = [
@@ -158,6 +172,19 @@ def build_status_table(df, status_col="Status"):
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
+
+    if highlight_multi_trailer_items and {"Trip", "Item", "Trailer"}.issubset(df.columns):
+        item_col_idx = list(df.columns).index("Item")
+        multi_trailer_keys = get_multi_trailer_item_keys(df)
+        for i, row in df.reset_index(drop=True).iterrows():
+            if (row["Trip"], row["Item"]) in multi_trailer_keys:
+                style_commands.append((
+                    "BACKGROUND",
+                    (item_col_idx, i + 1),
+                    (item_col_idx, i + 1),
+                    colors.HexColor(PURPLE),
+                ))
+
     if status_col in df.columns:
         col_idx = list(df.columns).index(status_col)
         for i, val in enumerate(df[status_col].astype(str).tolist()):
@@ -247,7 +274,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(load_df))
+    story.append(build_status_table(load_df, highlight_multi_trailer_items=True))
 
     doc.build(story)
     buffer.seek(0)
@@ -564,6 +591,9 @@ try:
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
 
+    # Highlight only Item cells where the same Trip + Item is supplied by multiple trailers.
+    multi_trailer_item_keys = get_multi_trailer_item_keys(load_export)
+
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
     if "Trailer_Priority" in exception_export.columns:
@@ -708,14 +738,24 @@ with tab_load:
     st.subheader("Load Coverage — Demand vs. Available by Trip")
     st.caption("Each row is one trailer contribution to one load/item. Status: green = Full, yellow = Partial, red = Short.")
 
-    def highlight_status(val):
-        color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
-        return f"background-color: {color_map.get(val, '')}"
+    def highlight_load_coverage(row):
+        styles = [""] * len(row)
+        columns = list(row.index)
 
-    try:
-        styled_load = load_export.style.map(highlight_status, subset=["Status"])
-    except AttributeError:
-        styled_load = load_export.style.applymap(highlight_status, subset=["Status"])
+        if "Status" in columns:
+            status_idx = columns.index("Status")
+            color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
+            status_color = color_map.get(row["Status"], "")
+            if status_color:
+                styles[status_idx] = f"background-color: {status_color}"
+
+        if {"Trip", "Item"}.issubset(row.index) and (row["Trip"], row["Item"]) in multi_trailer_item_keys:
+            item_idx = columns.index("Item")
+            styles[item_idx] = f"background-color: {PURPLE}; font-weight: 700"
+
+        return styles
+
+    styled_load = load_export.style.apply(highlight_load_coverage, axis=1)
     st.dataframe(styled_load, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -737,6 +777,19 @@ def build_excel():
             for row in ws.iter_rows():
                 for cell in row:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Highlight repeated multi-trailer Item cells in the Load Coverage Excel sheet.
+        ws = writer.sheets.get("Load Coverage")
+        if ws is not None:
+            headers = [cell.value for cell in ws[1]]
+            if {"Trip", "Item"}.issubset(set(headers)):
+                trip_col = headers.index("Trip") + 1
+                item_col = headers.index("Item") + 1
+                purple_fill = PatternFill(start_color="D9C2F0", end_color="D9C2F0", fill_type="solid")
+                for row_num in range(2, ws.max_row + 1):
+                    key = (ws.cell(row=row_num, column=trip_col).value, ws.cell(row=row_num, column=item_col).value)
+                    if key in multi_trailer_item_keys:
+                        ws.cell(row=row_num, column=item_col).fill = purple_fill
     buffer.seek(0)
     return buffer
 
