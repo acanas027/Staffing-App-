@@ -140,6 +140,20 @@ def kpi_card(label, value, sub=""):
     """, unsafe_allow_html=True)
 
 
+def format_dispatch_time(value):
+    """Display dispatch times as 700, 1100, 1500 instead of 700.0, 1100.0, 1500.0."""
+    if pd.isna(value):
+        return ""
+    try:
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return str(number).rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text[:-2] if text.endswith(".0") else text
+
+
 STATUS_PDF_COLORS = {
     "Full": colors.HexColor("#C7F0D8"),
     "Partial": colors.HexColor("#FFE8A3"),
@@ -370,7 +384,7 @@ try:
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
     fix_rows = []           # trailer-level: how many cases each trailer contributes to each short line
-    load_rows = []          # short-line level: demand, allocated, short, status, primary source trailer
+    load_rows = []          # short-line level: final demand/coverage math for KPIs and charts
     load_detail_rows = []   # load coverage detail: one row per trailer contribution to a short line
 
     # Process each item independently. Within an item, fill the earliest-dispatch
@@ -384,29 +398,44 @@ try:
         stock_remaining = dict(zip(stock["Trailer"], stock["Quantity"].astype(float)))
         total_item_inv = float(item_totals.loc[item_totals["Item"] == item, "Total_Item_Inventory"].sum())
 
+        # Rolling total inventory remaining for this item across all trailers.
+        # This is what the Load Coverage page should display after each allocation,
+        # so it does not keep repeating the original total on every row.
+        item_inventory_remaining = total_item_inv
+
         for _, line in demand_group.iterrows():
-            need = float(line["Cases"])
+            original_need = float(line["Cases"])
+            demand_remaining = original_need
             allocated_total = 0.0
+            cumulative_allocated_for_line = 0.0
             sources = []
 
             for trailer in list(stock_remaining.keys()):
-                if need - allocated_total <= 0:
+                if demand_remaining <= 0:
                     break
                 avail = stock_remaining[trailer]
                 if avail <= 0:
                     continue
-                take = min(avail, need - allocated_total)
+
+                take = min(avail, demand_remaining)
                 if take <= 0:
                     continue
-                stock_remaining[trailer] = avail - take
-                allocated_total += take
 
-                # Keep the exact trailer contribution so Load Coverage can show
-                # one separate row per trailer used on the same load/item.
-                sources.append({
-                    "Trailer": trailer,
-                    "Allocated_Cases": take,
-                })
+                # Allocate product and immediately reduce both:
+                #   1) trailer/item inventory remaining
+                #   2) demand still needed for this load/item
+                stock_remaining[trailer] = avail - take
+                item_inventory_remaining = max(item_inventory_remaining - take, 0.0)
+                demand_remaining = max(demand_remaining - take, 0.0)
+                allocated_total += take
+                cumulative_allocated_for_line += take
+                fill_rate_after_allocation = (cumulative_allocated_for_line / original_need) if original_need > 0 else 0.0
+                status_after_allocation = (
+                    "Full" if demand_remaining <= 0
+                    else ("Partial" if cumulative_allocated_for_line > 0 else "Short")
+                )
+
+                sources.append(trailer)
 
                 fix_rows.append({
                     "Trailer": trailer,
@@ -416,53 +445,53 @@ try:
                     "Allocated_Cases": take,
                 })
 
-            short_qty = need - allocated_total
-            fill_rate = (allocated_total / need) if need > 0 else 0.0
-            status = "Full" if fill_rate >= 1 else ("Partial" if fill_rate > 0 else "Short")
-            primary_trailer = sources[0]["Trailer"] if sources else np.nan
-
-            # Line-level summary, kept for KPIs, charts, and load status math.
-            load_rows.append({
-                "Item": item,
-                "Trip": line["Trip"],
-                "Dispatch": line["Dispatch"],
-                "Demand_Cases": need,
-                "Allocated_Cases": allocated_total,
-                "Total_Item_Inventory": total_item_inv,
-                "Fill_Rate": fill_rate,
-                "Status": status,
-                "Actual_short_cases": short_qty,
-                "Trailer": primary_trailer,
-            })
-
-            # Detail rows for the Load Coverage page/export.
-            # If two trailers cover the same short line, this creates two rows.
-            # Example: 3 cases from 198 and 9 cases from 605 = two rows.
-            if sources:
-                for source in sources:
-                    load_detail_rows.append({
-                        "Item": item,
-                        "Trip": line["Trip"],
-                        "Dispatch": line["Dispatch"],
-                        "Demand_Cases": need,
-                        "Allocated_Cases": source["Allocated_Cases"],
-                        "Total_Item_Inventory": total_item_inv,
-                        "Fill_Rate": fill_rate,
-                        "Status": status,
-                        "Actual_short_cases": short_qty,
-                        "Trailer": source["Trailer"],
-                    })
-            else:
+                # Detail row for the Load Coverage page/export.
+                # If two trailers cover the same load/item, this creates two rows.
+                # The remaining columns are rolling balances AFTER this trailer allocation.
                 load_detail_rows.append({
                     "Item": item,
                     "Trip": line["Trip"],
                     "Dispatch": line["Dispatch"],
-                    "Demand_Cases": need,
-                    "Allocated_Cases": 0.0,
-                    "Total_Item_Inventory": total_item_inv,
-                    "Fill_Rate": fill_rate,
-                    "Status": status,
-                    "Actual_short_cases": short_qty,
+                    "Original_Demand_Cases": original_need,
+                    "Trailer_Allocated_Cases": take,
+                    "Demand_Remaining": demand_remaining,
+                    "Item_Inventory_Remaining": item_inventory_remaining,
+                    "Fill_Rate": fill_rate_after_allocation,
+                    "Status": status_after_allocation,
+                    "Trailer": trailer,
+                })
+
+            short_qty = demand_remaining
+            final_fill_rate = (allocated_total / original_need) if original_need > 0 else 0.0
+            final_status = "Full" if short_qty <= 0 else ("Partial" if allocated_total > 0 else "Short")
+            primary_trailer = sources[0] if sources else np.nan
+
+            # Line-level final summary, kept for KPIs, charts, Wave Plan, and load status math.
+            load_rows.append({
+                "Item": item,
+                "Trip": line["Trip"],
+                "Dispatch": line["Dispatch"],
+                "Demand_Cases": original_need,
+                "Allocated_Cases": allocated_total,
+                "Total_Item_Inventory": total_item_inv,
+                "Fill_Rate": final_fill_rate,
+                "Status": final_status,
+                "Actual_short_cases": short_qty,
+                "Trailer": primary_trailer,
+            })
+
+            # If no trailer had product for this load/item, still show it in Load Coverage.
+            if not sources:
+                load_detail_rows.append({
+                    "Item": item,
+                    "Trip": line["Trip"],
+                    "Dispatch": line["Dispatch"],
+                    "Original_Demand_Cases": original_need,
+                    "Trailer_Allocated_Cases": 0.0,
+                    "Demand_Remaining": original_need,
+                    "Item_Inventory_Remaining": item_inventory_remaining,
+                    "Fill_Rate": 0.0,
+                    "Status": "Short",
                     "Trailer": np.nan,
                 })
 
@@ -535,11 +564,24 @@ try:
     )
 
     load_trailer = load_trailer[
+        ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch",
+         "Original_Demand_Cases", "Trailer_Allocated_Cases", "Demand_Remaining",
+         "Item_Inventory_Remaining", "Fill_Rate", "Status"]
+    ]
+
+    # Exception report should stay final load-level, not step-by-step allocation-level.
+    # This avoids marking an intermediate allocation row as an exception when a later
+    # trailer fully covers the same load/item.
+    exceptions = alloc[alloc["Status"] != "Full"].copy()
+    exceptions = exceptions.merge(
+        trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
+        on="Trailer",
+        how="left"
+    )
+    exceptions = exceptions[
         ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
          "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
     ]
-
-    exceptions = load_trailer[load_trailer["Status"] != "Full"].copy()
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
@@ -547,6 +589,8 @@ try:
     dock_plan_export = trailer_priority.drop(columns=["Trailer_Priority"]).copy()
     cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
     dock_plan_export = dock_plan_export[cols].reset_index(drop=True)
+    if "Earliest_Dispatch" in dock_plan_export.columns:
+        dock_plan_export["Earliest_Dispatch"] = dock_plan_export["Earliest_Dispatch"].apply(format_dispatch_time)
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
@@ -555,7 +599,7 @@ try:
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
+        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Demand_Remaining"],
         ascending=[True, True, True, True, True, True, False]
     ).drop(
         columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
@@ -563,6 +607,7 @@ try:
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
+    load_export["Dispatch"] = load_export["Dispatch"].apply(format_dispatch_time)
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
@@ -570,6 +615,7 @@ try:
         exception_export = exception_export.drop(columns=["Trailer_Priority"])
     exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
+    exception_export["Dispatch"] = exception_export["Dispatch"].apply(format_dispatch_time)
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -706,7 +752,7 @@ with tab_wave:
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    st.caption("Each row is one trailer contribution to one load/item. Status: green = Full, yellow = Partial, red = Short.")
+    st.caption("Each row is one trailer contribution to one load/item. Demand and item inventory are reduced after each allocation. Status: green = Full, yellow = Partial, red = Short.")
 
     def highlight_status(val):
         color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
