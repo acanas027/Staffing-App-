@@ -266,13 +266,13 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
 
 
 # =====================================================================
-# HEADER (plain, matches the rest of the app's pages)
+# HEADER
 # =====================================================================
 st.title("Shorts analysis Tool")
 st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
 
 # =====================================================================
-# INPUTS (plain, default Streamlit styling, on the page)
+# INPUTS
 # =====================================================================
 st.markdown("### Data Inputs")
 col1, col2 = st.columns(2)
@@ -283,8 +283,8 @@ with col2:
 
 run = st.button("Run Analysis")
 st.caption(
-    "Wave size and priority scoring are fixed at 4 trailers per wave, "
-    "ranked by earliest dispatch time and demand efficiency."
+    "Wave size: 4 trailers per wave. "
+    "Priority: earliest dispatch on a short load first; ties broken by cases solved."
 )
 st.divider()
 
@@ -318,17 +318,6 @@ try:
 
     df["Trailer"] = df["ColE"].astype(str) + df["ColF"].astype(str) + df["ColG"].astype(str)
 
-    # ---- FULL ITEM-NUMBER RECONSTRUCTION (fixed) ----
-    # The full item number is split across two columns: ColJ ("Sku Number") holds the
-    # family + first 2 decimals (e.g. 71117.14) and ColK holds the last 3 decimals
-    # (e.g. 102), so the true item is 71117.14102.
-    #
-    # Naive str(ColJ) + str(ColK) breaks two ways:
-    #   1) pandas loads ColK as float, so it stringifies to "102.0" (poisoning the key).
-    #   2) trailing zeros in ColJ ("71117.20" -> "71117.2") and leading zeros in ColK
-    #      ("008" stored as 8) both silently vanish, misaligning the decimals.
-    # Forcing ColJ to exactly 2 decimals and zero-padding ColK to 3 digits rebuilds the
-    # true NNNNN.DDDDD item number reliably.
     def _build_sku(j, k):
         if pd.isna(j):
             return None
@@ -352,10 +341,6 @@ try:
 
     short_clean = short_df[["Trip", "Dispatch", "Item", "Cases"]].copy()
 
-    # ---- CANONICALIZE ITEM KEY (fixed) ----
-    # The short sheet stores the item number as a float, so trailing zeros are dropped on
-    # display (13454.38080 shows as 13454.3808). Formatting to a fixed 5 decimals produces
-    # the same NNNNN.DDDDD string the trailer side builds above, so the two keys align.
     short_clean["Item"] = pd.to_numeric(short_clean["Item"], errors="coerce").map(
         lambda v: f"{v:.5f}" if pd.notna(v) else None
     )
@@ -365,21 +350,12 @@ try:
     short_clean = short_clean.dropna(subset=["Item", "Cases"])
 
     # ---- MATCH ----
-    # Full exact match: Book1's SKU (ColJ + ColK) reconstructs the same full decimal
-    # item number used on the short sheet, e.g. "68820.13" + "081" = "68820.13081".
     match_df = short_clean.merge(clean_df, left_on="Item", right_on="SKU", how="left")
 
-    # --- visible sanity check: how many short lines found trailer inventory ---
-    # If this shows 0, the J+K combine isn't reaching the merge (wrong file / stale run).
-    # Delete this line once you've confirmed the match is working.
     _matched = int(match_df["SKU"].notna().sum())
     st.success(f"Matched {_matched} of {len(match_df)} short lines to trailer inventory.")
 
-    # ---- LOAD COVERAGE + FILL (with real inventory allocation) ----
-    # An item's total inventory is shared across every load that needs it — two loads
-    # can't both get credit for the same physical cases. Demand is allocated item-by-item
-    # in dispatch order (earliest-shipping load first), so once an item's cases run out,
-    # later loads correctly show as Partial/Short instead of both showing Full.
+    # ---- LOAD COVERAGE + FILL ----
     item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
@@ -411,11 +387,6 @@ try:
     exceptions_raw = alloc[alloc["Status"] != "Full"].copy()
 
     # ---- OPTIMIZED TRAILERS ----
-    # For each item still short/partial, find the physical trailers that carry it and
-    # how many cases each one holds (Fix_Cases — properly summed across every pallet/LPN
-    # on that trailer, not just deduplicated rows), and how many distinct loads are
-    # waiting on that item (Loads_Impacted). Computed here, before trailer priority, so
-    # Loads_Impacted can feed directly into the priority ranking below.
     problem_items = exceptions_raw["Item"].unique()
 
     trailer_item_qty = clean_df[clean_df["SKU"].isin(problem_items)].groupby(
@@ -434,11 +405,8 @@ try:
     top4_trailers.insert(0, "Rank", range(1, len(top4_trailers) + 1))
 
     # ---- TRAILER PRIORITY ----
-    # Blends two things equally: how urgent the trailer's demand is (Earliest_Dispatch —
-    # sooner is more urgent) and how many currently-short/partial loads it would help fix
-    # (Loads_Impacted — more is better). Both are normalized to a 0-1 scale so neither
-    # dominates just because of its raw units, then averaged 50/50 into one score.
-    # Priority_Score (demand efficiency) remains as the final tiebreaker.
+    # Each trailer's earliest dispatch = the soonest dispatch time across all short/partial
+    # loads that contain an item sitting on that trailer.
     dispatch_lookup = short_clean.groupby("Item", as_index=False)["Dispatch"].min()
     dispatch_lookup = dispatch_lookup.rename(columns={"Dispatch": "Item_Dispatch"})
     match_with_dispatch = match_df.merge(dispatch_lookup, on="Item", how="left")
@@ -456,41 +424,22 @@ try:
     loads_impacted_lookup = optimized_trailers.set_index("Trailer")["Loads_Impacted"]
     trailer_priority["Loads_Impacted"] = trailer_priority["Trailer"].map(loads_impacted_lookup).fillna(0).astype(int)
 
-    dispatch_min = trailer_priority["Earliest_Dispatch"].min()
-    dispatch_max = trailer_priority["Earliest_Dispatch"].max()
-    if dispatch_max > dispatch_min:
-        trailer_priority["Urgency_Score"] = 1 - (
-            (trailer_priority["Earliest_Dispatch"] - dispatch_min) / (dispatch_max - dispatch_min)
-        )
-    else:
-        trailer_priority["Urgency_Score"] = 1.0
+    # Fix_Cases per trailer (total shortage cases it carries) — used as tiebreaker.
+    fix_cases_lookup = optimized_trailers.set_index("Trailer")["Fix_Cases"]
+    trailer_priority["Fix_Cases"] = trailer_priority["Trailer"].map(fix_cases_lookup).fillna(0)
 
-    loads_max = trailer_priority["Loads_Impacted"].max()
-    if loads_max > 0:
-        trailer_priority["Fix_Score"] = trailer_priority["Loads_Impacted"] / loads_max
-    else:
-        trailer_priority["Fix_Score"] = 0.0
-
-    trailer_priority["Blended_Score"] = (
-        0.5 * trailer_priority["Urgency_Score"] + 0.5 * trailer_priority["Fix_Score"]
-    )
-
-    # Prioritize trailers that actually solve/supply at least one load.
-    # Shortage-fixing trailers still come first, but trailers that cover Full loads
-    # also receive a wave. Trailers that do not solve any load stay out of the Wave Plan.
     trailer_priority["Fixes_Shortage"] = trailer_priority["Loads_Impacted"] > 0
 
-    # First pass sort: used only to choose ONE best trailer per item for Load Coverage.
-    # This keeps the Load Coverage report from showing multiple trailers in one cell.
+    # ---- SELECTION RANK (for Load Coverage: one best trailer per item) ----
+    # Still uses the old multi-factor sort so the displayed trailer per item is sensible.
+    # This rank is only used to pick which trailer name shows in Load Coverage rows,
+    # NOT for the wave/priority ordering.
     trailer_priority = trailer_priority.sort_values(
-        by=["Fixes_Shortage", "Loads_Impacted", "Earliest_Dispatch", "Priority_Score"],
-        ascending=[False, False, True, False]
+        by=["Fixes_Shortage", "Earliest_Dispatch", "Fix_Cases", "Priority_Score"],
+        ascending=[False, True, False, False]
     ).reset_index(drop=True)
     trailer_priority["Selection_Rank"] = range(1, len(trailer_priority) + 1)
 
-    # For Load Coverage, show only ONE trailer per row.
-    # The selected trailer is the best available trailer for that item based on the
-    # background priority logic above.
     trailer_lookup_base = clean_df[["SKU", "Trailer"]].drop_duplicates().merge(
         trailer_priority[["Trailer", "Selection_Rank"]],
         on="Trailer",
@@ -509,30 +458,39 @@ try:
     load_trailer = alloc.merge(priority_trailer_lookup[["Item", "Trailer"]], on="Item", how="left")
     load_trailer = load_trailer.rename(columns={"Cases": "Demand_Cases"})
 
-    # A trailer "solves" a load when the selected trailer for an item contributes
-    # allocated cases to that trip. This includes Full and Partial rows.
     solved_loads_lookup = load_trailer[load_trailer["Allocated_Cases"] > 0].groupby("Trailer")["Trip"].nunique()
     trailer_priority["Loads_Solved"] = trailer_priority["Trailer"].map(solved_loads_lookup).fillna(0).astype(int)
     trailer_priority["Solves_Load"] = trailer_priority["Loads_Solved"] > 0
 
-    # Final Wave Plan ranking:
-    # 1) trailers that solve loads first
-    # 2) shortage-fixing trailers before non-shortage demand trailers
-    # 3) more impacted/solved loads first
-    # 4) earlier dispatch first
-    # 5) demand efficiency as final hidden tiebreaker
+    # =====================================================================
+    # FINAL WAVE PLAN RANKING  ← the only logic that changed
+    # =====================================================================
+    # Rule 1: trailers that solve at least one load come before those that don't.
+    # Rule 2: among solving trailers, sort by EARLIEST DISPATCH first (ascending —
+    #         sooner dispatch = higher urgency = goes first).
+    # Rule 3: ties on dispatch → more Fix_Cases (short cases carried) wins.
+    # Rule 4: still-tied → more Loads_Impacted wins.
+    # Rule 5: final tiebreaker → demand efficiency (Priority_Score).
+    #
+    # Waves are then just groups of 4 cut from this sorted list in order,
+    # so Wave 1 = positions 1-4, Wave 2 = 5-8, etc.
+    # The old blended Urgency_Score / Fix_Score normalisation is removed because
+    # it obscured the dispatch ordering behind a weighted average.
+    # =====================================================================
     trailer_priority = trailer_priority.sort_values(
-        by=["Solves_Load", "Fixes_Shortage", "Loads_Impacted", "Loads_Solved", "Earliest_Dispatch", "Priority_Score"],
-        ascending=[False, False, False, False, True, False]
+        by=["Solves_Load", "Fixes_Shortage", "Earliest_Dispatch", "Fix_Cases", "Loads_Impacted", "Priority_Score"],
+        ascending=[False, False, True, False, False, False]
     ).reset_index(drop=True)
 
     trailer_priority["Wave"] = np.nan
     trailer_priority["Trailer_Priority"] = np.nan
     solve_mask = trailer_priority["Solves_Load"]
     trailer_priority.loc[solve_mask, "Trailer_Priority"] = range(1, int(solve_mask.sum()) + 1)
-    trailer_priority.loc[solve_mask, "Wave"] = ((trailer_priority.loc[solve_mask, "Trailer_Priority"] - 1) // 4) + 1
+    trailer_priority.loc[solve_mask, "Wave"] = (
+        (trailer_priority.loc[solve_mask, "Trailer_Priority"] - 1) // 4
+    ) + 1
 
-    # Add the final wave/priority back to Load Coverage using the single selected trailer.
+    # Add wave/priority back to Load Coverage.
     load_trailer = load_trailer.merge(
         trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
         on="Trailer",
@@ -549,7 +507,10 @@ try:
 
     # ---- FORMAT EXPORTS ----
     dock_plan_export = trailer_priority[trailer_priority["Solves_Load"]].drop(
-        columns=["Urgency_Score", "Fix_Score", "Blended_Score", "Trailer_Priority", "Priority_Score", "Loads_Impacted", "Fixes_Shortage", "Selection_Rank", "Loads_Solved", "Solves_Load"]
+        columns=[
+            "Trailer_Priority", "Priority_Score", "Loads_Impacted",
+            "Fixes_Shortage", "Selection_Rank", "Loads_Solved", "Solves_Load"
+        ]
     ).copy()
     dock_plan_export.insert(0, "Priority", range(1, len(dock_plan_export) + 1))
     cols = ["Priority", "Wave"] + [c for c in dock_plan_export.columns if c not in ("Priority", "Wave")]
@@ -558,10 +519,6 @@ try:
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
 
-    # Sort Load Coverage in true unload priority order:
-    # Wave 1 first, then Wave 2, Wave 3, and so on.
-    # Inside each wave, rows follow the exact trailer priority.
-    # Items with no trailer/no wave are pushed to the bottom.
     load_export["_Wave_Sort"] = load_export["Wave"].fillna(9999)
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
@@ -572,7 +529,6 @@ try:
         columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
     ).reset_index(drop=True)
 
-    # Clean display: no more 1.0/2.0 or nan in the report.
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
 
@@ -588,7 +544,7 @@ except Exception as e:
     st.stop()
 
 # =====================================================================
-# RESULTS DASHBOARD — professional styling starts here only
+# RESULTS DASHBOARD
 # =====================================================================
 inject_dashboard_style()
 
@@ -607,8 +563,6 @@ total_cases_short = int(load_export["Demand_Cases"].sum())
 total_shortage = int(load_export["Actual_short_cases"].clip(lower=0).sum())
 total_waves = dock_plan_export["Wave"].nunique()
 
-# "Loads" = distinct trips/trucks (Trip), not order lines. A load only counts as fully
-# met if EVERY item on that trip is Full — one short item still leaves the whole load short.
 trip_status = load_export.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
@@ -680,7 +634,7 @@ with tab_overview:
         )
         fig2.update_traces(texttemplate="#%{text}", textposition="outside")
         st.plotly_chart(style_fig(fig2), use_container_width=True)
-        st.caption("The order to unload trailers today — #1 first. Bar length shows demand tied to that trailer.")
+        st.caption("The order to unload trailers today — #1 first. Earliest dispatch drives the ranking; cases solved breaks ties.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c4:
@@ -706,8 +660,9 @@ with tab_wave:
     st.subheader("Dock Plan — Trailers in Priority Order")
     st.caption("Trailers are listed in the order they should be unloaded today.")
     st.caption(
-        "Only trailers that help fix a current Short or Partial load are prioritized. "
-        "Trailers are ordered by shortage impact first, then earliest dispatch, then demand efficiency as a tiebreaker."
+        "Priority is driven by earliest dispatch time on a short load. "
+        "When two trailers share the same dispatch time, the one carrying more short cases goes first. "
+        "Waves are groups of 4 from this ranked list."
     )
     st.dataframe(
         dock_plan_export.sort_values("Priority"),
@@ -731,7 +686,6 @@ with tab_load:
         styled_load = load_export.style.applymap(highlight_status, subset=["Status"])
     st.dataframe(styled_load, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
-
 
 
 # =====================================================================
