@@ -154,6 +154,15 @@ def format_dispatch_time(value):
         return text[:-2] if text.endswith(".0") else text
 
 
+def clean_dispatch_columns(df):
+    """Remove trailing .0 from Dispatch/Earliest_Dispatch columns for screen, Excel, and PDF output."""
+    df = df.copy()
+    for col in ["Dispatch", "Earliest_Dispatch"]:
+        if col in df.columns:
+            df[col] = df[col].apply(format_dispatch_time)
+    return df
+
+
 STATUS_PDF_COLORS = {
     "Full": colors.HexColor("#C7F0D8"),
     "Partial": colors.HexColor("#FFE8A3"),
@@ -163,6 +172,7 @@ STATUS_PDF_COLORS = {
 
 def build_status_table(df, status_col="Status", max_width=None, font_size=6):
     """Reportlab Table with the Status column colored and width forced to fit the PDF page."""
+    df = clean_dispatch_columns(df)
     data = [list(df.columns)] + df.astype(str).values.tolist()
 
     # Force the table to fit the printable width instead of running off the page.
@@ -604,8 +614,7 @@ try:
     dock_plan_export = trailer_priority.drop(columns=["Trailer_Priority"]).copy()
     cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
     dock_plan_export = dock_plan_export[cols].reset_index(drop=True)
-    if "Earliest_Dispatch" in dock_plan_export.columns:
-        dock_plan_export["Earliest_Dispatch"] = dock_plan_export["Earliest_Dispatch"].apply(format_dispatch_time)
+    dock_plan_export = clean_dispatch_columns(dock_plan_export)
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
@@ -622,7 +631,7 @@ try:
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
-    load_export["Dispatch"] = load_export["Dispatch"].apply(format_dispatch_time)
+    load_export = clean_dispatch_columns(load_export)
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
@@ -630,7 +639,7 @@ try:
         exception_export = exception_export.drop(columns=["Trailer_Priority"])
     exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
-    exception_export["Dispatch"] = exception_export["Dispatch"].apply(format_dispatch_time)
+    exception_export = clean_dispatch_columns(exception_export)
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -787,9 +796,9 @@ with tab_load:
 def build_excel():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        dock_plan_export.to_excel(writer, sheet_name="Dock Plan", index=False)
-        load_export.to_excel(writer, sheet_name="Load Coverage", index=False)
-        exception_export.to_excel(writer, sheet_name="Exception Report", index=False)
+        clean_dispatch_columns(dock_plan_export).to_excel(writer, sheet_name="Dock Plan", index=False)
+        clean_dispatch_columns(load_export).to_excel(writer, sheet_name="Load Coverage", index=False)
+        clean_dispatch_columns(exception_export).to_excel(writer, sheet_name="Exception Report", index=False)
         optimized_trailers.to_excel(writer, sheet_name="Optimized Trailers", index=False)
         top4_trailers.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
 
