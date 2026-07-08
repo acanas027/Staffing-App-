@@ -369,8 +369,9 @@ try:
     item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
-    fix_rows = []       # trailer-level: how many cases each trailer contributes to each short line
-    load_rows = []      # short-line level: demand, allocated, short, status, source trailer
+    fix_rows = []           # trailer-level: how many cases each trailer contributes to each short line
+    load_rows = []          # short-line level: demand, allocated, short, status, primary source trailer
+    load_detail_rows = []   # load coverage detail: one row per trailer contribution to a short line
 
     # Process each item independently. Within an item, fill the earliest-dispatch
     # short line first, drawing from trailers (largest stock first as the source order).
@@ -399,7 +400,14 @@ try:
                     continue
                 stock_remaining[trailer] = avail - take
                 allocated_total += take
-                sources.append(trailer)
+
+                # Keep the exact trailer contribution so Load Coverage can show
+                # one separate row per trailer used on the same load/item.
+                sources.append({
+                    "Trailer": trailer,
+                    "Allocated_Cases": take,
+                })
+
                 fix_rows.append({
                     "Trailer": trailer,
                     "Item": item,
@@ -411,7 +419,9 @@ try:
             short_qty = need - allocated_total
             fill_rate = (allocated_total / need) if need > 0 else 0.0
             status = "Full" if fill_rate >= 1 else ("Partial" if fill_rate > 0 else "Short")
+            primary_trailer = sources[0]["Trailer"] if sources else np.nan
 
+            # Line-level summary, kept for KPIs, charts, and load status math.
             load_rows.append({
                 "Item": item,
                 "Trip": line["Trip"],
@@ -422,11 +432,43 @@ try:
                 "Fill_Rate": fill_rate,
                 "Status": status,
                 "Actual_short_cases": short_qty,
-                "Trailer": sources[0] if sources else np.nan,   # primary source trailer
+                "Trailer": primary_trailer,
             })
+
+            # Detail rows for the Load Coverage page/export.
+            # If two trailers cover the same short line, this creates two rows.
+            # Example: 3 cases from 198 and 9 cases from 605 = two rows.
+            if sources:
+                for source in sources:
+                    load_detail_rows.append({
+                        "Item": item,
+                        "Trip": line["Trip"],
+                        "Dispatch": line["Dispatch"],
+                        "Demand_Cases": need,
+                        "Allocated_Cases": source["Allocated_Cases"],
+                        "Total_Item_Inventory": total_item_inv,
+                        "Fill_Rate": fill_rate,
+                        "Status": status,
+                        "Actual_short_cases": short_qty,
+                        "Trailer": source["Trailer"],
+                    })
+            else:
+                load_detail_rows.append({
+                    "Item": item,
+                    "Trip": line["Trip"],
+                    "Dispatch": line["Dispatch"],
+                    "Demand_Cases": need,
+                    "Allocated_Cases": 0.0,
+                    "Total_Item_Inventory": total_item_inv,
+                    "Fill_Rate": fill_rate,
+                    "Status": status,
+                    "Actual_short_cases": short_qty,
+                    "Trailer": np.nan,
+                })
 
     fix_df = pd.DataFrame(fix_rows)
     alloc = pd.DataFrame(load_rows)
+    alloc_detail = pd.DataFrame(load_detail_rows)
 
     _matched = int(alloc["Allocated_Cases"].gt(0).sum())
     st.success(f"{_matched} of {len(alloc)} short lines can be covered (fully or partially) from trailer inventory.")
@@ -486,7 +528,7 @@ try:
     # =====================================================================
     # LOAD COVERAGE TABLE
     # =====================================================================
-    load_trailer = alloc.merge(
+    load_trailer = alloc_detail.merge(
         trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
         on="Trailer",
         how="left"
@@ -549,19 +591,17 @@ st.markdown("""
 # KPI ROW
 # =====================================================================
 total_trailers = dock_plan_export["Trailer"].nunique()
-total_cases_short = int(load_export["Demand_Cases"].sum())
-total_shortage = int(load_export["Actual_short_cases"].clip(lower=0).sum())
+total_cases_short = int(alloc["Demand_Cases"].sum())
+total_shortage = int(alloc["Actual_short_cases"].clip(lower=0).sum())
 total_waves = int(dock_plan_export["Wave"].nunique()) if not dock_plan_export.empty else 0
 
-trip_status = load_export.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
+trip_status = alloc.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
 
-# Move Next should match the first trailer in the Wave Plan,
-# not the trailer with the highest Fix_Cases.
+# Move Next should match the first trailer in the Wave Plan.
 if not dock_plan_export.empty:
     next_trailer = dock_plan_export.iloc[0]
-
     move_next_value = f"Trailer {next_trailer['Trailer']}"
     move_next_sub = (
         f"fixes {int(next_trailer['Fix_Cases']):,} cases "
@@ -609,7 +649,7 @@ with tab_overview:
 
     with c2:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        status_summary = load_export.groupby("Status").size().reset_index(name="Count")
+        status_summary = alloc.groupby("Status").size().reset_index(name="Count")
         fig3 = px.pie(
             status_summary, names="Status", values="Count",
             title="Load Status Breakdown", color="Status",
@@ -635,7 +675,7 @@ with tab_overview:
 
     with c4:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        short_items = load_export[load_export["Actual_short_cases"] > 0]
+        short_items = alloc[alloc["Actual_short_cases"] > 0]
         top_skus = short_items.groupby("Item").agg(
             Actual_short_cases=("Actual_short_cases", "sum"),
             Trailer=("Trailer", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
@@ -666,7 +706,7 @@ with tab_wave:
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    st.caption("Status: green = Full, yellow = Partial, red = Short.")
+    st.caption("Each row is one trailer contribution to one load/item. Status: green = Full, yellow = Partial, red = Short.")
 
     def highlight_status(val):
         color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
