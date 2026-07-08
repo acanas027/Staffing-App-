@@ -317,7 +317,24 @@ try:
     df["ColG"] = pd.to_numeric(df["ColG"], errors="coerce").fillna(0).astype(int)
 
     df["Trailer"] = df["ColE"].astype(str) + df["ColF"].astype(str) + df["ColG"].astype(str)
-    df["SKU"] = df["ColJ"].astype(str).str.strip() + df["ColK"].astype(str).str.strip()
+
+    # ---- FULL ITEM-NUMBER RECONSTRUCTION (fixed) ----
+    # The full item number is split across two columns: ColJ ("Sku Number") holds the
+    # family + first 2 decimals (e.g. 71117.14) and ColK holds the last 3 decimals
+    # (e.g. 102), so the true item is 71117.14102.
+    #
+    # Naive str(ColJ) + str(ColK) breaks two ways:
+    #   1) pandas loads ColK as float, so it stringifies to "102.0" (poisoning the key).
+    #   2) trailing zeros in ColJ ("71117.20" -> "71117.2") and leading zeros in ColK
+    #      ("008" stored as 8) both silently vanish, misaligning the decimals.
+    # Forcing ColJ to exactly 2 decimals and zero-padding ColK to 3 digits rebuilds the
+    # true NNNNN.DDDDD item number reliably.
+    def _build_sku(j, k):
+        if pd.isna(j):
+            return None
+        return f"{j:.2f}" + (f"{int(k):03d}" if pd.notna(k) else "000")
+
+    df["SKU"] = [_build_sku(j, k) for j, k in zip(df["ColJ"], df["ColK"])]
 
     clean_df = df[["Trailer", "SKU", "ColL"]].copy()
     clean_df.columns = ["Trailer", "SKU", "Quantity"]
@@ -334,7 +351,15 @@ try:
     ]
 
     short_clean = short_df[["Trip", "Dispatch", "Item", "Cases"]].copy()
-    short_clean["Item"] = short_clean["Item"].astype(str).str.strip()
+
+    # ---- CANONICALIZE ITEM KEY (fixed) ----
+    # The short sheet stores the item number as a float, so trailing zeros are dropped on
+    # display (13454.38080 shows as 13454.3808). Formatting to a fixed 5 decimals produces
+    # the same NNNNN.DDDDD string the trailer side builds above, so the two keys align.
+    short_clean["Item"] = pd.to_numeric(short_clean["Item"], errors="coerce").map(
+        lambda v: f"{v:.5f}" if pd.notna(v) else None
+    )
+
     short_clean["Cases"] = pd.to_numeric(short_clean["Cases"], errors="coerce")
     short_clean["Dispatch"] = pd.to_numeric(short_clean["Dispatch"], errors="coerce")
     short_clean = short_clean.dropna(subset=["Item", "Cases"])
