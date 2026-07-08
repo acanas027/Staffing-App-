@@ -140,29 +140,6 @@ def kpi_card(label, value, sub=""):
     """, unsafe_allow_html=True)
 
 
-def format_dispatch_time(value):
-    """Display dispatch times as 700, 1100, 1500 instead of 700.0, 1100.0, 1500.0."""
-    if pd.isna(value):
-        return ""
-    try:
-        number = float(value)
-        if number.is_integer():
-            return str(int(number))
-        return str(number).rstrip("0").rstrip(".")
-    except (TypeError, ValueError):
-        text = str(value).strip()
-        return text[:-2] if text.endswith(".0") else text
-
-
-def clean_dispatch_columns(df):
-    """Remove trailing .0 from Dispatch/Earliest_Dispatch columns for screen, Excel, and PDF output."""
-    df = df.copy()
-    for col in ["Dispatch", "Earliest_Dispatch"]:
-        if col in df.columns:
-            df[col] = df[col].apply(format_dispatch_time)
-    return df
-
-
 STATUS_PDF_COLORS = {
     "Full": colors.HexColor("#C7F0D8"),
     "Partial": colors.HexColor("#FFE8A3"),
@@ -170,29 +147,16 @@ STATUS_PDF_COLORS = {
 }
 
 
-def build_status_table(df, status_col="Status", max_width=None, font_size=6):
-    """Reportlab Table with the Status column colored and width forced to fit the PDF page."""
-    df = clean_dispatch_columns(df)
+def build_status_table(df, status_col="Status"):
+    """Reportlab Table with the Status column's cells colored green/yellow/red."""
     data = [list(df.columns)] + df.astype(str).values.tolist()
-
-    # Force the table to fit the printable width instead of running off the page.
-    # This is especially important for the detailed Load Coverage page.
-    col_widths = None
-    if max_width:
-        col_widths = [max_width / max(len(df.columns), 1)] * len(df.columns)
-
-    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table = Table(data, repeatRows=1)
     style_commands = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, -1), font_size),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 2),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
     if status_col in df.columns:
         col_idx = list(df.columns).index(status_col)
@@ -208,8 +172,8 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     """One combined PDF: Overview, Wave Plan, and Load Coverage."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
-        buffer, pagesize=landscape(letter),
-        topMargin=24, bottomMargin=24, leftMargin=22, rightMargin=22
+        buffer, pagesize=portrait(letter),
+        topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
     )
     styles = getSampleStyleSheet()
     story = []
@@ -275,7 +239,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Dock Plan — Trailers in Priority Order", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(wave_df, max_width=doc.width, font_size=7))
+    story.append(build_status_table(wave_df))
 
     # ---- Page 3: Load Coverage ----
     story.append(PageBreak())
@@ -283,7 +247,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(load_df, max_width=doc.width, font_size=6))
+    story.append(build_status_table(load_df))
 
     doc.build(story)
     buffer.seek(0)
@@ -406,7 +370,7 @@ try:
     item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
 
     fix_rows = []           # trailer-level: how many cases each trailer contributes to each short line
-    load_rows = []          # short-line level: final demand/coverage math for KPIs and charts
+    load_rows = []          # short-line level: demand, allocated, short, status, primary source trailer
     load_detail_rows = []   # load coverage detail: one row per trailer contribution to a short line
 
     # Process each item independently. Within an item, fill the earliest-dispatch
@@ -583,7 +547,6 @@ try:
     dock_plan_export = trailer_priority.drop(columns=["Trailer_Priority"]).copy()
     cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
     dock_plan_export = dock_plan_export[cols].reset_index(drop=True)
-    dock_plan_export = clean_dispatch_columns(dock_plan_export)
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
@@ -592,16 +555,14 @@ try:
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Item", "Allocation_Step", "Status", "Demand_Left"],
-        ascending=[True, True, True, True, True, True, True, True, False]
+        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
+        ascending=[True, True, True, True, True, True, False]
     ).drop(
-        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority", "Allocation_Step"]
+        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
     ).reset_index(drop=True)
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     load_export["Trailer"] = load_export["Trailer"].fillna("No trailer found")
-    load_export["Dispatch"] = load_export["Dispatch"].apply(format_dispatch_time)
-    load_export = clean_dispatch_columns(load_export)
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
@@ -609,8 +570,6 @@ try:
         exception_export = exception_export.drop(columns=["Trailer_Priority"])
     exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
-    exception_export["Dispatch"] = exception_export["Dispatch"].apply(format_dispatch_time)
-    exception_export = clean_dispatch_columns(exception_export)
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -767,9 +726,9 @@ with tab_load:
 def build_excel():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        clean_dispatch_columns(dock_plan_export).to_excel(writer, sheet_name="Dock Plan", index=False)
-        clean_dispatch_columns(load_export).to_excel(writer, sheet_name="Load Coverage", index=False)
-        clean_dispatch_columns(exception_export).to_excel(writer, sheet_name="Exception Report", index=False)
+        dock_plan_export.to_excel(writer, sheet_name="Dock Plan", index=False)
+        load_export.to_excel(writer, sheet_name="Load Coverage", index=False)
+        exception_export.to_excel(writer, sheet_name="Exception Report", index=False)
         optimized_trailers.to_excel(writer, sheet_name="Optimized Trailers", index=False)
         top4_trailers.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
 
