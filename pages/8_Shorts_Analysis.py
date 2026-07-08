@@ -161,16 +161,28 @@ STATUS_PDF_COLORS = {
 }
 
 
-def build_status_table(df, status_col="Status"):
-    """Reportlab Table with the Status column's cells colored green/yellow/red."""
+def build_status_table(df, status_col="Status", max_width=None, font_size=6):
+    """Reportlab Table with the Status column colored and width forced to fit the PDF page."""
     data = [list(df.columns)] + df.astype(str).values.tolist()
-    table = Table(data, repeatRows=1)
+
+    # Force the table to fit the printable width instead of running off the page.
+    # This is especially important for the detailed Load Coverage page.
+    col_widths = None
+    if max_width:
+        col_widths = [max_width / max(len(df.columns), 1)] * len(df.columns)
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
     style_commands = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("FONTSIZE", (0, 0), (-1, -1), font_size),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
     if status_col in df.columns:
         col_idx = list(df.columns).index(status_col)
@@ -186,8 +198,8 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     """One combined PDF: Overview, Wave Plan, and Load Coverage."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
-        buffer, pagesize=portrait(letter),
-        topMargin=30, bottomMargin=30, leftMargin=30, rightMargin=30
+        buffer, pagesize=landscape(letter),
+        topMargin=24, bottomMargin=24, leftMargin=22, rightMargin=22
     )
     styles = getSampleStyleSheet()
     story = []
@@ -253,7 +265,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Dock Plan — Trailers in Priority Order", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(wave_df))
+    story.append(build_status_table(wave_df, max_width=doc.width, font_size=7))
 
     # ---- Page 3: Load Coverage ----
     story.append(PageBreak())
@@ -261,7 +273,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(load_df))
+    story.append(build_status_table(load_df, max_width=doc.width, font_size=6))
 
     doc.build(story)
     buffer.seek(0)
@@ -417,6 +429,7 @@ try:
                 if avail <= 0:
                     continue
 
+                demand_needed_before_allocation = demand_remaining
                 take = min(avail, demand_remaining)
                 if take <= 0:
                     continue
@@ -452,13 +465,14 @@ try:
                     "Item": item,
                     "Trip": line["Trip"],
                     "Dispatch": line["Dispatch"],
-                    "Original_Demand_Cases": original_need,
-                    "Trailer_Allocated_Cases": take,
-                    "Demand_Remaining": demand_remaining,
-                    "Item_Inventory_Remaining": item_inventory_remaining,
+                    "Demand_Needed": demand_needed_before_allocation,
+                    "Cases_Used": take,
+                    "Demand_Left": demand_remaining,
+                    "Item_Inv_Left": item_inventory_remaining,
                     "Fill_Rate": fill_rate_after_allocation,
                     "Status": status_after_allocation,
                     "Trailer": trailer,
+                    "Allocation_Step": len(sources),
                 })
 
             short_qty = demand_remaining
@@ -486,13 +500,14 @@ try:
                     "Item": item,
                     "Trip": line["Trip"],
                     "Dispatch": line["Dispatch"],
-                    "Original_Demand_Cases": original_need,
-                    "Trailer_Allocated_Cases": 0.0,
-                    "Demand_Remaining": original_need,
-                    "Item_Inventory_Remaining": item_inventory_remaining,
+                    "Demand_Needed": original_need,
+                    "Cases_Used": 0.0,
+                    "Demand_Left": original_need,
+                    "Item_Inv_Left": item_inventory_remaining,
                     "Fill_Rate": 0.0,
                     "Status": "Short",
                     "Trailer": np.nan,
+                    "Allocation_Step": 0,
                 })
 
     fix_df = pd.DataFrame(fix_rows)
@@ -565,8 +580,8 @@ try:
 
     load_trailer = load_trailer[
         ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch",
-         "Original_Demand_Cases", "Trailer_Allocated_Cases", "Demand_Remaining",
-         "Item_Inventory_Remaining", "Fill_Rate", "Status"]
+         "Demand_Needed", "Cases_Used", "Demand_Left", "Item_Inv_Left",
+         "Fill_Rate", "Status", "Allocation_Step"]
     ]
 
     # Exception report should stay final load-level, not step-by-step allocation-level.
@@ -599,10 +614,10 @@ try:
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Demand_Remaining"],
-        ascending=[True, True, True, True, True, True, False]
+        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Item", "Allocation_Step", "Status", "Demand_Left"],
+        ascending=[True, True, True, True, True, True, True, True, False]
     ).drop(
-        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
+        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority", "Allocation_Step"]
     ).reset_index(drop=True)
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
@@ -752,7 +767,7 @@ with tab_wave:
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    st.caption("Each row is one trailer contribution to one load/item. Demand and item inventory are reduced after each allocation. Status: green = Full, yellow = Partial, red = Short.")
+    st.caption("Each row is one trailer contribution to one load/item. Demand_Needed is the demand before that trailer allocation; Demand_Left and Item_Inv_Left are the remaining balances after that allocation. Status: green = Full, yellow = Partial, red = Short.")
 
     def highlight_status(val):
         color_map = {"Full": "#C7F0D8", "Partial": "#FFE8A3", "Short": "#F5C2C7"}
