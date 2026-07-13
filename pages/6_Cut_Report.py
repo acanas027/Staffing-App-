@@ -40,6 +40,7 @@ import streamlit as st
 SHIFT_SHEETS = ["1ST SHIFT CUTS", "2ND SHIFT CUTS"]
 MASTER_SHEET = "CUSTOMER SERVICE MASTER LIST"
 MAILTO_SAFE_LENGTH = 3000  # links longer than this may fail to open in some clients
+CC_EMAIL = "JillN@Resers.com"  # every generated email is CC'd to this address
 
 st.set_page_config(page_title="Cuts / Shorts Rep Email Generator", layout="wide")
 st.title("Cuts From Loads — CSR Email Generator")
@@ -310,55 +311,24 @@ def build_rep_color_lookup(wb):
     return rep_to_color
 
 
-def sort_and_color_sheet(ws, tracked_rows, rep_to_color):
+def color_sheet_rows(ws, tracked_rows, rep_to_color):
     """
-    Physically reorders a sheet's tracked data rows so rows with the same
-    REP end up adjacent (grouped together), and fills each row with that
-    rep's color from the master list. tracked_rows is a list of
-    {"row": original_row_number, "REP": rep_name_or_None} for this sheet,
-    in original top-to-bottom order.
-
-    Only cells holding a plain value are physically moved -- any cell that's
-    a formula (e.g. an XLOOKUP-based CS REP or DESCRIPTION column) is left
-    exactly where it is, so it keeps referencing "this same row" and
-    automatically recalculates against whatever moved into that row once
-    the file is opened in Excel, rather than the formula itself being
-    relocated (which would just move the same lookup elsewhere, not sort
-    anything). Unmatched rows (no rep) sort to the end.
+    Fills each tracked row with that row's rep color from the master list,
+    IN PLACE -- rows are not reordered or moved, only colored. tracked_rows
+    is a list of {"row": row_number, "REP": rep_name_or_None} for this
+    sheet.
     """
     if not tracked_rows:
         return
-
-    row_numbers = sorted(info["row"] for info in tracked_rows)
     last_col = ws.max_column
-    sample_row = row_numbers[0]
-
-    value_cols = [
-        c for c in range(1, last_col + 1)
-        if ws.cell(row=sample_row, column=c).data_type != "f"
-    ]
-
-    captured = {
-        info["row"]: {c: ws.cell(row=info["row"], column=c).value for c in value_cols}
-        for info in tracked_rows
-    }
-
-    sorted_infos = sorted(
-        tracked_rows,
-        key=lambda info: (info["REP"] is None or info["REP"] == "", str(info["REP"] or "")),
-    )
-
-    for slot_row, info in zip(row_numbers, sorted_infos):
-        data = captured[info["row"]]
-        for c, val in data.items():
-            ws.cell(row=slot_row, column=c).value = val
-
+    for info in tracked_rows:
         color = rep_to_color.get(info["REP"]) if info["REP"] else None
-        if color:
-            argb = "FF" + color  # opaque -- a bare 6-digit hex defaults to fully transparent
-            fill = PatternFill(start_color=argb, end_color=argb, fill_type="solid")
-            for c in range(1, last_col + 1):
-                ws.cell(row=slot_row, column=c).fill = fill
+        if not color:
+            continue
+        argb = "FF" + color  # opaque -- a bare 6-digit hex defaults to fully transparent
+        fill = PatternFill(start_color=argb, end_color=argb, fill_type="solid")
+        for c in range(1, last_col + 1):
+            ws.cell(row=info["row"], column=c).fill = fill
 
 
 def extract_shift_rows(wb, sheet_name):
@@ -1077,13 +1047,13 @@ def build_subject(group):
     )
 
 
-def build_mailto(to_addr, subject, body):
+def build_mailto(to_addr, subject, body, cc_addr=None):
     """Same helper as the Shift Closeout page: builds a mailto: link."""
-    params = urllib.parse.urlencode(
-        {"subject": subject, "body": body},
-        quote_via=urllib.parse.quote,
-    )
-    return f"mailto:{(to_addr or '').strip()}?{params}"
+    params = {"subject": subject, "body": body}
+    if cc_addr:
+        params["cc"] = cc_addr
+    query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    return f"mailto:{(to_addr or '').strip()}?{query}"
 
 
 def build_updated_workbook(uploaded_file, df):
@@ -1107,9 +1077,8 @@ def build_updated_workbook(uploaded_file, df):
     still get the CUSTOMER and REP values -- just added as new columns, since
     there's nowhere existing to overwrite for CUSTOMER on that layout.
 
-    After writing values, each sheet's data rows are physically reordered so
-    every rep's items are grouped together (see sort_and_color_sheet), and
-    each row is filled with that rep's color from the master list.
+    Row order is left exactly as uploaded -- rows are NOT reordered. Each
+    row is still filled with its rep's color from the master list, in place.
     """
     uploaded_file.seek(0)
     wb_out = openpyxl.load_workbook(uploaded_file)
@@ -1152,7 +1121,7 @@ def build_updated_workbook(uploaded_file, df):
         )
 
     for sheet_name, tracked_rows in tracked_by_sheet.items():
-        sort_and_color_sheet(wb_out[sheet_name], tracked_rows, rep_to_color)
+        color_sheet_rows(wb_out[sheet_name], tracked_rows, rep_to_color)
 
     buffer = io.BytesIO()
     wb_out.save(buffer)
@@ -1261,9 +1230,10 @@ if uploaded:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.caption(
-            "Your original workbook, unchanged except: CUSTOMER is filled in wherever "
-            "the manifest resolved it, and a new REP column is added showing the match "
-            "(blank where none was found)."
+            "Your original workbook, in the same row order as uploaded. CUSTOMER is "
+            "filled in wherever the manifest resolved it, and a new REP column is "
+            "added showing the match (blank where none was found), with each row "
+            "colored by that rep's color from the master list."
         )
     except Exception as e:
         st.warning(f"Couldn't build the downloadable workbook: {e}")
@@ -1286,7 +1256,10 @@ if uploaded:
 
     st.markdown("---")
     st.subheader("Emails")
-    st.caption("One email per rep per load — a rep with items on 2 different loads gets 2 separate emails.")
+    st.caption(
+        f"One email per rep per load — a rep with items on 2 different loads gets "
+        f"2 separate emails. Every email is CC'd to {CC_EMAIL}."
+    )
 
     if matched.empty:
         st.info("No rows matched a rep yet — nothing to generate.")
@@ -1295,8 +1268,8 @@ if uploaded:
             email_addr = rep_to_email.get(rep, "")
             subject = build_subject(group)
             plain_table = build_plain_text_table(group)
-            body = f"{plain_table}\n\nThank you."
-            mailto_link = build_mailto(email_addr, subject, body)
+            body = plain_table
+            mailto_link = build_mailto(email_addr, subject, body, cc_addr=CC_EMAIL)
             too_long = len(mailto_link) > MAILTO_SAFE_LENGTH
             widget_key = f"{rep}_{load}"
 
@@ -1305,6 +1278,7 @@ if uploaded:
                 f"({len(group)} item{'s' if len(group) != 1 else ''})"
             ):
                 st.text_input("To", value=email_addr, disabled=True, key=f"to_{widget_key}")
+                st.text_input("Cc", value=CC_EMAIL, disabled=True, key=f"cc_{widget_key}")
                 st.text_input("Subject", value=subject, disabled=True, key=f"subj_{widget_key}")
                 st.code(body, language=None)
 
