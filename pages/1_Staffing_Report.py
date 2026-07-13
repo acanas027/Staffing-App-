@@ -751,9 +751,14 @@ def calculate_needed(
         "Unloading": max(effective_min_unloaders(crossroads_open, deer_creek_open, msb_open), whole_workers(raw_needed["Unloading"])),
         "Receiving":  max(MIN_RECEIVERS, whole_workers(raw_needed["Receiving"])),
         "Picking":    whole_workers(raw_needed["Picking"]),
-        "Tasking":    whole_workers(
-            raw_needed["Putaway"] + raw_needed["Replenishment"] + raw_needed["Full Pallets"]
-        ),
+        # Tasking split into its three named sub-roles. Full Pallets and Replenishment
+        # are outbound-driven (sized off total_cases) and never reference plant status.
+        # Putaway is inbound-driven and naturally goes to 0 when all plants are closed,
+        # since raw_needed["Putaway"] is proportional to inbound_pallets — no separate
+        # floor constant needed here (same as it worked bundled into "Tasking" before).
+        "Full Pallets":  whole_workers(raw_needed["Full Pallets"]),
+        "Putaway":       whole_workers(raw_needed["Putaway"]),
+        "Replenishment": whole_workers(raw_needed["Replenishment"]),
         # Loading: use floor (int) not whole_workers (rounds up at +0.7).
         # whole_workers(5.26) = 6 because 5.26+0.7=5.96 -> int=5... wait actually:
         # whole_workers(5.59) = int(5.59+0.7) = int(6.29) = 6 — overshoots.
@@ -823,7 +828,13 @@ def generate_recommendations(staff, needed):
         ("Loading",   "Load",   "L"),
         ("Receiving", "Receiv", "R"),
         ("Picking",   "Pick",   "P"),
-        ("Tasking",   "Task",   "T"),
+        # Tasking split into its three sub-roles, in fill priority order (all share
+        # the same "T" skill and best-fit text — everyone T-skilled is interchangeable
+        # across all three — so listing them in this order is what actually implements
+        # "fill Full Pallets first, then Putaway, then Replenishment").
+        ("Full Pallets",  "Task", "T"),
+        ("Putaway",       "Task", "T"),
+        ("Replenishment", "Task", "T"),
     ]
     for task, fit_text, skill in best_fit_steps:
         for idx in present_indexes:
@@ -833,7 +844,10 @@ def generate_recommendations(staff, needed):
             if best_fit(row, fit_text) and has_skill(row, skill):
                 assign_if_needed(task, idx)
 
-    skill_map = {"Unloading": "U", "Receiving": "R", "Loading": "L", "Picking": "P", "Tasking": "T"}
+    skill_map = {
+        "Unloading": "U", "Receiving": "R", "Loading": "L", "Picking": "P",
+        "Full Pallets": "T", "Putaway": "T", "Replenishment": "T",
+    }
     for task, skill in skill_map.items():
         for idx in present_indexes:
             if assigned[task] >= needed[task]:
@@ -844,13 +858,15 @@ def generate_recommendations(staff, needed):
             if has_skill(row, skill):
                 assign_if_needed(task, idx)
 
-    backup_tasks = ["Unloading", "Receiving", "Loading", "Picking", "Tasking"]
+    backup_tasks = ["Unloading", "Receiving", "Loading", "Picking", "Full Pallets", "Putaway", "Replenishment"]
     backup_skill_map = {
         "Unloading": "U",
         "Receiving": "R",
         "Loading": "L",
         "Picking": "P",
-        "Tasking": "T",
+        "Full Pallets": "T",
+        "Putaway": "T",
+        "Replenishment": "T",
     }
 
     for task in backup_tasks:
@@ -893,11 +909,13 @@ def generate_recommendations(staff, needed):
         "Unloading": "U",
         "Receiving": "R",
         "Picking": "P",
-        "Tasking": "T",
+        "Full Pallets": "T",
+        "Putaway": "T",
+        "Replenishment": "T",
         "Loading": "L",
     }
-    shortage_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
-    fallback_priority = ["Tasking", "Picking", "Loading", "Receiving", "Unloading"]
+    shortage_priority = ["Picking", "Full Pallets", "Putaway", "Replenishment", "Loading", "Receiving", "Unloading"]
+    fallback_priority = ["Full Pallets", "Putaway", "Replenishment", "Picking", "Loading", "Receiving", "Unloading"]
 
     def choose_task_for_unassigned(row):
         skilled_tasks = [
@@ -913,7 +931,7 @@ def generate_recommendations(staff, needed):
             return "Support"
 
         # Fill shortages first. This fixes cases like a T/R worker whose best fit is
-        # Receiving but Receiving is full while Tasking is still short.
+        # Receiving but Receiving is full while a Tasking sub-role is still short.
         for task in shortage_priority:
             if task in skilled_tasks and assigned.get(task, 0) < int(needed.get(task, 0) or 0):
                 return task
@@ -923,7 +941,9 @@ def generate_recommendations(staff, needed):
             "Unloading": "Unload",
             "Receiving": "Receiv",
             "Picking": "Pick",
-            "Tasking": "Task",
+            "Full Pallets": "Task",
+            "Putaway": "Task",
+            "Replenishment": "Task",
             "Loading": "Load",
         }
         for task, fit_text in best_fit_map.items():
@@ -948,21 +968,28 @@ def generate_recommendations(staff, needed):
     # Final smart balance pass: never leave a position overstaffed while another
     # position is understaffed if the present crew's skills can cover the shortage.
     # This includes two-step swaps. Example: Receiving is +1, Picking is -1,
-    # Tasking is balanced. A T/R receiver can move to Tasking while a P/T tasker
-    # moves to Picking, so Receiving becomes balanced and Picking is covered.
-    rebalance_priority = ["Picking", "Tasking", "Loading", "Receiving", "Unloading"]
+    # a Tasking sub-role is balanced. A T/R receiver can move to that sub-role while
+    # a P/T worker in it moves to Picking, so Receiving becomes balanced and Picking
+    # is covered. Because all three Tasking sub-roles share the same "T" skill, this
+    # same pass also freely rebalances surplus/shortage directly BETWEEN Full Pallets,
+    # Putaway, and Replenishment.
+    rebalance_priority = ["Picking", "Full Pallets", "Putaway", "Replenishment", "Loading", "Receiving", "Unloading"]
     task_to_skill = {
         "Unloading": "U",
         "Receiving": "R",
         "Picking": "P",
-        "Tasking": "T",
+        "Full Pallets": "T",
+        "Putaway": "T",
+        "Replenishment": "T",
         "Loading": "L",
     }
     fit_text_map = {
         "Unloading": "Unload",
         "Receiving": "Receiv",
         "Picking": "Pick",
-        "Tasking": "Task",
+        "Full Pallets": "Task",
+        "Putaway": "Task",
+        "Replenishment": "Task",
         "Loading": "Load",
     }
 
@@ -1150,12 +1177,23 @@ def build_summary(staff, needed, loading_cap=None):
 
 
 def count_present_skill_capacity(staff):
-    """Return the maximum available workers by task based on who is present and their listed skills."""
+    """
+    Return the maximum available workers by task based on who is present and their
+    listed skills. Full Pallets/Putaway/Replenishment all share the same "T" skill
+    (every T-skilled worker is interchangeable across all three, per design) — each
+    gets its own entry (used by cap_allocation_to_available_skills' per-task clamp),
+    plus a "Tasking" aggregate entry (the SAME shared T-skilled total) used by the
+    optimizer's shared-pool bound, since all three draw from one pool, not three
+    independent ones.
+    """
     task_skill_map = {
         "Unloading": "U",
         "Receiving": "R",
         "Picking": "P",
-        "Tasking": "T",
+        "Full Pallets": "T",
+        "Putaway": "T",
+        "Replenishment": "T",
+        "Tasking": "T",  # aggregate shared T-skilled pool, for the optimizer
         "Loading": "L",
     }
     present_rows = staff[staff.apply(is_present, axis=1)]
@@ -1166,17 +1204,43 @@ def count_present_skill_capacity(staff):
 
 
 def cap_allocation_to_available_skills(allocation, staff):
-    """Never recommend more workers in a task than the present crew can legally staff by skill."""
+    """
+    Never recommend more workers in a task than the present crew can legally
+    staff by skill. Full Pallets, Putaway, and Replenishment all draw from the
+    SAME shared "T" skill pool (see count_present_skill_capacity) — capping each
+    independently against the full T-count is not enough, since three
+    individually-valid-looking numbers can still sum to more T-skilled people
+    than actually exist. This caps them as a GROUP against that one shared
+    total, trimming the lowest fill-priority role first (Replenishment, then
+    Putaway) and protecting Full Pallets last if the combined ask is too high.
+    """
     caps = count_present_skill_capacity(staff)
-    return {
+    result = {
         task: min(int(allocation.get(task, 0) or 0), int(caps.get(task, 0) or 0))
-        for task in ["Unloading", "Receiving", "Picking", "Tasking", "Loading"]
+        for task in ["Unloading", "Receiving", "Picking", "Loading"]
     }
+
+    t_trim_order = ["Replenishment", "Putaway", "Full Pallets"]  # trimmed first -> protected last
+    t_cap = int(caps.get("Full Pallets", 0) or 0)  # shared T-cap — same value under any of the 3 keys
+    t_requested = {task: int(allocation.get(task, 0) or 0) for task in t_trim_order}
+    t_total = sum(t_requested.values())
+
+    if t_total > t_cap:
+        excess = t_total - t_cap
+        for task in t_trim_order:
+            if excess <= 0:
+                break
+            trim = min(t_requested[task], excess)
+            t_requested[task] -= trim
+            excess -= trim
+
+    result.update(t_requested)
+    return result
 
 
 def assigned_counts_from_summary(summary_table):
     """Return assigned counts from the staffing summary so high-level allocation matches named workers."""
-    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+    task_order = ["Picking", "Full Pallets", "Putaway", "Replenishment", "Loading", "Unloading", "Receiving"]
     return {
         task: int(summary_table.loc[task, "Assigned"]) if task in summary_table.index else 0
         for task in task_order
@@ -1259,7 +1323,12 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
         )
 
     picking_gap   = int(summary_table.loc["Picking",   "Difference"]) if "Picking"   in summary_table.index else 0
-    tasking_gap   = int(summary_table.loc["Tasking",   "Difference"]) if "Tasking"   in summary_table.index else 0
+    full_pallets_gap  = int(summary_table.loc["Full Pallets",  "Difference"]) if "Full Pallets"  in summary_table.index else 0
+    putaway_gap       = int(summary_table.loc["Putaway",       "Difference"]) if "Putaway"       in summary_table.index else 0
+    replenishment_gap = int(summary_table.loc["Replenishment", "Difference"]) if "Replenishment" in summary_table.index else 0
+    # Combined surplus across the three Tasking sub-roles — since all three share
+    # the same "T" skill, a surplus in any one of them is real flexible labor.
+    tasking_family_surplus = max(0, full_pallets_gap) + max(0, putaway_gap) + max(0, replenishment_gap)
     receiving_gap = int(summary_table.loc["Receiving", "Difference"]) if "Receiving" in summary_table.index else 0
     unloading_gap = int(summary_table.loc["Unloading", "Difference"]) if "Unloading" in summary_table.index else 0
     loading_gap   = int(summary_table.loc["Loading",   "Difference"]) if "Loading"   in summary_table.index else 0
@@ -1267,8 +1336,11 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
     if picking_gap < 0:
         recommendations.append("High picking short risk detected.")
         recommendations.append("Avoid pulling pickers into unloading or loading unless outbound service is critical.")
-        if tasking_gap > 0:
-            recommendations.append(f"Tasking has {tasking_gap} extra worker(s) — move into replenishment to protect pickers.")
+        if tasking_family_surplus > 0:
+            recommendations.append(
+                f"Full Pallets/Putaway/Replenishment has {tasking_family_surplus} extra worker(s) combined "
+                f"— move into picking support to protect pickers."
+            )
         elif lead_extra_count > 0:
             recommendations.append(f"{lead_extra_count} Lead/Extra worker(s) available — flex into replenishment or picking support.")
         else:
@@ -1276,8 +1348,8 @@ def build_recommendations(summary_table, present_recommendations, raw_needed, ho
 
     if unloading_gap < 0 or receiving_gap < 0:
         recommendations.append("Inbound flow risk detected. Falling behind may create dock congestion and delayed putaway.")
-        if tasking_gap > 0:
-            recommendations.append("Tasking has surplus labor that can temporarily support unloading or receiving.")
+        if tasking_family_surplus > 0:
+            recommendations.append("Full Pallets/Putaway/Replenishment has surplus labor that can temporarily support unloading or receiving.")
         elif lead_extra_count > 0:
             recommendations.append("Lead/Extra labor can temporarily support inbound.")
         else:
@@ -2402,26 +2474,31 @@ def status_is_excluded_from_new_control(status):
 
 def compute_throughput_optimal_allocation(
     picks_left, pulls_left, total_loads, hours_remaining, present_total,
-    min_unload=MIN_UNLOADERS, min_receive=MIN_RECEIVERS, task_floor=TASK_FLOOR,
+    min_unload=MIN_UNLOADERS, min_receive=MIN_RECEIVERS,
+    putaway_floor=0, replenishment_floor=0, full_pallets_floor=0,
     already_controlled_loads=0,
     max_pickers=None, max_loaders=None, max_pull_taskers=None,
 ):
     """
     Distribute present workers to MAXIMIZE what can actually be controlled by shift end,
-    without over-assigning loaders ahead of the freight Picking/Tasking can create.
+    without over-assigning loaders ahead of the freight Picking/Full Pallets can create.
 
     Logic:
     1. Protect Unloading and Receiving minimums.
-    2. Protect Tasking floor first for replenishment + putaway.
-    3. Test every possible split of the remaining crew across Picking, extra Tasking
-       for full-pallet pulls, and Loading — respecting real skill-availability caps
-       when given (see below).
+    2. Protect the Putaway floor, then the Replenishment floor, then the Full Pallets
+       floor — each an EXACT number from calculate_needed() (Putaway is plant-aware and
+       can be 0; Replenishment/Full Pallets are outbound-driven and never reference
+       plant status). This replaces the old single flat TASK_FLOOR proxy that bundled
+       all three together with no way to size any of them precisely.
+    3. Test every possible split of the crew remaining after those floors across
+       Picking, EXTRA Full Pallets pullers (beyond that floor), and Loading —
+       respecting real skill-availability caps when given (see below).
     4. Pick the split that controls the most loads by shift end.
     5. If two splits control the same number of loads, prefer the one with less idle
-       loading capacity and more Picking/Tasking feed for 2nd shift.
+       loading capacity and more Picking/Full-Pallets feed for 2nd shift.
 
     Loading is scored against the SAME remaining-candidate-load pool as Picking and
-    Tasking/Pulls (total_loads minus loads already controlled — Completed/Loaded/RTL/R-S) —
+    Full Pallets (total_loads minus loads already controlled — Completed/Loaded/RTL/R-S) —
     not the fixed 52%-of-day loading goal, and not the full-day total_loads. The 52% goal
     is a MINIMUM staffing target (calculate_needed() still sizes headcount that way); it is
     not a ceiling on what a given allocation can actually control.
@@ -2429,13 +2506,16 @@ def compute_throughput_optimal_allocation(
     max_pickers / max_loaders / max_pull_taskers (optional): how many present workers
     actually hold the P / L / T skill (see count_present_skill_capacity()). When given,
     the search only considers splits that are actually staffable — it will never choose
-    a target it can't realize. This matters because clamping an ALREADY-CHOSEN target down
-    to available skills after the fact (the old approach) silently drops the clamped
-    headcount instead of re-searching where it should go, which can land far short of the
-    true best achievable split. Passing the caps in up front lets the search redirect that
-    headcount to whichever other stream is actually the bottleneck, in the same pass.
+    a target it can't realize. max_pull_taskers bounds the TOTAL Full Pallets headcount
+    (floor + extra), the same shared-T-pool semantics the old combined Tasking bucket used.
 
-    Returns a dict: Unloading, Receiving, Picking, Tasking, Loading.
+    Note: Putaway and Replenishment floors are reserved the same skill-blind way
+    Unloading/Receiving always have been (a plain headcount reservation, not a skill
+    check) — real skill enforcement for the shared T-pool happens downstream, in
+    cap_allocation_to_available_skills() (group-aware across the three T-tasks) and in
+    generate_recommendations() (which can never over-assign beyond real T-skilled bodies).
+
+    Returns a dict: Unloading, Receiving, Picking, Putaway, Replenishment, Full Pallets, Loading.
     """
     try:
         hrs = max(0.0, float(hours_remaining or 0))
@@ -2465,7 +2545,11 @@ def compute_throughput_optimal_allocation(
     pulls_left = max(0.0, float(pulls_left or 0))
 
     # Protect the fixed minimums, but never allocate more people than are present.
-    alloc = {"Unloading": 0, "Receiving": 0, "Picking": 0, "Tasking": 0, "Loading": 0}
+    alloc = {
+        "Unloading": 0, "Receiving": 0, "Picking": 0,
+        "Putaway": 0, "Replenishment": 0, "Full Pallets": 0,
+        "Loading": 0,
+    }
     remaining = present_total
 
     alloc["Unloading"] = min(int(min_unload), remaining)
@@ -2474,14 +2558,20 @@ def compute_throughput_optimal_allocation(
     alloc["Receiving"] = min(int(min_receive), remaining)
     remaining -= alloc["Receiving"]
 
-    alloc["Tasking"] = min(int(task_floor), remaining)
-    remaining -= alloc["Tasking"]
+    alloc["Putaway"] = min(int(putaway_floor), remaining)
+    remaining -= alloc["Putaway"]
+
+    alloc["Replenishment"] = min(int(replenishment_floor), remaining)
+    remaining -= alloc["Replenishment"]
+
+    alloc["Full Pallets"] = min(int(full_pallets_floor), remaining)
+    remaining -= alloc["Full Pallets"]
 
     if remaining <= 0 or hrs <= 0:
         return alloc
 
     # If there are outbound loads, keep at least one loader. More loaders must be
-    # earned by enough Picking/Tasking feed; otherwise they are idle capacity.
+    # earned by enough Picking/Full-Pallets feed; otherwise they are idle capacity.
     # Never reserve that first loader if skill data says nobody present can load.
     min_loading = 1 if (remaining_candidate_loads > 0 and (max_loaders is None or max_loaders >= 1)) else 0
     if min_loading and remaining > 0:
@@ -2498,12 +2588,17 @@ def compute_throughput_optimal_allocation(
             return float(remaining_candidate_loads)
         return min(float(remaining_candidate_loads), (pickers * PICK_RATE * hrs / picks_left) * remaining_candidate_loads)
 
-    def _loads_feedable_by_pull(extra_pull_taskers):
+    def _loads_feedable_by_pull(full_pallets_count):
+        # Uses the TOTAL Full Pallets headcount (floor + extra), not just the extra —
+        # floor-reserved full-pallet pullers are doing exactly the work that feeds
+        # outbound loads, unlike Putaway/Replenishment's floors, which are genuinely
+        # separate work. This is a real accuracy improvement the split enables: the
+        # old bundled Tasking floor excluded ALL of it from pull-feed as an approximation.
         if remaining_candidate_loads <= 0:
             return 0.0
         if pulls_left <= 0:
             return float(remaining_candidate_loads)
-        return min(float(remaining_candidate_loads), (extra_pull_taskers * PULL_RATE * hrs / pulls_left) * remaining_candidate_loads)
+        return min(float(remaining_candidate_loads), (full_pallets_count * PULL_RATE * hrs / pulls_left) * remaining_candidate_loads)
 
     # Brute force all integer allocations of the flexible crew. This is small and
     # reliable, and it prevents the old issue where Loading took too many people
@@ -2516,31 +2611,30 @@ def compute_throughput_optimal_allocation(
         max_add_loading = left_after_picking if max_loaders is None else max(0, min(left_after_picking, int(max_loaders) - alloc["Loading"]))
 
         for add_loading in range(max_add_loading + 1):
-            add_pull_extra = left_after_picking - add_loading
+            add_full_pallets_extra = left_after_picking - add_loading
 
-            taskers = alloc["Tasking"] + add_pull_extra
-            if max_pull_taskers is not None and taskers > int(max_pull_taskers):
+            full_pallets_count = alloc["Full Pallets"] + add_full_pallets_extra
+            if max_pull_taskers is not None and full_pallets_count > int(max_pull_taskers):
                 continue  # this split needs more T-skilled people than are present — infeasible, skip it
 
             pickers = alloc["Picking"] + add_picking
             loaders = alloc["Loading"] + add_loading
-            pull_extra = add_pull_extra
 
             pick_feed = _loads_feedable_by_pick(pickers)
-            pull_feed = _loads_feedable_by_pull(pull_extra)
+            pull_feed = _loads_feedable_by_pull(full_pallets_count)
             freight_feed = min(pick_feed, pull_feed, float(remaining_candidate_loads))
             # Loading capacity is bounded only by the remaining candidate pool — the
             # same pool Picking/Pulls use — not the fixed 52% goal.
             loading_capacity = min(float(remaining_candidate_loads), loaders * LOAD_RATE * hrs)
             controlled = min(freight_feed, loading_capacity)
 
-            # Do not reward loaders that cannot be fed by Picking/Tasking.
+            # Do not reward loaders that cannot be fed by Picking/Full Pallets.
             idle_loading_capacity = max(0.0, loading_capacity - freight_feed)
             unmet_feed_capacity = max(0.0, freight_feed - loading_capacity)
 
             # Objective order:
             # 1) control the most loads by shift end
-            # 2) avoid idle loaders that Picking/Tasking cannot feed
+            # 2) avoid idle loaders that Picking/Full Pallets cannot feed
             # 3) keep more ready-freight creation capacity for 2nd shift
             # 4) prefer fewer loaders when the same work is controlled
             score = (
@@ -2556,7 +2650,9 @@ def compute_throughput_optimal_allocation(
                 "Unloading": alloc["Unloading"],
                 "Receiving": alloc["Receiving"],
                 "Picking": pickers,
-                "Tasking": taskers,
+                "Putaway": alloc["Putaway"],
+                "Replenishment": alloc["Replenishment"],
+                "Full Pallets": full_pallets_count,
                 "Loading": loaders,
             }
 
@@ -2568,7 +2664,6 @@ def compute_throughput_optimal_allocation(
 
 def appointment_controlled_by_allocation(
     board_text, day, shift, hours_remaining, summary_table_or_counts,
-    task_floor=TASK_FLOOR,
 ):
     """
     Given an allocation, compute how many of TODAY's loads it can control
@@ -2621,7 +2716,7 @@ def appointment_controlled_by_allocation(
             return 0
 
     pickers = _count("Picking")
-    taskers = _count("Tasking")
+    full_pallets_assigned = _count("Full Pallets")
     loaders = _count("Loading")
 
     try:
@@ -2674,7 +2769,10 @@ def appointment_controlled_by_allocation(
         base_loading_goal_loads = 1
     loading_target_loads = min(total_loads, base_loading_goal_loads)
 
-    pull_workers = max(0, taskers - task_floor)   # only above-floor taskers do pulls
+    # Full Pallets is now the exact, precisely-sized bucket for pull capacity —
+    # unlike the old combined "Tasking", there's no floor to subtract here anymore;
+    # Putaway/Replenishment are tracked (and floored) completely separately.
+    pull_workers = full_pallets_assigned
 
     pick_frac = min(1.0, (pickers * PICK_RATE * hrs) / picks_left) if picks_left > 0 else 1.0
     pull_frac = min(1.0, (pull_workers * PULL_RATE * hrs) / pulls_left) if pulls_left > 0 else 1.0
@@ -2825,7 +2923,7 @@ def shift_end_label(shift):
 
 def build_summary_table_from_counts(needed, assigned_counts):
     """Build the same Staffing Summary format from a manual/actual allocation."""
-    task_order = ["Unloading", "Receiving", "Picking", "Tasking", "Loading"]
+    task_order = ["Unloading", "Receiving", "Picking", "Putaway", "Replenishment", "Full Pallets", "Loading"]
     needed_series = pd.Series({t: int(needed.get(t, 0)) for t in task_order}, name="Needed")
     assigned_series = pd.Series({t: int(assigned_counts.get(t, 0)) for t in task_order}, name="Assigned")
     summary_table = pd.concat([needed_series, assigned_series], axis=1).fillna(0)
@@ -2911,12 +3009,13 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         return 0
 
     pickers = _assigned("Picking")
-    taskers = _assigned("Tasking")
+    full_pallets_assigned = _assigned("Full Pallets")
     loaders = _assigned("Loading")
 
     picks_left = pdf_number(today_totals.get("picks_left_today", 0))
     pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
-    pull_workers = max(0, taskers - TASK_FLOOR)
+    # Full Pallets is the exact pull-capable headcount now — no floor to subtract.
+    pull_workers = full_pallets_assigned
 
     pick_capacity = pickers * PICK_RATE * hrs
     pull_capacity = pull_workers * PULL_RATE * hrs
@@ -3161,7 +3260,9 @@ def analyze_board_with_groq(
     if recommended_allocation:
         label_map = {
             "Picking": "Pickers",
-            "Tasking": "Taskers",
+            "Putaway": "Putaway crew",
+            "Replenishment": "Replenishment crew",
+            "Full Pallets": "Full Pallet pullers",
             "Loading": "Loaders",
             "Unloading": "Unloaders",
             "Receiving": "Receivers",
@@ -3294,9 +3395,9 @@ STATUS DEFINITIONS:
 - Late = missed appointment. Completed = done. Loaded = done for pacing.
 - Blank = not started. Live = at dock (higher priority than Drop). Drop = drop trailer.
 - CPU = customer pickup (protect timing, they may leave). 
-- Only positions are: pickers, taskers, loaders, unloaders, receivers, lead and extra
+- Only positions are: pickers, putaway crew, replenishment crew, full pallet pullers, loaders, unloaders, receivers, lead and extra
 
-RATES: Pick 210 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Tasking 25 pallets/hr/person. Tasking protects pickers via replenishment/full pallets/putaways. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
+RATES: Pick 210 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Putaway/Replenishment/Full Pallets crew 25 pallets/hr/person each. Replenishment and Full Pallets protect picking flow; Putaway protects inbound. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
 LABOR RULES:
 - Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Extra proactively.
@@ -4093,13 +4194,15 @@ def build_pdf_report(
         return f"{assigned} assigned / need {needed_val} / gap {gap_val:+d}"
 
     pickers = _assigned_count("Picking")
-    taskers = _assigned_count("Tasking")
+    full_pallets_assigned = _assigned_count("Full Pallets")
     loaders = _assigned_count("Loading")
     unloaders = _assigned_count("Unloading")
     receivers = _assigned_count("Receiving")
 
     picking_capacity = pickers * float(hours_remaining or 0) * PICK_RATE
-    tasking_pull_capacity = max(0, taskers - TASK_FLOOR) * float(hours_remaining or 0) * PULL_RATE
+    # Full Pallets is the exact pull-capable headcount now — no floor to subtract
+    # (Putaway/Replenishment are tracked, and floored, completely separately).
+    full_pallets_pull_capacity = full_pallets_assigned * float(hours_remaining or 0) * PULL_RATE
     loading_capacity = loaders * float(hours_remaining or 0)
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
     service_risk, service_risk_reason = derive_service_risk_level(
@@ -4156,7 +4259,8 @@ def build_pdf_report(
         ["Due by now", pacing.get("due_by_now", 0), "Due now not RTL", pacing.get("due_not_RTL", 0)],
         ["Picks left", picks_left, "Pulls left", pulls_left],
         ["Picking staffing", _staffing_fact("Picking"), "Picking capacity", f"{picking_capacity:,.0f} cases"],
-        ["Tasking staffing", _staffing_fact("Tasking"), "Tasking/pull capacity", f"{tasking_pull_capacity:,.0f} pallets"],
+        ["Putaway staffing", _staffing_fact("Putaway"), "Replenishment staffing", _staffing_fact("Replenishment")],
+        ["Full Pallets staffing", _staffing_fact("Full Pallets"), "Full Pallets capacity", f"{full_pallets_pull_capacity:,.0f} pallets"],
         ["Loading staffing", _staffing_fact("Loading"), "Loading capacity", f"{loading_capacity:,.1f} loads"],
         ["Unloading staffing", _staffing_fact("Unloading"), "Receiving staffing", _staffing_fact("Receiving")],
         ["Net staffing gap", f"{net_gap:+d}", "Total present", len(present_recommendations)],
@@ -4341,6 +4445,9 @@ def compute_recommended_allocation(
         hours_remaining=hours_remaining,
         present_total=_early_present,
         min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
+        putaway_floor=needed["Putaway"],
+        replenishment_floor=needed["Replenishment"],
+        full_pallets_floor=needed["Full Pallets"],
     )
     needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
 
@@ -4396,6 +4503,9 @@ def compute_recommended_allocation(
                 present_total=len(present_recommendations),
                 already_controlled_loads=already_controlled_now,
                 min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
+                putaway_floor=needed["Putaway"],
+                replenishment_floor=needed["Replenishment"],
+                full_pallets_floor=needed["Full Pallets"],
                 max_pickers=skill_caps.get("Picking"),
                 max_loaders=skill_caps.get("Loading"),
                 max_pull_taskers=skill_caps.get("Tasking"),
@@ -4510,6 +4620,9 @@ def run_full_generation(
         hours_remaining=hours_remaining,
         present_total=_early_present,
         min_unload=effective_min_unloaders(crossroads_open, deer_creek_open, msb_open),
+        putaway_floor=needed["Putaway"],
+        replenishment_floor=needed["Replenishment"],
+        full_pallets_floor=needed["Full Pallets"],
     )
     needed["Loading"] = min(needed["Loading"], _early_optimal.get("Loading", needed["Loading"]))
     if recommended_counts and "Loading" in recommended_counts:
