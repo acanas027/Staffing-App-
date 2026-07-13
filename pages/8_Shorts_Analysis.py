@@ -39,6 +39,19 @@ STATUS_COLORS = {
     "Short": DANGER,
 }
 
+# Distinct pastel palette used to tell different repeated (multi-trailer) items
+# apart from each other. Cycled if there are more repeated items than colors.
+ITEM_COLOR_PALETTE = [
+    "#E6D9F2",  # light purple
+    "#D9F2E6",  # light green
+    "#F2E6D9",  # light peach
+    "#D9E6F2",  # light blue
+    "#F2D9E6",  # light pink
+    "#F2F2D9",  # light yellow
+    "#D9F2F2",  # light cyan
+    "#F2D9D9",  # light salmon
+]
+
 
 def inject_dashboard_style():
     """Professional styling — only applied to the results dashboard,
@@ -161,9 +174,39 @@ def get_multi_trailer_items(df):
     return set(multi[multi > 1].index.astype(str))
 
 
-def build_status_table(df, status_col="Status", repeated_items=None):
-    """Reportlab Table with Status cells colored and repeated multi-trailer Item cells light purple."""
+def build_item_color_map(repeated_items):
+    """Assign each distinct repeated item its OWN color, so two different
+    repeated-item pairs never look like the same group. Deterministic order
+    (sorted) so the same item always gets the same color across reruns."""
+    items_sorted = sorted(map(str, repeated_items))
+    return {
+        item: ITEM_COLOR_PALETTE[i % len(ITEM_COLOR_PALETTE)]
+        for i, item in enumerate(items_sorted)
+    }
+
+
+def whole_numbers(df, case_cols=(), percent_cols=()):
+    """
+    Return a copy of df with case_cols rounded to whole numbers (no decimals)
+    and percent_cols converted from a 0-1 fraction into a whole-number percent,
+    with the column renamed to '<col> %' so the unit is obvious.
+    """
+    df = df.copy()
+    for col in case_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).round(0).astype(int)
+    for col in percent_cols:
+        if col in df.columns:
+            df[col] = (pd.to_numeric(df[col], errors="coerce").fillna(0) * 100).round(0).astype(int)
+            df = df.rename(columns={col: f"{col} %"})
+    return df
+
+
+def build_status_table(df, status_col="Status", repeated_items=None, item_color_map=None):
+    """Reportlab Table with Status cells colored and repeated multi-trailer Item
+    cells colored per-item (a different color for each distinct repeated item)."""
     repeated_items = set() if repeated_items is None else set(map(str, repeated_items))
+    item_color_map = item_color_map or build_item_color_map(repeated_items)
 
     data = [list(df.columns)] + df.astype(str).values.tolist()
     table = Table(data, repeatRows=1)
@@ -175,17 +218,19 @@ def build_status_table(df, status_col="Status", repeated_items=None):
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
 
-    # Light purple highlight only on the Item cells where that item is supplied
-    # by more than one trailer in the Load Coverage page.
+    # Per-item highlight on the Item cells where that item is supplied by more
+    # than one trailer in the Load Coverage page — each distinct repeated item
+    # gets its own color so different repeated pairs are never confused.
     if repeated_items and "Item" in df.columns:
         item_col_idx = list(df.columns).index("Item")
         for i, item_value in enumerate(df["Item"].astype(str).tolist()):
-            if item_value in repeated_items:
+            item_color = item_color_map.get(item_value)
+            if item_color:
                 style_commands.append((
                     "BACKGROUND",
                     (item_col_idx, i + 1),
                     (item_col_idx, i + 1),
-                    colors.HexColor(LIGHT_PURPLE),
+                    colors.HexColor(item_color),
                 ))
 
     if status_col in df.columns:
@@ -197,7 +242,7 @@ def build_status_table(df, status_col="Status", repeated_items=None):
     table.setStyle(TableStyle(style_commands))
     return table
 
-def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None):
+def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, item_color_map=None):
     """One combined PDF: Overview, Wave Plan, and Load Coverage."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -276,7 +321,7 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None):
     story.append(Spacer(1, 10))
     story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(load_df, repeated_items=repeated_items))
+    story.append(build_status_table(load_df, repeated_items=repeated_items, item_color_map=item_color_map))
 
     doc.build(story)
     buffer.seek(0)
@@ -580,14 +625,28 @@ try:
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
 
+    # Items that repeat within the same wave should sit next to each other where
+    # possible, WITHOUT disturbing rows that have no trailer/wave assigned (those
+    # keep their original Dispatch/Trip/Status ordering, exactly as before).
+    has_wave_mask = load_export["Wave"].notna()
+    load_export["_Item_Cluster_Sort"] = 0.0
+    if has_wave_mask.any():
+        cluster_key = (
+            load_export.loc[has_wave_mask]
+            .groupby(["Wave", "Item"])["Trailer_Priority"]
+            .transform("min")
+        )
+        load_export.loc[has_wave_mask, "_Item_Cluster_Sort"] = cluster_key
+
     load_export["_Wave_Sort"] = load_export["Wave"].fillna(9999)
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "_Trailer_Priority_Sort", "Dispatch", "Trip", "Status", "Actual_short_cases"],
-        ascending=[True, True, True, True, True, True, False]
+        by=["_No_Value_Sort", "_Wave_Sort", "_Item_Cluster_Sort", "Item", "_Trailer_Priority_Sort",
+            "Dispatch", "Trip", "Status", "Actual_short_cases"],
+        ascending=[True, True, True, True, True, True, True, True, False]
     ).drop(
-        columns=["_Wave_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
+        columns=["_Wave_Sort", "_Item_Cluster_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
     ).reset_index(drop=True)
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
@@ -595,6 +654,7 @@ try:
 
     # Items that repeat in Load Coverage because they are supplied by different trailers.
     repeated_multi_trailer_items = get_multi_trailer_items(load_export)
+    item_color_map = build_item_color_map(repeated_multi_trailer_items)
 
     exception_export = exceptions.copy()
     exception_export["Fill_Rate"] = exception_export["Fill_Rate"].round(2)
@@ -602,6 +662,15 @@ try:
         exception_export = exception_export.drop(columns=["Trailer_Priority"])
     exception_export["Wave"] = exception_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
     exception_export["Trailer"] = exception_export["Trailer"].fillna("No trailer found")
+
+    # ---- WHOLE NUMBERS: every case/dispatch count as a whole number, and
+    # Fill_Rate shown as a whole-number percent (e.g. 22%, not 0.22). ----
+    CASE_COLS = ["Dispatch", "Demand_Cases", "Allocated_Cases", "Total_Item_Inventory", "Actual_short_cases"]
+    load_export = whole_numbers(load_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
+    exception_export = whole_numbers(exception_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
+    dock_plan_export = whole_numbers(dock_plan_export, case_cols=["Fix_Cases", "Earliest_Dispatch", "Demand_Served"])
+    optimized_trailers = whole_numbers(optimized_trailers, case_cols=["Fix_Cases"])
+    top4_trailers = whole_numbers(top4_trailers, case_cols=["Fix_Cases"])
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -738,7 +807,11 @@ with tab_wave:
 with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
-    st.caption("Each row is one trailer contribution to one load/item. Status: green = Full, yellow = Partial, red = Short.")
+    st.caption(
+        "Each row is one trailer contribution to one load/item. "
+        "Status: green = Full, yellow = Partial, red = Short. "
+        "Each repeated (multi-trailer) item gets its own highlight color."
+    )
 
     def highlight_load_coverage(row):
         styles = [""] * len(row)
@@ -751,9 +824,12 @@ with tab_load:
             if status_color:
                 styles[status_idx] = f"background-color: {status_color}"
 
-        if "Item" in columns and str(row["Item"]) in repeated_multi_trailer_items:
-            item_idx = columns.index("Item")
-            styles[item_idx] = f"background-color: {LIGHT_PURPLE}; font-weight: 700"
+        if "Item" in columns:
+            item_value = str(row["Item"])
+            item_color = item_color_map.get(item_value)
+            if item_color:
+                item_idx = columns.index("Item")
+                styles[item_idx] = f"background-color: {item_color}; font-weight: 700"
 
         return styles
 
@@ -780,17 +856,22 @@ def build_excel():
                 for cell in row:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        # Light purple highlight on repeated Item cells in the Load Coverage sheet.
+        # Per-item highlight on repeated Item cells in the Load Coverage sheet —
+        # each distinct repeated item gets its own fill color.
         ws = writer.sheets.get("Load Coverage")
         if ws is not None:
             headers = [cell.value for cell in ws[1]]
             if "Item" in headers:
                 item_col = headers.index("Item") + 1
-                purple_fill = PatternFill(start_color="E6D9F2", end_color="E6D9F2", fill_type="solid")
+                fills_by_item = {
+                    item: PatternFill(start_color=color.lstrip("#"), end_color=color.lstrip("#"), fill_type="solid")
+                    for item, color in item_color_map.items()
+                }
                 for row_num in range(2, ws.max_row + 1):
                     item_value = str(ws.cell(row=row_num, column=item_col).value)
-                    if item_value in repeated_multi_trailer_items:
-                        ws.cell(row=row_num, column=item_col).fill = purple_fill
+                    fill = fills_by_item.get(item_value)
+                    if fill:
+                        ws.cell(row=row_num, column=item_col).fill = fill
     buffer.seek(0)
     return buffer
 
@@ -824,7 +905,8 @@ with c2:
             ],
             wave_df=dock_plan_export,
             load_df=load_export,
-            repeated_items=repeated_multi_trailer_items
+            repeated_items=repeated_multi_trailer_items,
+            item_color_map=item_color_map
         ),
         file_name="Shorts_Analysis_Report.pdf",
         mime="application/pdf"
