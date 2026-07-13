@@ -2808,7 +2808,7 @@ def appointment_controlled_by_allocation(
 
     support_map = {
         "Picking": already_controlled + pick_supported_additional,
-        "Tasking/Pulls": already_controlled + pull_supported_additional,
+        "Full Pallets": already_controlled + pull_supported_additional,
         "Loading": already_controlled + load_supported_additional,
     }
     if remaining_candidate_loads <= 0 or loads_controlled >= total_loads:
@@ -3055,7 +3055,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
             f"Already controlled now: {already_controlled} "
             f"(Completed/Loaded: {completed_or_loaded_now}, RTL: {rtl_controlled})."
         )
-        suggested_adjustment = "Protect current pickers, taskers, and loaders until the full board is controlled."
+        suggested_adjustment = "Protect current pickers, pallet pullers, and loaders until the full board is controlled."
     elif loads_controlled > 0:
         reason = (
             f"This allocation controls {loads_controlled} of {total_loads} selected-day load(s) by shift end.{rs_note} "
@@ -3065,8 +3065,8 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         )
         if "Pick" in bottleneck:
             suggested_adjustment = "Add/protect Picking first if you want to push the cutoff later."
-        elif "Task" in bottleneck or "Pull" in bottleneck:
-            suggested_adjustment = "Add/protect Tasking above the floor if you want to push the cutoff later."
+        elif "Full Pallets" in bottleneck or "Pallet" in bottleneck:
+            suggested_adjustment = "Add/protect Full Pallets pullers if you want to push the cutoff later."
         elif "Load" in bottleneck:
             suggested_adjustment = "Add/protect Loading if you want to push the cutoff later."
         else:
@@ -3131,7 +3131,7 @@ def render_python_shift_goal_preview(preview):
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Picking capacity left", f"{preview.get('pick_capacity', 0):,} cases")
-    c5.metric("Tasking / pull capacity", f"{preview.get('pull_capacity', 0):,} pallets")
+    c5.metric("Full Pallets / pull capacity", f"{preview.get('pull_capacity', 0):,} pallets")
     c6.metric("Loading capacity left", f"{preview.get('loading_capacity', 0)} loads")
 
     st.caption(
@@ -3400,7 +3400,7 @@ STATUS DEFINITIONS:
 RATES: Pick 210 cases/hr/person. Load 1 trailer/hr/person. Unload 44 pallets/hr/person. Putaway/Replenishment/Full Pallets crew 25 pallets/hr/person each. Replenishment and Full Pallets protect picking flow; Putaway protects inbound. Mention manufacturing help only if it genuinely avoids shorts or protects outbound today.
 
 LABOR RULES:
-- Keep pickers picking. Protect loading labor. Protect Tasking when picks/pulls are high. Use Extra proactively.
+- Keep pickers picking. Protect loading labor. Protect Full Pallet pullers when picks/pulls are high. Use Extra proactively.
 - Every move: source area → destination area → reason.
 - Only move from Lead/Extra WHEN THERE IS AVAILABLE or from an area with positive surplus shown in the staffing table NOW. Never pull from an understaffed, zero, or negative-gap area. Never say "if surplus exists."
 - If no safe move exists, say so clearly.
@@ -3540,8 +3540,9 @@ def build_email_draft(
         return 0
 
     # Where the gap is: list short and over functions explicitly.
-    short_bits = [f"{t} {_gap(t)}" for t in ["Picking", "Tasking", "Loading", "Unloading", "Receiving"] if _gap(t) < 0]
-    over_bits  = [f"{t} +{_gap(t)}" for t in ["Picking", "Tasking", "Loading", "Unloading", "Receiving"] if _gap(t) > 0]
+    gap_task_list = ["Picking", "Putaway", "Replenishment", "Full Pallets", "Loading", "Unloading", "Receiving"]
+    short_bits = [f"{t} {_gap(t)}" for t in gap_task_list if _gap(t) < 0]
+    over_bits  = [f"{t} +{_gap(t)}" for t in gap_task_list if _gap(t) > 0]
     if short_bits:
         gap_where = "Short: " + ", ".join(short_bits) + ("; Over: " + ", ".join(over_bits) if over_bits else "")
     elif over_bits:
@@ -3571,7 +3572,8 @@ def build_email_draft(
     lines.append(f"Staffing: {total_present} present | net gap {net_gap:+d} | {gap_where}.")
     lines.append(
         f"Allocation: Pickers {_assigned('Picking')} (can do {pick_pct}% of loads) | "
-        f"Taskers {_assigned('Tasking')} (can do {pull_pct}% of day) | "
+        f"Full Pallet pullers {_assigned('Full Pallets')} (can do {pull_pct}% of day) | "
+        f"Putaway {_assigned('Putaway')} | Replenishment {_assigned('Replenishment')} | "
         f"Loaders {_assigned('Loading')} (can do {load_pct}% of loads) | "
         f"Unloaders {_assigned('Unloading')} | Receivers {_assigned('Receiving')}."
     )
@@ -4464,7 +4466,7 @@ def compute_recommended_allocation(
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
 
-    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+    task_order = ["Picking", "Full Pallets", "Putaway", "Replenishment", "Loading", "Unloading", "Receiving"]
     recommended_counts = {
         t: int(summary_table.loc[t, "Assigned"]) if t in summary_table.index else 0
         for t in task_order
@@ -5021,10 +5023,12 @@ if st.button("Compute Recommended Allocation"):
 reco = st.session_state.get("reco")
 
 if reco:
-    task_order = ["Picking", "Tasking", "Loading", "Unloading", "Receiving"]
+    task_order = ["Picking", "Full Pallets", "Putaway", "Replenishment", "Loading", "Unloading", "Receiving"]
     label_map = {
         "Picking": "Pickers",
-        "Tasking": "Taskers",
+        "Full Pallets": "Pallet Pullers",
+        "Putaway": "Putaway",
+        "Replenishment": "Replenishment",
         "Loading": "Loaders",
         "Unloading": "Unloaders",
         "Receiving": "Receivers",
@@ -5088,8 +5092,8 @@ if reco:
                 elif current_value < 0:
                     st.session_state[key] = 0
 
-        c1, c2, c3 = st.columns(3)
-        c4, c5, _ = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
+        c5, c6, c7, _ = st.columns(4)
 
         remaining_for_pick = present_total
         clamp_widget_value("act_pick", remaining_for_pick)
@@ -5102,20 +5106,42 @@ if reco:
             key="act_pick",
         )
 
-        remaining_for_task = max(0, present_total - int(a_pick))
-        clamp_widget_value("act_task", remaining_for_task)
-        a_task = c2.number_input(
-            "Taskers",
+        remaining_for_pull = max(0, present_total - int(a_pick))
+        clamp_widget_value("act_pull", remaining_for_pull)
+        a_pull = c2.number_input(
+            "Pallet Pullers",
             min_value=0,
-            max_value=remaining_for_task,
+            max_value=remaining_for_pull,
             step=1,
-            value=min(int(rc.get("Tasking", 0)), remaining_for_task),
-            key="act_task",
+            value=min(int(rc.get("Full Pallets", 0)), remaining_for_pull),
+            key="act_pull",
         )
 
-        remaining_for_load = max(0, present_total - int(a_pick) - int(a_task))
+        remaining_for_putaway = max(0, present_total - int(a_pick) - int(a_pull))
+        clamp_widget_value("act_putaway", remaining_for_putaway)
+        a_putaway = c3.number_input(
+            "Putaway",
+            min_value=0,
+            max_value=remaining_for_putaway,
+            step=1,
+            value=min(int(rc.get("Putaway", 0)), remaining_for_putaway),
+            key="act_putaway",
+        )
+
+        remaining_for_replen = max(0, present_total - int(a_pick) - int(a_pull) - int(a_putaway))
+        clamp_widget_value("act_replen", remaining_for_replen)
+        a_replen = c4.number_input(
+            "Replenishment",
+            min_value=0,
+            max_value=remaining_for_replen,
+            step=1,
+            value=min(int(rc.get("Replenishment", 0)), remaining_for_replen),
+            key="act_replen",
+        )
+
+        remaining_for_load = max(0, present_total - int(a_pick) - int(a_pull) - int(a_putaway) - int(a_replen))
         clamp_widget_value("act_load", remaining_for_load)
-        a_load = c3.number_input(
+        a_load = c5.number_input(
             "Loaders",
             min_value=0,
             max_value=remaining_for_load,
@@ -5124,9 +5150,9 @@ if reco:
             key="act_load",
         )
 
-        remaining_for_unload = max(0, present_total - int(a_pick) - int(a_task) - int(a_load))
+        remaining_for_unload = max(0, present_total - int(a_pick) - int(a_pull) - int(a_putaway) - int(a_replen) - int(a_load))
         clamp_widget_value("act_unload", remaining_for_unload)
-        a_unload = c4.number_input(
+        a_unload = c6.number_input(
             "Unloaders",
             min_value=0,
             max_value=remaining_for_unload,
@@ -5135,9 +5161,9 @@ if reco:
             key="act_unload",
         )
 
-        remaining_for_recv = max(0, present_total - int(a_pick) - int(a_task) - int(a_load) - int(a_unload))
+        remaining_for_recv = max(0, present_total - int(a_pick) - int(a_pull) - int(a_putaway) - int(a_replen) - int(a_load) - int(a_unload))
         clamp_widget_value("act_recv", remaining_for_recv)
-        a_recv = c5.number_input(
+        a_recv = c7.number_input(
             "Receivers",
             min_value=0,
             max_value=remaining_for_recv,
@@ -5148,7 +5174,9 @@ if reco:
 
         actual_counts = {
             "Picking": int(a_pick),
-            "Tasking": int(a_task),
+            "Full Pallets": int(a_pull),
+            "Putaway": int(a_putaway),
+            "Replenishment": int(a_replen),
             "Loading": int(a_load),
             "Unloading": int(a_unload),
             "Receiving": int(a_recv),
