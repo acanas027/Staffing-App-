@@ -202,6 +202,22 @@ def whole_numbers(df, case_cols=(), percent_cols=()):
     return df
 
 
+def prettify_headers(df, rename_map=None):
+    """
+    Display-only header cleanup: apply any specific renames first (e.g. giving
+    a column a more descriptive label), then turn every remaining underscore
+    into a space so every header reads as plain words. Returns a NEW frame —
+    the original (underscore) column names are what the charts/KPI code still
+    uses, so this is only ever applied to a separate copy meant for on-screen
+    tables, the Excel export, and the PDF.
+    """
+    df = df.copy()
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    df.columns = [str(c).replace("_", " ") for c in df.columns]
+    return df
+
+
 def build_status_table(df, status_col="Status", repeated_items=None, item_color_map=None):
     """Reportlab Table with Status cells colored and repeated multi-trailer Item
     cells colored per-item (a different color for each distinct repeated item)."""
@@ -665,12 +681,23 @@ try:
 
     # ---- WHOLE NUMBERS: every case/dispatch count as a whole number, and
     # Fill_Rate shown as a whole-number percent (e.g. 22%, not 0.22). ----
-    CASE_COLS = ["Dispatch", "Demand_Cases", "Allocated_Cases", "Total_Item_Inventory", "Actual_short_cases"]
+    CASE_COLS = ["Trip", "Dispatch", "Demand_Cases", "Allocated_Cases", "Total_Item_Inventory", "Actual_short_cases"]
     load_export = whole_numbers(load_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
     exception_export = whole_numbers(exception_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
     dock_plan_export = whole_numbers(dock_plan_export, case_cols=["Fix_Cases", "Earliest_Dispatch", "Demand_Served"])
     optimized_trailers = whole_numbers(optimized_trailers, case_cols=["Fix_Cases"])
     top4_trailers = whole_numbers(top4_trailers, case_cols=["Fix_Cases"])
+
+    # ---- DISPLAY-ONLY HEADER CLEANUP ----
+    # Separate copies for tables/exports only — the charts and KPI code above
+    # still use the original underscore column names (Fix_Cases, Loads_Impacted,
+    # etc.), so renaming happens here, on copies, after everything that does math.
+    SHORT_CASES_RENAME = {"Actual_short_cases": "Total Actual Short Cases"}
+    dock_plan_display = prettify_headers(dock_plan_export)
+    load_display = prettify_headers(load_export, rename_map=SHORT_CASES_RENAME)
+    exception_display = prettify_headers(exception_export, rename_map=SHORT_CASES_RENAME)
+    optimized_trailers_display = prettify_headers(optimized_trailers)
+    top4_trailers_display = prettify_headers(top4_trailers)
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -800,7 +827,7 @@ with tab_wave:
         "Priority: earliest dispatch on a short load first; ties broken by most cases fixed. "
         "Waves are groups of 4."
     )
-    st.dataframe(dock_plan_export, use_container_width=True, hide_index=True)
+    st.dataframe(dock_plan_display, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- LOAD COVERAGE ----------------
@@ -833,7 +860,7 @@ with tab_load:
 
         return styles
 
-    styled_load = load_export.style.apply(highlight_load_coverage, axis=1)
+    styled_load = load_display.style.apply(highlight_load_coverage, axis=1)
     st.dataframe(styled_load, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -844,11 +871,11 @@ with tab_load:
 def build_excel():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        dock_plan_export.to_excel(writer, sheet_name="Dock Plan", index=False)
-        load_export.to_excel(writer, sheet_name="Load Coverage", index=False)
-        exception_export.to_excel(writer, sheet_name="Exception Report", index=False)
-        optimized_trailers.to_excel(writer, sheet_name="Optimized Trailers", index=False)
-        top4_trailers.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
+        dock_plan_display.to_excel(writer, sheet_name="Dock Plan", index=False)
+        load_display.to_excel(writer, sheet_name="Load Coverage", index=False)
+        exception_display.to_excel(writer, sheet_name="Exception Report", index=False)
+        optimized_trailers_display.to_excel(writer, sheet_name="Optimized Trailers", index=False)
+        top4_trailers_display.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
 
         for sheet in writer.sheets:
             ws = writer.sheets[sheet]
@@ -903,8 +930,8 @@ with c2:
                 ("Trailer Priority Order — Today", fig2),
                 ("Top Still-Short Items", fig4),
             ],
-            wave_df=dock_plan_export,
-            load_df=load_export,
+            wave_df=dock_plan_display,
+            load_df=load_display,
             repeated_items=repeated_multi_trailer_items,
             item_color_map=item_color_map
         ),
