@@ -161,6 +161,47 @@ STATUS_PDF_COLORS = {
 }
 
 
+def parse_dispatch_value(v):
+    """
+    Parse a dispatch time into a comparable whole-number HHMM value.
+    The short sheet mixes two formats in the same column:
+      - text clock times like "01:00", "02:00", "17:00"  (hours 1-23)
+      - plain integers like 800, 1400, 2200
+    Both mean the same thing (an HHMM time), so normalize both to an integer:
+      "01:00" -> 100, "17:00" -> 1700, 800 -> 800, 2200 -> 2200.
+    Anything unparseable returns NaN.
+    """
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return np.nan
+
+    import datetime
+    # Real time/datetime objects from Excel
+    if isinstance(v, datetime.time):
+        return float(v.hour * 100 + v.minute)
+    if isinstance(v, datetime.datetime):
+        return float(v.hour * 100 + v.minute)
+
+    s = str(v).strip()
+    if s == "" or s.lower() in ("nan", "none"):
+        return np.nan
+
+    # "HH:MM" (or "H:MM") text time
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 and parts[1] != "" else 0
+            return float(h * 100 + m)
+        except Exception:
+            return np.nan
+
+    # Plain number already in HHMM form (e.g. 800, 1400, 2200)
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+
 def get_multi_trailer_items(df):
     """Return Item values that appear in Load Coverage from more than one real trailer."""
     if not {"Item", "Trailer"}.issubset(df.columns):
@@ -427,7 +468,8 @@ try:
         lambda v: f"{v:.5f}" if pd.notna(v) else None
     )
     short_clean["Cases"] = pd.to_numeric(short_clean["Cases"], errors="coerce")
-    short_clean["Dispatch"] = pd.to_numeric(short_clean["Dispatch"], errors="coerce")
+    # Dispatch may be text "HH:MM" or a plain HHMM integer — normalize both.
+    short_clean["Dispatch"] = short_clean["Dispatch"].map(parse_dispatch_value)
     short_clean = short_clean.dropna(subset=["Item", "Cases"])
 
     # Forward-fill Trip and Dispatch: the short sheet only writes the Trip number
