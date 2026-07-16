@@ -437,10 +437,16 @@ try:
     df["ColG"] = pd.to_numeric(df["ColG"], errors="coerce").fillna(0).astype(int)
     df["Trailer"] = df["ColE"].astype(str) + df["ColF"].astype(str) + df["ColG"].astype(str)
 
-    def _build_sku(j, k):
-        if pd.isna(j):
-            return None
-        return f"{j:.2f}" + (f"{int(k):03d}" if pd.notna(k) else "000")
+def _build_sku(j, k):
+    """Build the padded SKU string. The Sku Number column comes in as object
+    dtype because a few rows carry alphanumeric SKUs (sample items like
+    'S12156'), and the suffix column can be a string of spaces — so coerce
+    both to numbers first and skip anything that isn't a real numeric SKU."""
+    j = pd.to_numeric(j, errors="coerce")
+    if pd.isna(j):
+        return None
+    k = pd.to_numeric(k, errors="coerce")
+    return f"{j:.2f}" + (f"{int(k):03d}" if pd.notna(k) else "000")
 
     df["SKU"] = [_build_sku(j, k) for j, k in zip(df["ColJ"], df["ColK"])]
 
