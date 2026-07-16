@@ -593,10 +593,7 @@ if orders_file and tk_file:
     n_reg = order_count(regular)
     n_smp = order_count(samples)
 
-    st.caption(
-        f"{n_reg} regular orders ({len(regular)} lines) · "
-        f"{n_smp} samples orders ({len(samples)} lines)"
-    )
+    st.caption(f"{n_reg} regular orders · {n_smp} samples orders")
 
     st.divider()
 
