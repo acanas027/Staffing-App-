@@ -27,6 +27,8 @@ COL_PREV = [10, 11, 12, 13, 14, 15]
 COL_DATE2 = 24
 COL_TIME2 = 25
 
+HIDDEN_COLS = {"_OrderSortKey"}
+
 
 def _clean(v):
     if pd.isna(v):
@@ -148,17 +150,22 @@ def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     return inv.groupby("SKU").apply(summarize, include_groups=False).reset_index()
 
 
-def format_qty(qty, um):
-    qty = 0 if pd.isna(qty) else qty
+def clean_qty(qty):
+    """Numeric order quantity, as an int when it has no decimal part."""
+    if pd.isna(qty):
+        return 0
 
     try:
-        qty_str = str(int(qty)) if float(qty).is_integer() else str(qty)
+        qty = float(qty)
     except (ValueError, TypeError):
-        qty_str = str(qty)
+        return 0
 
-    um = _clean(um)
+    return int(qty) if qty.is_integer() else qty
 
-    return f"{qty_str} {um}".strip()
+
+def clean_um(um):
+    """Unit of measure, upper-cased and trimmed (CA, EA, ...)."""
+    return _clean(um).upper()
 
 
 def load_sample_orders(file) -> pd.DataFrame:
@@ -208,8 +215,9 @@ def load_sample_orders(file) -> pd.DataFrame:
             "_OrderSortKey": order_no_numeric,
             "Item No": df["Item no"].astype(str).str.strip(),
             "Item Name": item_name,
-            "Order Qty Num": qty_num,
-            "Order Qty": [format_qty(q, u) for q, u in zip(qty_num, um)],
+            # Quantity is now split: the number in one column, the unit in the next.
+            "Order Qty": [clean_qty(q) for q in qty_num],
+            "U/M": [clean_um(u) for u in um],
         }))
 
     if not frames:
@@ -219,8 +227,8 @@ def load_sample_orders(file) -> pd.DataFrame:
             "_OrderSortKey",
             "Item No",
             "Item Name",
-            "Order Qty Num",
-            "Order Qty"
+            "Order Qty",
+            "U/M",
         ])
 
     orders = pd.concat(frames, ignore_index=True)
@@ -255,10 +263,10 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
         "Item No",
         "Item Name",
         "Order Qty",
+        "U/M",
         "Current Location",
         "Previous Location",
         "Quantity Available",
-        "Order Qty Num"
     ]
 
     result = result[cols]
@@ -272,6 +280,119 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Summary / dashboard
+# ---------------------------------------------------------------------------
+
+def build_summary(result: pd.DataFrame) -> dict:
+    """
+    Headline numbers plus two breakdown tables:
+      by_um   — total quantity per unit of measure (CA, EA, ...)
+      by_date — orders / lines / CA / EA per order date (one per source sheet)
+    """
+    df = result.copy()
+    df["U/M"] = df["U/M"].astype(str).str.strip().str.upper()
+    df["Order Qty"] = pd.to_numeric(df["Order Qty"], errors="coerce").fillna(0)
+
+    um_totals = df.groupby("U/M")["Order Qty"].sum()
+
+    headline = {
+        "Order Dates": int(df["Order Date"].nunique()),
+        "Orders": int(df["Order #"].nunique()),
+        "Order Lines": int(len(df)),
+        "Distinct Items": int(df["Item No"].nunique()),
+        "Total Cases (CA)": int(um_totals.get("CA", 0)),
+        "Total Each (EA)": int(um_totals.get("EA", 0)),
+        "Zero Available": int((df["Quantity Available"] == 0).sum()),
+        "Short on Stock": int((
+            (df["Quantity Available"] > 0)
+            & (df["Quantity Available"] < df["Order Qty"])
+        ).sum()),
+    }
+
+    by_um = (
+        df.groupby("U/M")
+        .agg(Lines=("Order Qty", "size"), Total=("Order Qty", "sum"))
+        .reset_index()
+        .rename(columns={"Total": "Total Qty"})
+        .sort_values("Total Qty", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    by_date = (
+        df.groupby("Order Date")
+        .agg(Orders=("Order #", "nunique"), Lines=("Item No", "size"))
+        .reset_index()
+    )
+
+    for code, label in (("CA", "Cases (CA)"), ("EA", "Each (EA)")):
+        sub = (
+            df[df["U/M"] == code]
+            .groupby("Order Date")["Order Qty"]
+            .sum()
+            .reindex(by_date["Order Date"])
+            .fillna(0)
+        )
+        by_date[label] = sub.astype(int).values
+
+    return {"headline": headline, "by_um": by_um, "by_date": by_date}
+
+
+def _write_table(ws, start_row, title, df):
+    """Write a titled table onto a worksheet, return the next free row."""
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", start_color="2F5496")
+
+    cell = ws.cell(row=start_row, column=1, value=title)
+    cell.font = Font(bold=True, size=12)
+
+    r = start_row + 1
+
+    for c, name in enumerate(df.columns, start=1):
+        cell = ws.cell(row=r, column=c, value=str(name))
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for _, row in df.iterrows():
+        r += 1
+        for c, name in enumerate(df.columns, start=1):
+            ws.cell(row=r, column=c, value=row[name])
+
+    return r + 2
+
+
+def build_summary_sheet(wb, summary: dict):
+    ws = wb.create_sheet("Summary")
+
+    title = ws.cell(row=1, column=1, value="Order Summary")
+    title.font = Font(bold=True, size=16)
+
+    label_fill = PatternFill("solid", start_color="D9E2F3")
+
+    r = 3
+    for label, value in summary["headline"].items():
+        lc = ws.cell(row=r, column=1, value=label)
+        lc.font = Font(bold=True)
+        lc.fill = label_fill
+
+        vc = ws.cell(row=r, column=2, value=value)
+        vc.font = Font(bold=True, size=12)
+        vc.alignment = Alignment(horizontal="center")
+
+        r += 1
+
+    r += 1
+    r = _write_table(ws, r, "Totals by Unit of Measure", summary["by_um"])
+    r = _write_table(ws, r, "Breakdown by Order Date", summary["by_date"])
+
+    ws.column_dimensions["A"].width = 20
+    for col in "BCDE":
+        ws.column_dimensions[col].width = 14
+
+    return ws
+
+
 def build_excel(result: pd.DataFrame) -> io.BytesIO:
     # Force the same order again before exporting.
     result = force_order_sort(result)
@@ -280,8 +401,7 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
     ws = wb.active
     ws.title = "Order vs Inventory"
 
-    hidden_cols = {"Order Qty Num", "_OrderSortKey"}
-    display_cols = [c for c in result.columns if c not in hidden_cols]
+    display_cols = [c for c in result.columns if c not in HIDDEN_COLS]
     headers = display_cols
 
     ws.append(headers)
@@ -314,6 +434,7 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
         "Item No": 13,
         "Item Name": 40,
         "Order Qty": 10,
+        "U/M": 7,
         "Quantity Available": 16,
         "Current Location": 30,
         "Previous Location": 16
@@ -323,6 +444,9 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
         ws.column_dimensions[get_column_letter(idx)].width = widths.get(h, 14)
 
     ws.freeze_panes = "A2"
+
+    # Summary goes last, so it's the final tab in the workbook.
+    build_summary_sheet(wb, build_summary(result))
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -377,20 +501,38 @@ if orders_file and tk_file:
         st.error(f"Something went wrong while processing the files: {e}")
         st.stop()
 
-    zero_avail = (result["Quantity Available"] == 0).sum()
+    summary = build_summary(result)
+    h = summary["headline"]
 
-    short = (
-        (result["Quantity Available"] > 0)
-        & (result["Quantity Available"] < result["Order Qty Num"])
-    ).sum()
+    st.subheader("Summary")
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Orders", h["Orders"])
+    m2.metric("Order lines", h["Order Lines"])
+    m3.metric("Total Cases (CA)", f"{h['Total Cases (CA)']:,}")
+    m4.metric("Total Each (EA)", f"{h['Total Each (EA)']:,}")
 
-    m1.metric("Order lines", len(result))
-    m2.metric("Zero available", int(zero_avail))
-    m3.metric("Short on stock", int(short))
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("Distinct items", h["Distinct Items"])
+    m6.metric("Order dates", h["Order Dates"])
+    m7.metric("Zero available", h["Zero Available"])
+    m8.metric("Short on stock", h["Short on Stock"])
 
-    display_df = result.drop(columns=["Order Qty Num", "_OrderSortKey"])
+    s1, s2 = st.columns(2)
+
+    with s1:
+        st.caption("Totals by unit of measure")
+        st.dataframe(summary["by_um"], use_container_width=True, hide_index=True)
+        st.bar_chart(summary["by_um"].set_index("U/M")["Total Qty"])
+
+    with s2:
+        st.caption("Breakdown by order date")
+        st.dataframe(summary["by_date"], use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Order lines")
+
+    display_df = result.drop(columns=list(HIDDEN_COLS))
 
     n_cols = len(display_df.columns)
     row_styles = []
