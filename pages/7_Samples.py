@@ -382,6 +382,21 @@ def summary_date(result: pd.DataFrame):
     )
 
 
+def day_volume_flag(order_count: int) -> str:
+    """Light / Average / Heavy day flag based on number of orders."""
+    if order_count < 10:
+        return "Light"
+    if order_count <= 20:
+        return "Average"
+    return "Heavy"
+
+
+def expected_completion_time(order_count: int) -> str:
+    """Expected completion time at 40 minutes per order, shown in hours."""
+    hours = (order_count * 40) / 60
+    return f"{hours:.1f} hours"
+
+
 def build_summary(result: pd.DataFrame) -> dict:
     """Headline numbers for the Summary sheet, across regular + samples."""
     df = result.copy()
@@ -389,10 +404,13 @@ def build_summary(result: pd.DataFrame) -> dict:
     df["Order Qty"] = pd.to_numeric(df["Order Qty"], errors="coerce").fillna(0)
 
     um_totals = df.groupby("U/M")["Order Qty"].sum()
+    orders_count = int(df["Order #"].nunique())
 
     return {
         "Date": summary_date(df),
-        "Orders": int(df["Order #"].nunique()),
+        "Orders": orders_count,
+        "Day Flag": day_volume_flag(orders_count),
+        "Expected Completion Time": expected_completion_time(orders_count),
         "Distinct Items": int(df["Item No"].nunique()),
         "Total Cases (CA)": int(um_totals.get("CA", 0)),
         "Total Each (EA)": int(um_totals.get("EA", 0)),
@@ -456,6 +474,17 @@ def write_order_sheet(wb, title: str, df: pd.DataFrame):
     return ws
 
 
+def day_flag_fill(flag: str):
+    flag = str(flag).strip().lower()
+    if flag == "light":
+        return PatternFill("solid", start_color="C6EFCE")
+    if flag == "average":
+        return PatternFill("solid", start_color="FFF2CC")
+    if flag == "heavy":
+        return PatternFill("solid", start_color="F4CCCC")
+    return None
+
+
 def build_summary_sheet(wb, summary: dict):
     ws = wb.create_sheet("Summary")
 
@@ -474,6 +503,11 @@ def build_summary_sheet(wb, summary: dict):
 
         if isinstance(value, datetime):
             vc.number_format = "MM/DD/YYYY"
+
+        if label == "Day Flag":
+            fill = day_flag_fill(value)
+            if fill is not None:
+                vc.fill = fill
 
         r += 1
 
@@ -589,6 +623,16 @@ if orders_file and tk_file:
     m4.metric("Total Cases (CA)", f"{summary['Total Cases (CA)']:,}")
     m5.metric("Total Each (EA)", f"{summary['Total Each (EA)']:,}")
     m6.metric("Short on stock", summary["Short on Stock"])
+
+    m7, m8 = st.columns(2)
+    with m7:
+        if summary["Day Flag"] == "Light":
+            st.success(f"Day Flag: {summary['Day Flag']}")
+        elif summary["Day Flag"] == "Average":
+            st.warning(f"Day Flag: {summary['Day Flag']}")
+        else:
+            st.error(f"Day Flag: {summary['Day Flag']}")
+    m8.metric("Expected Completion Time", summary["Expected Completion Time"])
 
     n_reg = order_count(regular)
     n_smp = order_count(samples)
