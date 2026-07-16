@@ -506,6 +506,11 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 # UI
 # ---------------------------------------------------------------------------
 
+def order_count(df: pd.DataFrame) -> int:
+    """Distinct orders in a set of lines — not the number of lines."""
+    return int(df["Order #"].nunique())
+
+
 def style_zeros(df: pd.DataFrame):
     """Yellow rows for non-sample items with nothing on hand."""
     display = to_display(df)
@@ -585,14 +590,18 @@ if orders_file and tk_file:
     m5.metric("Total Each (EA)", f"{summary['Total Each (EA)']:,}")
     m6.metric("Short on stock", summary["Short on Stock"])
 
+    n_reg = order_count(regular)
+    n_smp = order_count(samples)
+
     st.caption(
-        f"{len(regular)} regular order lines · {len(samples)} samples order lines"
+        f"{n_reg} regular orders ({len(regular)} lines) · "
+        f"{n_smp} samples orders ({len(samples)} lines)"
     )
 
     st.divider()
 
     tab1, tab2 = st.tabs(
-        [f"Regular Orders ({len(regular)})", f"Samples Orders ({len(samples)})"]
+        [f"Regular Orders ({n_reg})", f"Samples Orders ({n_smp})"]
     )
 
     with tab1:
