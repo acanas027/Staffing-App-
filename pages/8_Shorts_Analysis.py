@@ -450,14 +450,18 @@ try:
 
     df["SKU"] = [_build_sku(j, k) for j, k in zip(df["ColJ"], df["ColK"])]
 
-    clean_df = df[["Trailer", "SKU", "ColL"]].copy()
-    clean_df.columns = ["Trailer", "SKU", "Quantity"]
+    clean_df = df[["Trailer", "SKU", "ColH", "ColL"]].copy()
+    clean_df.columns = ["Trailer", "SKU", "LPN", "Quantity"]
     clean_df["Quantity"] = pd.to_numeric(clean_df["Quantity"], errors="coerce")
     clean_df = clean_df.dropna(subset=["SKU", "Quantity"])
 
-    # Total transfer trailers on the lot today = unique trailers in the inventory
-    # (transfers) file, counted from valid inventory rows only.
-    total_transfer_trailers = int(clean_df["Trailer"].nunique())
+    # Total transfer trailers on the lot today = trailers in the inventory
+    # (transfers) file carrying at least MIN_LPNS_PER_TRAILER pallets (LPNs),
+    # counted from valid inventory rows only. Trailers with only a handful of
+    # pallets are not real transfer trailers, so they are not counted here.
+    MIN_LPNS_PER_TRAILER = 10
+    lpns_per_trailer = clean_df.groupby("Trailer")["LPN"].nunique()
+    total_transfer_trailers = int((lpns_per_trailer >= MIN_LPNS_PER_TRAILER).sum())
 
     # ---- LOAD SHORT SHEET ----
     short_df = pd.read_excel(short_file, header=2)
