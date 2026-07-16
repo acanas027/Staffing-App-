@@ -5,12 +5,19 @@ Upload a sample-orders workbook and a QPORT inventory report.
 The app matches every ordered item to its available quantity and locations,
 one row per item, with every stocking location and its quantity listed together.
 
+Output workbook (matches the "updated samples report" layout):
+    Regular Orders  — items with a numeric item no
+    Samples Orders  — items whose item no starts with a letter (S12150, ...)
+    Summary         — headline counts for the day
+
 Run with:
     pip install -r requirements.txt
     streamlit run app.py
 """
 
 import io
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
 from openpyxl import Workbook
@@ -19,6 +26,7 @@ from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Order vs Inventory Matcher", layout="wide")
 
+# --- QPORT inventory report: 0-based column positions -----------------------
 COL_LOC = [0, 1, 2, 3, 4, 5]
 COL_SKU_H = 7
 COL_SKU_I = 8
@@ -27,7 +35,29 @@ COL_PREV = [10, 11, 12, 13, 14, 15]
 COL_DATE2 = 24
 COL_TIME2 = 25
 
-HIDDEN_COLS = {"_OrderSortKey"}
+# Set to True to keep the quantity number and the unit (CA/EA) in two separate
+# columns. False matches the updated samples report, which shows "1 CA" in one
+# cell. Either way the CA/EA totals on the Summary sheet are unaffected.
+SPLIT_QTY_COLUMNS = False
+
+# Carried through the pipeline but never written to the order sheets.
+HIDDEN_COLS = {"_OrderSortKey", "Order Date"}
+
+HEADER_FONT = Font(bold=True, color="FFFFFF")
+HEADER_FILL = PatternFill("solid", start_color="2F5496")
+LABEL_FILL = PatternFill("solid", start_color="D9E2F3")
+ZERO_FILL = PatternFill("solid", start_color="FFF2CC")
+
+COL_WIDTHS = {
+    "Order #": 13,
+    "Item No": 13,
+    "Item Name": 40,
+    "Order Qty": 10,
+    "U/M": 7,
+    "Current Location": 30,
+    "Previous Location": 16,
+    "Quantity Available": 18,
+}
 
 
 def _clean(v):
@@ -45,6 +75,21 @@ def normalize_order_no(order_no_numeric, raw_text):
     if pd.notna(order_no_numeric):
         return str(int(order_no_numeric))
     return _clean(raw_text)
+
+
+def parse_dep_date(v):
+    """
+    'Dep dt' arrives as a packed MMDDYY integer (71626 -> 2026-07-16).
+    Returns a datetime, or None if it can't be read.
+    """
+    if pd.isna(v):
+        return None
+
+    try:
+        s = str(int(float(v))).zfill(6)
+        return datetime.strptime(s, "%m%d%y")
+    except (ValueError, TypeError):
+        return None
 
 
 def force_order_sort(df: pd.DataFrame) -> pd.DataFrame:
@@ -194,6 +239,13 @@ def load_sample_orders(file) -> pd.DataFrame:
         # so they can never disagree.
         order_no_numeric = pd.to_numeric(order_no_raw, errors="coerce")
 
+        # Real order date comes from 'Dep dt'. The sheet name is only a
+        # fallback for workbooks that don't carry the column.
+        if "Dep dt" in df.columns:
+            order_date = [parse_dep_date(v) for v in df["Dep dt"]]
+        else:
+            order_date = [sheet] * len(df)
+
         if "Order qty" in df.columns:
             qty_num = pd.to_numeric(df["Order qty"], errors="coerce").fillna(0)
         else:
@@ -210,12 +262,11 @@ def load_sample_orders(file) -> pd.DataFrame:
             item_name = pd.Series([""] * len(df), index=df.index)
 
         frames.append(pd.DataFrame({
-            "Order Date": sheet,
+            "Order Date": order_date,
             "Order #": [normalize_order_no(n, r) for n, r in zip(order_no_numeric, order_no_raw)],
             "_OrderSortKey": order_no_numeric,
             "Item No": df["Item no"].astype(str).str.strip(),
             "Item Name": item_name,
-            # Quantity is now split: the number in one column, the unit in the next.
             "Order Qty": [clean_qty(q) for q in qty_num],
             "U/M": [clean_um(u) for u in um],
         }))
@@ -236,7 +287,8 @@ def load_sample_orders(file) -> pd.DataFrame:
     return orders
 
 
-def is_sample_item(item_no: str) -> bool:
+def is_sample_item(item_no) -> bool:
+    """Sample items don't start with a digit (S12150, S56032, ...)."""
     item_no = str(item_no).strip()
     return not item_no[:1].isdigit()
 
@@ -280,115 +332,153 @@ def match_orders_to_inventory(orders: pd.DataFrame, tk_file) -> pd.DataFrame:
     return result
 
 
+def split_regular_samples(result: pd.DataFrame):
+    """Regular orders vs samples orders, each already in Order # order."""
+    mask = result["Item No"].apply(is_sample_item)
+
+    regular = result[~mask].reset_index(drop=True)
+    samples = result[mask].reset_index(drop=True)
+
+    return regular, samples
+
+
+def to_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop the internal columns and shape the quantity for output."""
+    out = df.drop(columns=[c for c in HIDDEN_COLS if c in df.columns]).copy()
+
+    out["Quantity Available"] = (
+        pd.to_numeric(out["Quantity Available"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+    if not SPLIT_QTY_COLUMNS:
+        out["Order Qty"] = [
+            f"{q} {u}".strip() for q, u in zip(out["Order Qty"], out["U/M"])
+        ]
+        out = out.drop(columns=["U/M"])
+
+    return out
+
+
 # ---------------------------------------------------------------------------
-# Summary / dashboard
+# Summary
 # ---------------------------------------------------------------------------
 
+def summary_date(result: pd.DataFrame):
+    """The single order date, or a joined list if the file spans several."""
+    dates = [d for d in result["Order Date"].dropna().unique()]
+
+    if not dates:
+        return ""
+
+    if len(dates) == 1:
+        d = dates[0]
+        return d if isinstance(d, str) else pd.Timestamp(d).to_pydatetime()
+
+    return ", ".join(
+        d if isinstance(d, str) else pd.Timestamp(d).strftime("%m/%d/%y")
+        for d in sorted(dates, key=str)
+    )
+
+
 def build_summary(result: pd.DataFrame) -> dict:
-    """
-    Headline numbers plus two breakdown tables:
-      by_um   — total quantity per unit of measure (CA, EA, ...)
-      by_date — orders / lines / CA / EA per order date (one per source sheet)
-    """
+    """Headline numbers for the Summary sheet, across regular + samples."""
     df = result.copy()
     df["U/M"] = df["U/M"].astype(str).str.strip().str.upper()
     df["Order Qty"] = pd.to_numeric(df["Order Qty"], errors="coerce").fillna(0)
 
     um_totals = df.groupby("U/M")["Order Qty"].sum()
 
-    headline = {
-        "Order Dates": int(df["Order Date"].nunique()),
+    return {
+        "Date": summary_date(df),
         "Orders": int(df["Order #"].nunique()),
-        "Order Lines": int(len(df)),
         "Distinct Items": int(df["Item No"].nunique()),
         "Total Cases (CA)": int(um_totals.get("CA", 0)),
         "Total Each (EA)": int(um_totals.get("EA", 0)),
-        "Zero Available": int((df["Quantity Available"] == 0).sum()),
         "Short on Stock": int((
             (df["Quantity Available"] > 0)
             & (df["Quantity Available"] < df["Order Qty"])
         ).sum()),
     }
 
-    by_um = (
-        df.groupby("U/M")
-        .agg(Lines=("Order Qty", "size"), Total=("Order Qty", "sum"))
-        .reset_index()
-        .rename(columns={"Total": "Total Qty"})
-        .sort_values("Total Qty", ascending=False)
-        .reset_index(drop=True)
-    )
 
-    by_date = (
-        df.groupby("Order Date")
-        .agg(Orders=("Order #", "nunique"), Lines=("Item No", "size"))
-        .reset_index()
-    )
+# ---------------------------------------------------------------------------
+# Excel
+# ---------------------------------------------------------------------------
 
-    for code, label in (("CA", "Cases (CA)"), ("EA", "Each (EA)")):
-        sub = (
-            df[df["U/M"] == code]
-            .groupby("Order Date")["Order Qty"]
-            .sum()
-            .reindex(by_date["Order Date"])
-            .fillna(0)
-        )
-        by_date[label] = sub.astype(int).values
+def write_order_sheet(wb, title: str, df: pd.DataFrame):
+    """
+    One sheet of order lines, with a blank separator row between orders.
+    Lines with nothing on hand are highlighted (samples excluded — they're
+    never expected to be in inventory).
+    """
+    ws = wb.create_sheet(title)
 
-    return {"headline": headline, "by_um": by_um, "by_date": by_date}
+    display = to_display(df)
+    headers = list(display.columns)
 
+    ws.append(headers)
 
-def _write_table(ws, start_row, title, df):
-    """Write a titled table onto a worksheet, return the next free row."""
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill("solid", start_color="2F5496")
+    for cell in ws[1]:
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    cell = ws.cell(row=start_row, column=1, value=title)
-    cell.font = Font(bold=True, size=12)
+    prev_order = None
+    r = 1
 
-    r = start_row + 1
+    for i, row in display.iterrows():
+        order_no = row["Order #"]
 
-    for c, name in enumerate(df.columns, start=1):
-        cell = ws.cell(row=r, column=c, value=str(name))
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
+        # Blank row whenever a new order starts (never before the first one).
+        if prev_order is not None and order_no != prev_order:
+            r += 1
+            ws.append([])
 
-    for _, row in df.iterrows():
         r += 1
-        for c, name in enumerate(df.columns, start=1):
-            ws.cell(row=r, column=c, value=row[name])
+        ws.append([row[c] for c in headers])
 
-    return r + 2
+        qty_avail = df.iloc[i]["Quantity Available"]
+        item_no = df.iloc[i]["Item No"]
+
+        if qty_avail == 0 and not is_sample_item(item_no):
+            for c in range(1, len(headers) + 1):
+                ws.cell(row=r, column=c).fill = ZERO_FILL
+
+        prev_order = order_no
+
+    for idx, h in enumerate(headers, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = COL_WIDTHS.get(h, 14)
+
+    ws.freeze_panes = "A2"
+
+    return ws
 
 
 def build_summary_sheet(wb, summary: dict):
     ws = wb.create_sheet("Summary")
 
-    title = ws.cell(row=1, column=1, value="Order Summary")
-    title.font = Font(bold=True, size=16)
-
-    label_fill = PatternFill("solid", start_color="D9E2F3")
+    title = ws.cell(row=1, column=1, value="Samples Orders Summary")
+    title.font = Font(bold=True, size=14)
 
     r = 3
-    for label, value in summary["headline"].items():
+    for label, value in summary.items():
         lc = ws.cell(row=r, column=1, value=label)
         lc.font = Font(bold=True)
-        lc.fill = label_fill
+        lc.fill = LABEL_FILL
 
         vc = ws.cell(row=r, column=2, value=value)
         vc.font = Font(bold=True, size=12)
         vc.alignment = Alignment(horizontal="center")
 
+        if isinstance(value, datetime):
+            vc.number_format = "MM/DD/YYYY"
+
         r += 1
 
-    r += 1
-    r = _write_table(ws, r, "Totals by Unit of Measure", summary["by_um"])
-    r = _write_table(ws, r, "Breakdown by Order Date", summary["by_date"])
-
     ws.column_dimensions["A"].width = 20
-    for col in "BCDE":
-        ws.column_dimensions[col].width = 14
+    ws.column_dimensions["B"].width = 14
 
     return ws
 
@@ -396,56 +486,13 @@ def build_summary_sheet(wb, summary: dict):
 def build_excel(result: pd.DataFrame) -> io.BytesIO:
     # Force the same order again before exporting.
     result = force_order_sort(result)
+    regular, samples = split_regular_samples(result)
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Order vs Inventory"
+    wb.remove(wb.active)  # drop the default sheet; we name our own
 
-    display_cols = [c for c in result.columns if c not in HIDDEN_COLS]
-    headers = display_cols
-
-    ws.append(headers)
-
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", start_color="2F5496")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    zero_fill = PatternFill("solid", start_color="FFF2CC")
-
-    for _, row in result.iterrows():
-        ws.append([row[c] for c in display_cols])
-
-    for offset, (_, row) in enumerate(result.iterrows()):
-        r = offset + 2
-
-        item_no = row["Item No"]
-        qty_avail = row["Quantity Available"]
-
-        is_sample = str(item_no)[:1].isalpha() if item_no is not None else False
-
-        if qty_avail == 0 and not is_sample:
-            for c in range(1, len(headers) + 1):
-                ws.cell(row=r, column=c).fill = zero_fill
-
-    widths = {
-        "Order Date": 11,
-        "Order #": 13,
-        "Item No": 13,
-        "Item Name": 40,
-        "Order Qty": 10,
-        "U/M": 7,
-        "Quantity Available": 16,
-        "Current Location": 30,
-        "Previous Location": 16
-    }
-
-    for idx, h in enumerate(headers, start=1):
-        ws.column_dimensions[get_column_letter(idx)].width = widths.get(h, 14)
-
-    ws.freeze_panes = "A2"
-
-    # Summary goes last, so it's the final tab in the workbook.
+    write_order_sheet(wb, "Regular Orders", regular)
+    write_order_sheet(wb, "Samples Orders", samples)
     build_summary_sheet(wb, build_summary(result))
 
     buf = io.BytesIO()
@@ -458,6 +505,21 @@ def build_excel(result: pd.DataFrame) -> io.BytesIO:
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+
+def style_zeros(df: pd.DataFrame):
+    """Yellow rows for non-sample items with nothing on hand."""
+    display = to_display(df)
+    n_cols = len(display.columns)
+
+    styles = []
+    for _, row in df.iterrows():
+        if row["Quantity Available"] == 0 and not is_sample_item(row["Item No"]):
+            styles.append(["background-color: #fff2cc"] * n_cols)
+        else:
+            styles.append([""] * n_cols)
+
+    return display.style.apply(lambda row: styles[row.name], axis=1)
+
 
 st.title("Sample Orders to Inventory Matcher")
 
@@ -496,72 +558,55 @@ if orders_file and tk_file:
                 st.stop()
 
             result = match_orders_to_inventory(orders, tk_file)
+            regular, samples = split_regular_samples(result)
 
     except Exception as e:
         st.error(f"Something went wrong while processing the files: {e}")
         st.stop()
 
     summary = build_summary(result)
-    h = summary["headline"]
+
+    date_val = summary["Date"]
+    date_txt = (
+        date_val.strftime("%m/%d/%Y")
+        if isinstance(date_val, datetime)
+        else str(date_val)
+    )
 
     st.subheader("Summary")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Orders", h["Orders"])
-    m2.metric("Order lines", h["Order Lines"])
-    m3.metric("Total Cases (CA)", f"{h['Total Cases (CA)']:,}")
-    m4.metric("Total Each (EA)", f"{h['Total Each (EA)']:,}")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Date", date_txt)
+    m2.metric("Orders", summary["Orders"])
+    m3.metric("Distinct items", summary["Distinct Items"])
 
-    m5, m6, m7, m8 = st.columns(4)
-    m5.metric("Distinct items", h["Distinct Items"])
-    m6.metric("Order dates", h["Order Dates"])
-    m7.metric("Zero available", h["Zero Available"])
-    m8.metric("Short on stock", h["Short on Stock"])
+    m4, m5, m6 = st.columns(3)
+    m4.metric("Total Cases (CA)", f"{summary['Total Cases (CA)']:,}")
+    m5.metric("Total Each (EA)", f"{summary['Total Each (EA)']:,}")
+    m6.metric("Short on stock", summary["Short on Stock"])
 
-    s1, s2 = st.columns(2)
-
-    with s1:
-        st.caption("Totals by unit of measure")
-        st.dataframe(summary["by_um"], use_container_width=True, hide_index=True)
-        st.bar_chart(summary["by_um"].set_index("U/M")["Total Qty"])
-
-    with s2:
-        st.caption("Breakdown by order date")
-        st.dataframe(summary["by_date"], use_container_width=True, hide_index=True)
+    st.caption(
+        f"{len(regular)} regular order lines · {len(samples)} samples order lines"
+    )
 
     st.divider()
-    st.subheader("Order lines")
 
-    display_df = result.drop(columns=list(HIDDEN_COLS))
-
-    n_cols = len(display_df.columns)
-    row_styles = []
-
-    for _, row in result.iterrows():
-        is_sample = str(row["Item No"])[:1].isalpha()
-
-        if row["Quantity Available"] == 0 and not is_sample:
-            style = ["background-color: #fff2cc"] * n_cols
-        else:
-            style = [""] * n_cols
-
-        row_styles.append(style)
-
-    def highlight(row):
-        return row_styles[row.name]
-
-    st.dataframe(
-        display_df.style.apply(highlight, axis=1),
-        use_container_width=True,
-        height=500
+    tab1, tab2 = st.tabs(
+        [f"Regular Orders ({len(regular)})", f"Samples Orders ({len(samples)})"]
     )
+
+    with tab1:
+        st.dataframe(style_zeros(regular), use_container_width=True, height=420)
+
+    with tab2:
+        st.dataframe(style_zeros(samples), use_container_width=True, height=420)
 
     excel_buf = build_excel(result)
 
     st.download_button(
         "Download results as Excel",
         data=excel_buf,
-        file_name="order_vs_inventory.xlsx",
+        file_name="updated_samples_report.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
