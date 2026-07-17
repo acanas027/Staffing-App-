@@ -319,7 +319,10 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, ite
     value_row = [k[1] for k in kpis]
     sub_row = [k[2] for k in kpis]
 
-    kpi_table = Table([header_row, value_row, sub_row], colWidths=[88] * len(kpis))
+    # Column width caps at 88pt but shrinks to fit the page when there are more
+    # KPI columns, so adding a KPI never pushes the table past the margins.
+    kpi_col_width = min(88, doc.width / max(len(kpis), 1))
+    kpi_table = Table([header_row, value_row, sub_row], colWidths=[kpi_col_width] * len(kpis))
     kpi_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -973,6 +976,7 @@ with c2:
                 ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
                 ("Cases Short", f"{total_cases_short:,}", "on short sheet"),
                 ("Still Short", f"{total_shortage:,}", "no trailer covers"),
+                ("Loads Affected", f"{total_loads:,}", "have short product today"),
                 ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads"),
                 ("Move Next", move_next_value, move_next_sub),
             ],
