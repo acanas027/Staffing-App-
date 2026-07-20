@@ -1101,9 +1101,10 @@ with tab_overview:
     combined_priority_chart_df["Priority_Label"] = (
         "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
     )
-    priority_category_order = list(
-        reversed(combined_priority_chart_df["Display_Trailer"].tolist())
-    )
+    # Plotly Express already handles the visual direction for horizontal bars.
+    # Pass priority order directly so #1 renders at the top; manually reversing
+    # this list causes the last priority to appear first.
+    priority_category_order = combined_priority_chart_df["Display_Trailer"].tolist()
     fig2 = px.bar(
         combined_priority_chart_df,
         x="Fix_Cases", y="Display_Trailer", orientation="h",
