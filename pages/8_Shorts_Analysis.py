@@ -458,13 +458,18 @@ try:
     clean_df["Quantity"] = pd.to_numeric(clean_df["Quantity"], errors="coerce")
     clean_df = clean_df.dropna(subset=["SKU", "Quantity"])
 
-    # Total transfer trailers on the lot today = trailers in the inventory
-    # (transfers) file carrying at least MIN_LPNS_PER_TRAILER pallets (LPNs),
-    # counted from valid inventory rows only. Trailers with only a handful of
-    # pallets are not real transfer trailers, so they are not counted here.
+    # A "real" transfer trailer carries at least MIN_LPNS_PER_TRAILER pallets
+    # (distinct LPNs). Apply this filter to the inventory ITSELF so it flows
+    # through everywhere — allocation, dock plan, load coverage, and both KPIs.
+    # This keeps the invariant: Trailers Involved can never exceed Transfer
+    # Trailers, because the involved trailers are always a subset of this pool.
     MIN_LPNS_PER_TRAILER = 10
     lpns_per_trailer = clean_df.groupby("Trailer")["LPN"].nunique()
-    total_transfer_trailers = int((lpns_per_trailer >= MIN_LPNS_PER_TRAILER).sum())
+    valid_trailers = lpns_per_trailer[lpns_per_trailer >= MIN_LPNS_PER_TRAILER].index
+    clean_df = clean_df[clean_df["Trailer"].isin(valid_trailers)].copy()
+
+    # Total transfer trailers on the lot today = trailers left after the filter.
+    total_transfer_trailers = int(clean_df["Trailer"].nunique())
 
     # ---- LOAD SHORT SHEET ----
     short_df = pd.read_excel(short_file, header=2)
