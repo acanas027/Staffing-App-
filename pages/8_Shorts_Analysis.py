@@ -345,7 +345,7 @@ def build_full_pdf(
         ]))
         return table
 
-    overview_page.append(Paragraph("On-Lot Transfer KPIs", styles["Heading2"]))
+    overview_page.append(Paragraph("Topeka Transfer KPIs", styles["Heading2"]))
     overview_page.append(pdf_kpi_table(onlot_kpis))
     overview_page.append(Spacer(1, 8))
     overview_page.append(Paragraph("Over-the-Road Transfer KPIs", styles["Heading2"]))
@@ -380,7 +380,7 @@ def build_full_pdf(
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Wave Plan", styles["Title"]))
     story.append(Spacer(1, 10))
-    story.append(Paragraph("On-Lot Dock Plan — Trailers in Priority Order", styles["Heading2"]))
+    story.append(Paragraph("Topeka Transfer Plan — Trailers in Priority Order", styles["Heading2"]))
     story.append(Spacer(1, 6))
     story.append(build_status_table(onlot_wave_df))
     story.append(Spacer(1, 14))
@@ -409,7 +409,7 @@ def build_full_pdf(
 # HEADER
 # =====================================================================
 st.title("Shorts analysis Tool")
-st.write("Turn on-lot and over-the-road transfer inventory plus outbound order shorts into prioritized unloading plans.")
+st.write("Turn Topeka and over-the-road transfer inventory plus outbound order shorts into prioritized unloading plans.")
 
 # =====================================================================
 # INPUTS
@@ -417,7 +417,7 @@ st.write("Turn on-lot and over-the-road transfer inventory plus outbound order s
 st.markdown("### Data Inputs")
 col1, col2, col3 = st.columns(3)
 with col1:
-    book_file = st.file_uploader("On-lot trailer inventory", type=["xlsx"])
+    book_file = st.file_uploader("Topeka transfer inventory", type=["xlsx"])
 with col2:
     otr_file = st.file_uploader("Over-the-road transfers", type=["xlsx"])
 with col3:
@@ -949,6 +949,11 @@ try:
     otr_optimized_trailers_display = prettify_headers(otr_optimized_trailers)
     onlot_top4_trailers_display = prettify_headers(onlot_top4_trailers)
     otr_top4_trailers_display = prettify_headers(otr_top4_trailers)
+    for display_df in (load_display, exception_display):
+        if "Supply Source" in display_df.columns:
+            display_df["Supply Source"] = display_df["Supply Source"].replace(
+                {"On-Lot": "Topeka Transfers"}
+            )
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -961,7 +966,7 @@ inject_dashboard_style()
 
 st.markdown("""
 <div class="dock-header">
-    <h1>Dock Optimization Results</h1>
+    <h1>Shorts Analysis Result</h1>
     <p>Prioritized unloading plan generated from your uploaded files.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -997,20 +1002,20 @@ def move_next_values(dock_plan, source_label):
 
 
 onlot_move_next_value, onlot_move_next_sub = move_next_values(
-    onlot_dock_plan_export, "on-lot"
+    onlot_dock_plan_export, "Topeka"
 )
 otr_move_next_value, otr_move_next_sub = move_next_values(
     otr_dock_plan_export, "OTR"
 )
 
-st.markdown("### On-Lot Transfer KPIs")
+st.markdown("### Topeka Transfer KPIs")
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "on the lot today")
+    kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "from Topeka")
 with k2:
     kpi_card("Trailers Involved", f"{onlot_trailers_involved}", "fix shortages")
 with k3:
-    kpi_card("Cases Solved", f"{onlot_cases_solved:,}", "from on-lot inventory")
+    kpi_card("Cases Solved", f"{onlot_cases_solved:,}", "from Topeka inventory")
 with k4:
     kpi_card("Waves", f"{onlot_waves}", "4 trailers per wave")
 with k5:
@@ -1023,7 +1028,7 @@ with k1:
 with k2:
     kpi_card("OTR Trailers Involved", f"{otr_trailers_involved}", "fix remaining shortages")
 with k3:
-    kpi_card("Cases Solved", f"{otr_cases_solved:,}", "after on-lot allocation")
+    kpi_card("Cases Solved", f"{otr_cases_solved:,}", "after Topeka allocation")
 with k4:
     kpi_card("Waves", f"{otr_waves}", "4 trailers per wave")
 with k5:
@@ -1031,7 +1036,7 @@ with k5:
 
 coverage_summary_display = pd.DataFrame({
     "Metric": [
-        "Total Cases Short", "Solved by On-Lot", "Solved by OTR",
+        "Total Cases Short", "Solved by Topeka", "Solved by OTR",
         "Combined Cases Solved", "Still Short", "Loads Fully Met"
     ],
     "Result": [
@@ -1052,68 +1057,70 @@ with tab_overview:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        cases_fixed_chart_df = pd.concat([
-            onlot_dock_plan_export.assign(Supply_Source="On-Lot"),
-            otr_dock_plan_export.assign(Supply_Source="OTR"),
-        ], ignore_index=True)
-        cases_fixed_chart_df = cases_fixed_chart_df.sort_values(
+        topeka_cases_chart_df = onlot_dock_plan_export.sort_values(
             "Fix_Cases", ascending=False
-        ).head(30)
-        cases_fixed_chart_df["Display_Trailer"] = (
-            cases_fixed_chart_df["Supply_Source"]
-            + " | "
-            + cases_fixed_chart_df["Trailer"].astype(str)
-        )
-        cases_fixed_chart_df["Wave"] = cases_fixed_chart_df["Wave"].astype(str)
+        ).head(15).copy()
+        topeka_cases_chart_df["Wave"] = topeka_cases_chart_df["Wave"].astype(str)
         fig1 = px.bar(
-            cases_fixed_chart_df,
-            x="Display_Trailer", y="Fix_Cases", color="Supply_Source",
-            title="Cases Fixed by Trailer — On-Lot + OTR", text="Fix_Cases",
-            color_discrete_map={"On-Lot": STEEL, "OTR": AMBER},
-            hover_data={"Wave": True, "Trailer": True, "Display_Trailer": False}
+            topeka_cases_chart_df,
+            x="Trailer", y="Fix_Cases", color="Wave",
+            title="Cases Fixed by Trailer — Topeka Transfers", text="Fix_Cases",
+            color_discrete_sequence=[STEEL, AMBER]
         )
         st.plotly_chart(style_fig(fig1), use_container_width=True)
-        st.caption("One combined view; color identifies the inventory source.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c2:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        combined_priority_chart_df = pd.concat([
-            onlot_trailer_priority.assign(Supply_Source="On-Lot", Source_Order=0),
-            otr_trailer_priority.assign(Supply_Source="OTR", Source_Order=1),
-        ], ignore_index=True)
-        combined_priority_chart_df = combined_priority_chart_df.sort_values(
-            ["Source_Order", "Trailer_Priority"]
+        otr_cases_chart_df = otr_dock_plan_export.sort_values(
+            "Fix_Cases", ascending=False
+        ).head(15).copy()
+        otr_cases_chart_df["Wave"] = otr_cases_chart_df["Wave"].astype(str)
+        fig5 = px.bar(
+            otr_cases_chart_df,
+            x="Trailer", y="Fix_Cases", color="Wave",
+            title="Cases Fixed by Trailer — Over-the-Road", text="Fix_Cases",
+            color_discrete_sequence=[STEEL, AMBER]
         )
-        combined_priority_chart_df["Display_Trailer"] = (
-            combined_priority_chart_df["Supply_Source"]
-            + " | "
-            + combined_priority_chart_df["Trailer"].astype(str)
-        )
-        combined_priority_chart_df["Priority_Label"] = (
-            "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
-        )
-        priority_category_order = list(
-            reversed(combined_priority_chart_df["Display_Trailer"].tolist())
-        )
-        fig2 = px.bar(
-            combined_priority_chart_df,
-            x="Fix_Cases", y="Display_Trailer", orientation="h",
-            color="Supply_Source", text="Priority_Label",
-            title="Priority Order — On-Lot + OTR",
-            category_orders={"Display_Trailer": priority_category_order},
-            color_discrete_map={"On-Lot": STEEL, "OTR": AMBER},
-            hover_data={
-                "Wave": True, "Trailer_Priority": True, "Trailer": True,
-                "Display_Trailer": False, "Source_Order": False,
-            }
-        )
-        st.plotly_chart(style_fig(fig2), use_container_width=True)
-        st.caption(
-            "Both sources appear in one graph; priority numbers and waves remain "
-            "calculated independently within each source."
-        )
+        st.plotly_chart(style_fig(fig5), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    combined_priority_chart_df = pd.concat([
+        onlot_trailer_priority.assign(Supply_Source="Topeka Transfers", Source_Order=0),
+        otr_trailer_priority.assign(Supply_Source="OTR", Source_Order=1),
+    ], ignore_index=True)
+    combined_priority_chart_df = combined_priority_chart_df.sort_values(
+        ["Trailer_Priority", "Source_Order"]
+    )
+    combined_priority_chart_df["Display_Trailer"] = (
+        combined_priority_chart_df["Supply_Source"]
+        + " | "
+        + combined_priority_chart_df["Trailer"].astype(str)
+    )
+    combined_priority_chart_df["Priority_Label"] = (
+        "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
+    )
+    priority_category_order = combined_priority_chart_df["Display_Trailer"].tolist()
+    fig2 = px.bar(
+        combined_priority_chart_df,
+        x="Fix_Cases", y="Display_Trailer", orientation="h",
+        color="Supply_Source", text="Priority_Label",
+        title="Priority Order — Topeka Transfers + OTR",
+        category_orders={"Display_Trailer": priority_category_order},
+        color_discrete_map={"Topeka Transfers": STEEL, "OTR": AMBER},
+        hover_data={
+            "Wave": True, "Trailer_Priority": True, "Trailer": True,
+            "Display_Trailer": False, "Source_Order": False,
+        }
+    )
+    fig2.update_yaxes(autorange="reversed")
+    st.plotly_chart(style_fig(fig2), use_container_width=True)
+    st.caption(
+        "Both sources appear in one graph; priority #1 is shown at the top. "
+        "Priority numbers and waves remain calculated independently within each source."
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
     c3, c4 = st.columns(2)
     with c3:
@@ -1139,15 +1146,18 @@ with tab_overview:
             text="Actual_short_cases", color_discrete_sequence=[DANGER]
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
-        st.caption("Items still short after on-lot and OTR inventory are allocated.")
+        st.caption("Items still short after Topeka and OTR inventory are allocated.")
         st.markdown('</div>', unsafe_allow_html=True)
+
+    # The two cases-fixed graphs and the single priority graph above intentionally
+    # replace the previous combined cases-fixed view.
 
 # ---------------- WAVE PLAN ----------------
 with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("On-Lot Dock Plan — Trailers in Priority Order")
+    st.subheader("Topeka Transfer Plan — Trailers in Priority Order")
     st.caption(
-        "Every on-lot trailer here carries cases that fix a shortage. "
+        "Every Topeka transfer trailer here carries cases that fix a shortage. "
         "Priority: earliest dispatch on a short load first; ties broken by most cases fixed. "
         "Waves are groups of 4."
     )
@@ -1168,7 +1178,7 @@ with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
     st.caption(
-        "This is the only combined analysis: on-lot inventory is allocated first, "
+        "This is the only combined analysis: Topeka inventory is allocated first, "
         "then eligible OTR inventory covers the remaining shortage. "
         "Each row is one source/trailer contribution to one load/item. "
         "Status: green = Full, yellow = Partial, red = Short. "
@@ -1176,7 +1186,7 @@ with tab_load:
     )
     st.dataframe(coverage_summary_display, use_container_width=True, hide_index=True)
     st.caption(
-        "Combined Cases Solved equals On-Lot Cases Solved plus OTR Cases Solved; "
+        "Combined Cases Solved equals Topeka Cases Solved plus OTR Cases Solved; "
         "Still Short is calculated once per short line, never once per trailer row."
     )
 
@@ -1212,13 +1222,13 @@ def build_excel():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         coverage_summary_display.to_excel(writer, sheet_name="Coverage Summary", index=False)
-        onlot_dock_plan_display.to_excel(writer, sheet_name="On-Lot Wave Plan", index=False)
+        onlot_dock_plan_display.to_excel(writer, sheet_name="Topeka Wave Plan", index=False)
         otr_dock_plan_display.to_excel(writer, sheet_name="OTR Wave Plan", index=False)
         load_display.to_excel(writer, sheet_name="Load Coverage", index=False)
         exception_display.to_excel(writer, sheet_name="Exception Report", index=False)
-        onlot_optimized_trailers_display.to_excel(writer, sheet_name="On-Lot Optimized", index=False)
+        onlot_optimized_trailers_display.to_excel(writer, sheet_name="Topeka Optimized", index=False)
         otr_optimized_trailers_display.to_excel(writer, sheet_name="OTR Optimized", index=False)
-        onlot_top4_trailers_display.to_excel(writer, sheet_name="On-Lot Top 4", index=False)
+        onlot_top4_trailers_display.to_excel(writer, sheet_name="Topeka Top 4", index=False)
         otr_top4_trailers_display.to_excel(writer, sheet_name="OTR Top 4", index=False)
 
         for sheet in writer.sheets:
@@ -1259,23 +1269,24 @@ with c2:
     st.download_button(
         label="Download Full Report (.pdf)",
         data=build_full_pdf(
-            "Shorts Analysis Results",
+            "Shorts Analysis Result",
             onlot_kpis=[
                 ("Transfer Trailers", str(total_transfer_trailers), "on lot"),
                 ("Involved", str(onlot_trailers_involved), "fix shortages"),
-                ("Cases Solved", f"{onlot_cases_solved:,}", "on-lot supply"),
+                ("Cases Solved", f"{onlot_cases_solved:,}", "Topeka supply"),
                 ("Waves", str(onlot_waves), "4 per wave"),
                 ("Move Next", onlot_move_next_value, onlot_move_next_sub),
             ],
             otr_kpis=[
                 ("Eligible OTR", str(total_otr_trailers), "66/99; in transit > 0"),
                 ("Involved", str(otr_trailers_involved), "fix shortages"),
-                ("Cases Solved", f"{otr_cases_solved:,}", "after on-lot"),
+                ("Cases Solved", f"{otr_cases_solved:,}", "after Topeka"),
                 ("Waves", str(otr_waves), "4 per wave"),
                 ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
-                ("Combined Cases Fixed", fig1),
+                ("Topeka Cases Fixed", fig1),
+                ("OTR Cases Fixed", fig5),
                 ("Combined Priority Order", fig2),
                 ("Combined Load Status", fig3),
                 ("Top Still-Short Items", fig4),
