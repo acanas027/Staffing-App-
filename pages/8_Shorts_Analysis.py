@@ -299,8 +299,11 @@ def build_status_table(df, status_col="Status", repeated_items=None, item_color_
     table.setStyle(TableStyle(style_commands))
     return table
 
-def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, item_color_map=None):
-    """One combined PDF: Overview, Wave Plan, and Load Coverage."""
+def build_full_pdf(
+    title, onlot_kpis, otr_kpis, figs, onlot_wave_df, otr_wave_df,
+    coverage_summary_df, load_df, repeated_items=None, item_color_map=None
+):
+    """One PDF with separate source KPIs/waves and combined Load Coverage."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=portrait(letter),
@@ -315,33 +318,39 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, ite
     overview_page.append(Paragraph(f"{title} — Overview", styles["Title"]))
     overview_page.append(Spacer(1, 14))
 
-    header_row = [k[0] for k in kpis]
-    value_row = [k[1] for k in kpis]
-    sub_row = [k[2] for k in kpis]
+    def pdf_kpi_table(kpis):
+        header_row = [k[0] for k in kpis]
+        value_row = [k[1] for k in kpis]
+        sub_row = [k[2] for k in kpis]
+        kpi_col_width = min(105, doc.width / max(len(kpis), 1))
+        table = Table(
+            [header_row, value_row, sub_row],
+            colWidths=[kpi_col_width] * len(kpis)
+        )
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 1), (-1, 1), 14),
+            ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(NAVY)),
+            ("FONTSIZE", (0, 2), (-1, 2), 7),
+            ("TEXTCOLOR", (0, 2), (-1, 2), colors.HexColor(TEXT_MUTED)),
+            ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor(NAVY)),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return table
 
-    # Column width caps at 88pt but shrinks to fit the page when there are more
-    # KPI columns, so adding a KPI never pushes the table past the margins.
-    kpi_col_width = min(88, doc.width / max(len(kpis), 1))
-    kpi_table = Table([header_row, value_row, sub_row], colWidths=[kpi_col_width] * len(kpis))
-    kpi_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NAVY)),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 1), (-1, 1), 15),
-        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(NAVY)),
-        ("FONTSIZE", (0, 2), (-1, 2), 7),
-        ("TEXTCOLOR", (0, 2), (-1, 2), colors.HexColor(TEXT_MUTED)),
-        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor(NAVY)),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDDDDD")),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-
-    overview_page.append(kpi_table)
-    overview_page.append(Spacer(1, 18))
+    overview_page.append(Paragraph("On-Lot Transfer KPIs", styles["Heading2"]))
+    overview_page.append(pdf_kpi_table(onlot_kpis))
+    overview_page.append(Spacer(1, 8))
+    overview_page.append(Paragraph("Over-the-Road Transfer KPIs", styles["Heading2"]))
+    overview_page.append(pdf_kpi_table(otr_kpis))
+    overview_page.append(Spacer(1, 12))
 
     images = []
     for chart_title, fig in figs:
@@ -367,18 +376,26 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, ite
 
     story.append(KeepInFrame(doc.width, doc.height, overview_page, mode="shrink"))
 
-    # ---- Page 2: Wave Plan ----
+    # ---- Page 2: Separate Wave Plans ----
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Wave Plan", styles["Title"]))
     story.append(Spacer(1, 10))
-    story.append(Paragraph("Dock Plan — Trailers in Priority Order", styles["Heading2"]))
+    story.append(Paragraph("On-Lot Dock Plan — Trailers in Priority Order", styles["Heading2"]))
     story.append(Spacer(1, 6))
-    story.append(build_status_table(wave_df))
+    story.append(build_status_table(onlot_wave_df))
+    story.append(Spacer(1, 14))
+    story.append(Paragraph("OTR Transfer Plan — Status 66/99 with In Transit > 0", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    story.append(build_status_table(otr_wave_df))
 
     # ---- Page 3: Load Coverage ----
     story.append(PageBreak())
     story.append(Paragraph(f"{title} — Load Coverage", styles["Title"]))
     story.append(Spacer(1, 10))
+    story.append(Paragraph("Combined Coverage Summary", styles["Heading2"]))
+    story.append(Spacer(1, 6))
+    story.append(build_status_table(coverage_summary_df))
+    story.append(Spacer(1, 12))
     story.append(Paragraph("Load Coverage — Demand vs. Available by Trip", styles["Heading2"]))
     story.append(Spacer(1, 6))
     story.append(build_status_table(load_df, repeated_items=repeated_items, item_color_map=item_color_map))
@@ -392,16 +409,18 @@ def build_full_pdf(title, kpis, figs, wave_df, load_df, repeated_items=None, ite
 # HEADER
 # =====================================================================
 st.title("Shorts analysis Tool")
-st.write("Turn incoming trailer inventory and outbound order shorts into a prioritized unloading plan.")
+st.write("Turn on-lot and over-the-road transfer inventory plus outbound order shorts into prioritized unloading plans.")
 
 # =====================================================================
 # INPUTS
 # =====================================================================
 st.markdown("### Data Inputs")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
-    book_file = st.file_uploader("Trailer inventory", type=["xlsx"])
+    book_file = st.file_uploader("On-lot trailer inventory", type=["xlsx"])
 with col2:
+    otr_file = st.file_uploader("Over-the-road transfers", type=["xlsx"])
+with col3:
     short_file = st.file_uploader("Order shorts (short sheet.xlsx)", type=["xlsx"])
 
 run = st.button("Run Analysis")
@@ -411,8 +430,8 @@ st.caption(
 )
 st.divider()
 
-if not book_file or not short_file:
-    st.info("Upload both files above, then click **Run Analysis**.")
+if not book_file or not otr_file or not short_file:
+    st.info("Upload all three files above, then click **Run Analysis**.")
     st.stop()
 
 if not run:
@@ -471,6 +490,81 @@ try:
     # Total transfer trailers on the lot today = trailers left after the filter.
     total_transfer_trailers = int(clean_df["Trailer"].nunique())
 
+    # ---- LOAD OVER-THE-ROAD TRANSFERS ----
+    # Only status 66 and 99 are eligible for review, but the ONLY usable supply
+    # is In Transit Quantity. If In Transit Quantity is zero, that row/load is
+    # not useful and must not contribute to coverage, KPIs, priorities, or waves.
+    otr_raw = pd.read_excel(otr_file)
+    otr_raw.columns = [str(c).strip() for c in otr_raw.columns]
+
+    required_otr_columns = {"Item", "Order Status", "In Transit Quantity"}
+    missing_otr_columns = sorted(required_otr_columns.difference(otr_raw.columns))
+    if missing_otr_columns:
+        raise ValueError(
+            "OTR transfer report is missing required column(s): "
+            + ", ".join(missing_otr_columns)
+        )
+
+    otr_raw["Order Status"] = pd.to_numeric(otr_raw["Order Status"], errors="coerce")
+    otr_raw = otr_raw[otr_raw["Order Status"].isin([66, 99])].copy()
+
+    otr_raw["Item"] = pd.to_numeric(otr_raw["Item"], errors="coerce").map(
+        lambda v: f"{v:.5f}" if pd.notna(v) else None
+    )
+    otr_raw["In Transit Quantity"] = pd.to_numeric(
+        otr_raw["In Transit Quantity"], errors="coerce"
+    ).fillna(0)
+    otr_raw["Quantity"] = otr_raw["In Transit Quantity"]
+
+    # The supplied export merges the last two headers into
+    # "Delivery External Tracking Number". Some versions split them into
+    # "Delivery" and "External Tracking Number", so accept either layout.
+    trailer_id_candidates = [
+        "Delivery",
+        "Delivery External Tracking Number",
+        "External Tracking Number",
+    ]
+    trailer_id_column = next(
+        (c for c in trailer_id_candidates if c in otr_raw.columns), None
+    )
+    if trailer_id_column is None and "Order" not in otr_raw.columns:
+        raise ValueError(
+            "OTR transfer report needs Delivery, Delivery External Tracking Number, "
+            "External Tracking Number, or Order to identify each trailer."
+        )
+
+    if trailer_id_column is not None:
+        otr_raw["Trailer"] = otr_raw[trailer_id_column].astype(str).str.strip()
+    else:
+        otr_raw["Trailer"] = ""
+
+    if (
+        "External Tracking Number" in otr_raw.columns
+        and trailer_id_column != "External Tracking Number"
+    ):
+        external = otr_raw["External Tracking Number"].astype(str).str.strip()
+        blank_delivery = otr_raw["Trailer"].isin(["", "nan", "None"])
+        otr_raw.loc[blank_delivery, "Trailer"] = external[blank_delivery]
+    if "Order" in otr_raw.columns:
+        order_fallback = "Order " + otr_raw["Order"].astype(str).str.strip()
+        blank_delivery = otr_raw["Trailer"].isin(["", "nan", "None"])
+        otr_raw.loc[blank_delivery, "Trailer"] = order_fallback[blank_delivery]
+
+    otr_clean = otr_raw[["Trailer", "Item", "Quantity", "Order Status"]].copy()
+    otr_clean = otr_clean.dropna(subset=["Item", "Quantity"])
+    otr_clean = otr_clean[
+        (~otr_clean["Trailer"].isin(["", "nan", "None"]))
+        & (otr_clean["Quantity"] > 0)
+    ].copy()
+
+    # Preserve each eligible trailer's status for the separate OTR KPI and wave plan.
+    otr_status = (
+        otr_clean.groupby("Trailer")["Order Status"]
+        .apply(lambda s: "/".join(str(int(v)) for v in sorted(set(s.dropna()))))
+        .rename("Transfer_Status")
+    )
+    total_otr_trailers = int(otr_clean["Trailer"].nunique())
+
     # ---- LOAD SHORT SHEET ----
     short_df = pd.read_excel(short_file, header=2)
     short_df = short_df.iloc[:, :11].reset_index(drop=True)
@@ -511,27 +605,43 @@ try:
     # is demanded. Every trailer that carries a short item therefore fixes cases.
     # =====================================================================
 
-    # Trailer stock per item (sum across all LPNs of the same SKU on that trailer).
-    trailer_stock = clean_df.groupby(["SKU", "Trailer"], as_index=False)["Quantity"].sum()
-    trailer_stock = trailer_stock.rename(columns={"SKU": "Item"})
+    # Build two explicitly separated supply pools.  On-lot inventory is applied
+    # first because it is physically actionable now; OTR inventory then covers
+    # the remaining shortage.  Source labels remain attached to every case so
+    # the two KPI/wave plans stay separate while Load Coverage is combined.
+    onlot_stock = clean_df.groupby(["SKU", "Trailer"], as_index=False)["Quantity"].sum()
+    onlot_stock = onlot_stock.rename(columns={"SKU": "Item"})
+    onlot_stock["Supply_Source"] = "On-Lot"
 
-    # Total inventory available per item, across all trailers.
-    item_totals = clean_df.groupby("SKU", as_index=False)["Quantity"].sum()
-    item_totals = item_totals.rename(columns={"SKU": "Item", "Quantity": "Total_Item_Inventory"})
+    otr_stock = otr_clean.groupby(["Item", "Trailer"], as_index=False)["Quantity"].sum()
+    otr_stock["Supply_Source"] = "OTR"
+
+    trailer_stock = pd.concat([onlot_stock, otr_stock], ignore_index=True)
+    trailer_stock["Source_Order"] = trailer_stock["Supply_Source"].map(
+        {"On-Lot": 0, "OTR": 1}
+    )
+
+    # Total inventory available per item across both independent supply pools.
+    item_totals = trailer_stock.groupby("Item", as_index=False)["Quantity"].sum()
+    item_totals = item_totals.rename(columns={"Quantity": "Total_Item_Inventory"})
 
     fix_rows = []           # trailer-level: how many cases each trailer contributes to each short line
     load_rows = []          # short-line level: demand, allocated, short, status, primary source trailer
     load_detail_rows = []   # load coverage detail: one row per trailer contribution to a short line
 
     # Process each item independently. Within an item, fill the earliest-dispatch
-    # short line first, drawing from trailers (largest stock first as the source order).
+    # short line first. Draw from on-lot trailers first, then OTR; within each
+    # source use the largest available stock first.
     demand_sorted = short_clean.sort_values(["Item", "Dispatch", "Trip"])
 
     for item, demand_group in demand_sorted.groupby("Item"):
         stock = trailer_stock[trailer_stock["Item"] == item].sort_values(
-            "Quantity", ascending=False
+            ["Source_Order", "Quantity"], ascending=[True, False]
         )
-        stock_remaining = dict(zip(stock["Trailer"], stock["Quantity"].astype(float)))
+        stock_remaining = {
+            (row["Supply_Source"], row["Trailer"]): float(row["Quantity"])
+            for _, row in stock.iterrows()
+        }
         total_item_inv = float(item_totals.loc[item_totals["Item"] == item, "Total_Item_Inventory"].sum())
 
         for _, line in demand_group.iterrows():
@@ -539,26 +649,29 @@ try:
             allocated_total = 0.0
             sources = []
 
-            for trailer in list(stock_remaining.keys()):
+            for source_key in list(stock_remaining.keys()):
                 if need - allocated_total <= 0:
                     break
-                avail = stock_remaining[trailer]
+                supply_source, trailer = source_key
+                avail = stock_remaining[source_key]
                 if avail <= 0:
                     continue
                 take = min(avail, need - allocated_total)
                 if take <= 0:
                     continue
-                stock_remaining[trailer] = avail - take
+                stock_remaining[source_key] = avail - take
                 allocated_total += take
 
                 # Keep the exact trailer contribution so Load Coverage can show
                 # one separate row per trailer used on the same load/item.
                 sources.append({
+                    "Supply_Source": supply_source,
                     "Trailer": trailer,
                     "Allocated_Cases": take,
                 })
 
                 fix_rows.append({
+                    "Supply_Source": supply_source,
                     "Trailer": trailer,
                     "Item": item,
                     "Trip": line["Trip"],
@@ -570,6 +683,13 @@ try:
             fill_rate = (allocated_total / need) if need > 0 else 0.0
             status = "Full" if fill_rate >= 1 else ("Partial" if fill_rate > 0 else "Short")
             primary_trailer = sources[0]["Trailer"] if sources else np.nan
+            primary_source = sources[0]["Supply_Source"] if sources else "None"
+            onlot_allocated = sum(
+                s["Allocated_Cases"] for s in sources if s["Supply_Source"] == "On-Lot"
+            )
+            otr_allocated = sum(
+                s["Allocated_Cases"] for s in sources if s["Supply_Source"] == "OTR"
+            )
 
             # Line-level summary, kept for KPIs, charts, and load status math.
             load_rows.append({
@@ -578,10 +698,13 @@ try:
                 "Dispatch": line["Dispatch"],
                 "Demand_Cases": need,
                 "Allocated_Cases": allocated_total,
+                "On_Lot_Allocated_Cases": onlot_allocated,
+                "OTR_Allocated_Cases": otr_allocated,
                 "Total_Item_Inventory": total_item_inv,
                 "Fill_Rate": fill_rate,
                 "Status": status,
                 "Actual_short_cases": short_qty,
+                "Supply_Source": primary_source,
                 "Trailer": primary_trailer,
             })
 
@@ -591,11 +714,13 @@ try:
             if sources:
                 for source in sources:
                     load_detail_rows.append({
+                        "Supply_Source": source["Supply_Source"],
                         "Item": item,
                         "Trip": line["Trip"],
                         "Dispatch": line["Dispatch"],
                         "Demand_Cases": need,
                         "Allocated_Cases": source["Allocated_Cases"],
+                        "Combined_Allocated_Cases": allocated_total,
                         "Total_Item_Inventory": total_item_inv,
                         "Fill_Rate": fill_rate,
                         "Status": status,
@@ -604,11 +729,13 @@ try:
                     })
             else:
                 load_detail_rows.append({
+                    "Supply_Source": "None",
                     "Item": item,
                     "Trip": line["Trip"],
                     "Dispatch": line["Dispatch"],
                     "Demand_Cases": need,
                     "Allocated_Cases": 0.0,
+                    "Combined_Allocated_Cases": 0.0,
                     "Total_Item_Inventory": total_item_inv,
                     "Fill_Rate": fill_rate,
                     "Status": status,
@@ -616,45 +743,55 @@ try:
                     "Trailer": np.nan,
                 })
 
-    fix_df = pd.DataFrame(fix_rows)
-    alloc = pd.DataFrame(load_rows)
-    alloc_detail = pd.DataFrame(load_detail_rows)
+    fix_df = pd.DataFrame(fix_rows, columns=[
+        "Supply_Source", "Trailer", "Item", "Trip", "Dispatch", "Allocated_Cases"
+    ])
+    alloc = pd.DataFrame(load_rows, columns=[
+        "Item", "Trip", "Dispatch", "Demand_Cases", "Allocated_Cases",
+        "On_Lot_Allocated_Cases", "OTR_Allocated_Cases", "Total_Item_Inventory",
+        "Fill_Rate", "Status", "Actual_short_cases", "Supply_Source", "Trailer"
+    ])
+    alloc_detail = pd.DataFrame(load_detail_rows, columns=[
+        "Supply_Source", "Item", "Trip", "Dispatch", "Demand_Cases",
+        "Allocated_Cases", "Combined_Allocated_Cases", "Total_Item_Inventory",
+        "Fill_Rate", "Status", "Actual_short_cases", "Trailer"
+    ])
+
+    if alloc.empty:
+        raise ValueError("No valid shortage lines were found in the short sheet.")
 
     _matched = int(alloc["Allocated_Cases"].gt(0).sum())
     st.success(f"{_matched} of {len(alloc)} short lines can be covered (fully or partially) from trailer inventory.")
 
     # =====================================================================
-    # TRAILER-LEVEL SUMMARY (Fix_Cases = cases actually pulled to cover shortages)
+    # SOURCE-SPECIFIC TRAILER SUMMARIES AND WAVE PLANS
+    # The same ranking logic is run independently for On-Lot and OTR so their
+    # KPIs, priorities, and wave numbers never mix.
     # =====================================================================
-    if fix_df.empty:
-        optimized_trailers = pd.DataFrame(columns=["Trailer", "Fix_Cases", "Loads_Impacted"])
-    else:
-        optimized_trailers = fix_df.groupby("Trailer").agg(
+    def build_source_priority(source_name, status_lookup=None):
+        source_fix = fix_df[fix_df["Supply_Source"] == source_name].copy()
+        summary_columns = ["Trailer", "Fix_Cases", "Loads_Impacted"]
+        priority_columns = summary_columns + [
+            "Earliest_Dispatch", "Demand_Served", "SKU_Count",
+            "Trailer_Priority", "Wave"
+        ]
+
+        if source_fix.empty:
+            return (
+                pd.DataFrame(columns=summary_columns),
+                pd.DataFrame(columns=priority_columns),
+            )
+
+        optimized = source_fix.groupby("Trailer").agg(
             Fix_Cases=("Allocated_Cases", "sum"),
             Loads_Impacted=("Trip", "nunique"),
-        ).reset_index().sort_values(by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False])
+        ).reset_index()
 
-    top4_trailers = optimized_trailers.head(4).copy()
-    if not top4_trailers.empty:
-        top4_trailers.insert(0, "Rank", range(1, len(top4_trailers) + 1))
+        earliest_dispatch = source_fix.groupby("Trailer")["Dispatch"].min().rename("Earliest_Dispatch")
+        demand_served = source_fix.groupby("Trailer")["Allocated_Cases"].sum().rename("Demand_Served")
+        sku_count = source_fix.groupby("Trailer")["Item"].nunique().rename("SKU_Count")
 
-    # =====================================================================
-    # TRAILER PRIORITY / WAVE PLAN
-    # Earliest dispatch of any short line the trailer helps drives priority.
-    # Ties broken by most Fix_Cases, then most loads impacted.
-    # =====================================================================
-    if fix_df.empty:
-        trailer_priority = pd.DataFrame(columns=[
-            "Trailer", "Fix_Cases", "Loads_Impacted", "Earliest_Dispatch", "Demand_Served", "SKU_Count"
-        ])
-    else:
-        # Earliest dispatch among the short lines each trailer actually helps.
-        earliest_dispatch = fix_df.groupby("Trailer")["Dispatch"].min().rename("Earliest_Dispatch")
-        # Total cases the trailer contributes and how many distinct SKUs it helps.
-        demand_served = fix_df.groupby("Trailer")["Allocated_Cases"].sum().rename("Demand_Served")
-        sku_count = fix_df.groupby("Trailer")["Item"].nunique().rename("SKU_Count")
-
-        trailer_priority = optimized_trailers.merge(
+        priority = optimized.merge(
             earliest_dispatch, on="Trailer", how="left"
         ).merge(
             demand_served, on="Trailer", how="left"
@@ -662,41 +799,71 @@ try:
             sku_count, on="Trailer", how="left"
         )
 
-    if not trailer_priority.empty:
-        trailer_priority = trailer_priority.sort_values(
+        if status_lookup is not None:
+            priority = priority.merge(status_lookup, on="Trailer", how="left")
+
+        priority = priority.sort_values(
             by=["Earliest_Dispatch", "Fix_Cases", "Loads_Impacted"],
             ascending=[True, False, False]
         ).reset_index(drop=True)
+        priority["Trailer_Priority"] = range(1, len(priority) + 1)
+        priority["Wave"] = ((priority["Trailer_Priority"] - 1) // 4) + 1
 
-        # Waves = groups of 4 in priority order.
-        trailer_priority["Trailer_Priority"] = range(1, len(trailer_priority) + 1)
-        trailer_priority["Wave"] = ((trailer_priority["Trailer_Priority"] - 1) // 4) + 1
-    else:
-        trailer_priority["Trailer_Priority"] = []
-        trailer_priority["Wave"] = []
+        optimized = optimized.sort_values(
+            by=["Fix_Cases", "Loads_Impacted"], ascending=[False, False]
+        ).reset_index(drop=True)
+        return optimized, priority
+
+    onlot_optimized_trailers, onlot_trailer_priority = build_source_priority("On-Lot")
+    otr_optimized_trailers, otr_trailer_priority = build_source_priority(
+        "OTR", otr_status.reset_index()
+    )
+
+    onlot_top4_trailers = onlot_optimized_trailers.head(4).copy()
+    otr_top4_trailers = otr_optimized_trailers.head(4).copy()
+    for top_df in (onlot_top4_trailers, otr_top4_trailers):
+        if not top_df.empty:
+            top_df.insert(0, "Rank", range(1, len(top_df) + 1))
 
     # =====================================================================
     # LOAD COVERAGE TABLE
     # =====================================================================
+    onlot_priority_lookup = onlot_trailer_priority[
+        ["Trailer", "Wave", "Trailer_Priority"]
+    ].copy()
+    onlot_priority_lookup["Supply_Source"] = "On-Lot"
+    otr_priority_lookup = otr_trailer_priority[
+        ["Trailer", "Wave", "Trailer_Priority"]
+    ].copy()
+    otr_priority_lookup["Supply_Source"] = "OTR"
+    priority_lookup = pd.concat(
+        [onlot_priority_lookup, otr_priority_lookup], ignore_index=True
+    )
+
     load_trailer = alloc_detail.merge(
-        trailer_priority[["Trailer", "Wave", "Trailer_Priority"]],
-        on="Trailer",
+        priority_lookup,
+        on=["Supply_Source", "Trailer"],
         how="left"
     )
 
     load_trailer = load_trailer[
-        ["Wave", "Trailer_Priority", "Trailer", "Trip", "Item", "Dispatch", "Demand_Cases",
-         "Allocated_Cases", "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
+        ["Supply_Source", "Wave", "Trailer_Priority", "Trailer", "Trip", "Item",
+         "Dispatch", "Demand_Cases", "Allocated_Cases", "Combined_Allocated_Cases",
+         "Total_Item_Inventory", "Fill_Rate", "Status", "Actual_short_cases"]
     ]
 
     exceptions = load_trailer[load_trailer["Status"] != "Full"].copy()
     exceptions = exceptions.sort_values(by=["Dispatch", "Status"])
 
     # ---- FORMAT EXPORTS ----
-    # Wave Plan: every trailer here fixes shortage cases (Fix_Cases > 0 by construction).
-    dock_plan_export = trailer_priority.drop(columns=["Trailer_Priority"]).copy()
-    cols = ["Wave"] + [c for c in dock_plan_export.columns if c != "Wave"]
-    dock_plan_export = dock_plan_export[cols].reset_index(drop=True)
+    # Two independent Wave Plans. Every listed trailer fixes shortage cases.
+    def format_dock_plan(priority_df):
+        result = priority_df.drop(columns=["Trailer_Priority"]).copy()
+        cols = ["Wave"] + [c for c in result.columns if c != "Wave"]
+        return result[cols].reset_index(drop=True)
+
+    onlot_dock_plan_export = format_dock_plan(onlot_trailer_priority)
+    otr_dock_plan_export = format_dock_plan(otr_trailer_priority)
 
     load_export = load_trailer.copy()
     load_export["Fill_Rate"] = load_export["Fill_Rate"].round(2)
@@ -709,20 +876,23 @@ try:
     if has_wave_mask.any():
         cluster_key = (
             load_export.loc[has_wave_mask]
-            .groupby(["Wave", "Item"])["Trailer_Priority"]
+            .groupby(["Supply_Source", "Wave", "Item"])["Trailer_Priority"]
             .transform("min")
         )
         load_export.loc[has_wave_mask, "_Item_Cluster_Sort"] = cluster_key
 
+    load_export["_Source_Sort"] = load_export["Supply_Source"].map(
+        {"On-Lot": 0, "OTR": 1, "None": 2}
+    ).fillna(3)
     load_export["_Wave_Sort"] = load_export["Wave"].fillna(9999)
     load_export["_Trailer_Priority_Sort"] = load_export["Trailer_Priority"].fillna(9999)
     load_export["_No_Value_Sort"] = load_export["Wave"].isna().astype(int)
     load_export = load_export.sort_values(
-        by=["_No_Value_Sort", "_Wave_Sort", "_Item_Cluster_Sort", "Item", "_Trailer_Priority_Sort",
+        by=["_No_Value_Sort", "_Source_Sort", "_Wave_Sort", "_Item_Cluster_Sort", "Item", "_Trailer_Priority_Sort",
             "Dispatch", "Trip", "Status", "Actual_short_cases"],
-        ascending=[True, True, True, True, True, True, True, True, False]
+        ascending=[True, True, True, True, True, True, True, True, True, False]
     ).drop(
-        columns=["_Wave_Sort", "_Item_Cluster_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
+        columns=["_Source_Sort", "_Wave_Sort", "_Item_Cluster_Sort", "_Trailer_Priority_Sort", "_No_Value_Sort", "Trailer_Priority"]
     ).reset_index(drop=True)
 
     load_export["Wave"] = load_export["Wave"].apply(lambda x: "" if pd.isna(x) else int(x))
@@ -741,23 +911,42 @@ try:
 
     # ---- WHOLE NUMBERS: every case/dispatch count as a whole number, and
     # Fill_Rate shown as a whole-number percent (e.g. 22%, not 0.22). ----
-    CASE_COLS = ["Trip", "Dispatch", "Demand_Cases", "Allocated_Cases", "Total_Item_Inventory", "Actual_short_cases"]
+    CASE_COLS = [
+        "Trip", "Dispatch", "Demand_Cases", "Allocated_Cases",
+        "Combined_Allocated_Cases", "Total_Item_Inventory", "Actual_short_cases"
+    ]
     load_export = whole_numbers(load_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
     exception_export = whole_numbers(exception_export, case_cols=CASE_COLS, percent_cols=["Fill_Rate"])
-    dock_plan_export = whole_numbers(dock_plan_export, case_cols=["Fix_Cases", "Earliest_Dispatch", "Demand_Served"])
-    optimized_trailers = whole_numbers(optimized_trailers, case_cols=["Fix_Cases"])
-    top4_trailers = whole_numbers(top4_trailers, case_cols=["Fix_Cases"])
+    onlot_dock_plan_export = whole_numbers(
+        onlot_dock_plan_export,
+        case_cols=["Fix_Cases", "Earliest_Dispatch", "Demand_Served"]
+    )
+    otr_dock_plan_export = whole_numbers(
+        otr_dock_plan_export,
+        case_cols=["Fix_Cases", "Earliest_Dispatch", "Demand_Served"]
+    )
+    onlot_optimized_trailers = whole_numbers(onlot_optimized_trailers, case_cols=["Fix_Cases"])
+    otr_optimized_trailers = whole_numbers(otr_optimized_trailers, case_cols=["Fix_Cases"])
+    onlot_top4_trailers = whole_numbers(onlot_top4_trailers, case_cols=["Fix_Cases"])
+    otr_top4_trailers = whole_numbers(otr_top4_trailers, case_cols=["Fix_Cases"])
 
     # ---- DISPLAY-ONLY HEADER CLEANUP ----
     # Separate copies for tables/exports only — the charts and KPI code above
     # still use the original underscore column names (Fix_Cases, Loads_Impacted,
     # etc.), so renaming happens here, on copies, after everything that does math.
-    SHORT_CASES_RENAME = {"Actual_short_cases": "Total Actual Short Cases"}
-    dock_plan_display = prettify_headers(dock_plan_export)
+    SHORT_CASES_RENAME = {
+        "Actual_short_cases": "Still Short After Both Sources",
+        "Allocated_Cases": "This Trailer Solves",
+        "Combined_Allocated_Cases": "Combined Cases Solved",
+    }
+    onlot_dock_plan_display = prettify_headers(onlot_dock_plan_export)
+    otr_dock_plan_display = prettify_headers(otr_dock_plan_export)
     load_display = prettify_headers(load_export, rename_map=SHORT_CASES_RENAME)
     exception_display = prettify_headers(exception_export, rename_map=SHORT_CASES_RENAME)
-    optimized_trailers_display = prettify_headers(optimized_trailers)
-    top4_trailers_display = prettify_headers(top4_trailers)
+    onlot_optimized_trailers_display = prettify_headers(onlot_optimized_trailers)
+    otr_optimized_trailers_display = prettify_headers(otr_optimized_trailers)
+    onlot_top4_trailers_display = prettify_headers(onlot_top4_trailers)
+    otr_top4_trailers_display = prettify_headers(otr_top4_trailers)
 
 except Exception as e:
     st.error(f"Something went wrong while processing the files: {e}")
@@ -776,42 +965,78 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =====================================================================
-# KPI ROW
+# TWO SEPARATE KPI TABLES
 # =====================================================================
-total_trailers = dock_plan_export["Trailer"].nunique()
 total_cases_short = int(alloc["Demand_Cases"].sum())
+onlot_cases_solved = int(alloc["On_Lot_Allocated_Cases"].sum())
+otr_cases_solved = int(alloc["OTR_Allocated_Cases"].sum())
+combined_cases_solved = int(alloc["Allocated_Cases"].sum())
 total_shortage = int(alloc["Actual_short_cases"].clip(lower=0).sum())
-total_waves = int(dock_plan_export["Wave"].nunique()) if not dock_plan_export.empty else 0
+
+onlot_trailers_involved = int(onlot_dock_plan_export["Trailer"].nunique())
+otr_trailers_involved = int(otr_dock_plan_export["Trailer"].nunique())
+onlot_waves = int(onlot_dock_plan_export["Wave"].nunique()) if not onlot_dock_plan_export.empty else 0
+otr_waves = int(otr_dock_plan_export["Wave"].nunique()) if not otr_dock_plan_export.empty else 0
 
 trip_status = alloc.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
 
-# Move Next should match the first trailer in the Wave Plan.
-if not dock_plan_export.empty:
-    next_trailer = dock_plan_export.iloc[0]
-    move_next_value = f"Trailer {next_trailer['Trailer']}"
-    move_next_sub = (
-        f"fixes {int(next_trailer['Fix_Cases']):,} cases "
-        f"across {int(next_trailer['Loads_Impacted'])} load(s)"
-    )
-else:
-    move_next_value = "—"
-    move_next_sub = "no shortages to fix"
 
-k1, k2, k3, k4, k5, k6 = st.columns(6)
+def move_next_values(dock_plan, source_label):
+    if dock_plan.empty:
+        return "—", f"no {source_label} trailer fixes a remaining shortage"
+    next_trailer = dock_plan.iloc[0]
+    return (
+        f"Trailer {next_trailer['Trailer']}",
+        f"fixes {int(next_trailer['Fix_Cases']):,} cases "
+        f"across {int(next_trailer['Loads_Impacted'])} load(s)",
+    )
+
+
+onlot_move_next_value, onlot_move_next_sub = move_next_values(
+    onlot_dock_plan_export, "on-lot"
+)
+otr_move_next_value, otr_move_next_sub = move_next_values(
+    otr_dock_plan_export, "OTR"
+)
+
+st.markdown("### On-Lot Transfer KPIs")
+k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "on the lot today")
 with k2:
-    kpi_card("Trailers Involved", f"{total_trailers}", f"fix shortages, across {total_waves} waves")
+    kpi_card("Trailers Involved", f"{onlot_trailers_involved}", "fix shortages")
 with k3:
-    kpi_card("Total Cases Short", f"{total_cases_short:,}", "cases on the short sheet")
+    kpi_card("Cases Solved", f"{onlot_cases_solved:,}", "from on-lot inventory")
 with k4:
-    kpi_card("Still Short", f"{total_shortage:,}", "cases no trailer can cover")
+    kpi_card("Waves", f"{onlot_waves}", "4 trailers per wave")
 with k5:
-    kpi_card("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads coverable in full")
-with k6:
-    kpi_card("Move Next", move_next_value, move_next_sub)
+    kpi_card("Move Next", onlot_move_next_value, onlot_move_next_sub)
+
+st.markdown("### Over-the-Road Transfer KPIs")
+k1, k2, k3, k4, k5 = st.columns(5)
+with k1:
+    kpi_card("Eligible OTR Trailers", f"{total_otr_trailers}", "status 66/99; in transit > 0")
+with k2:
+    kpi_card("OTR Trailers Involved", f"{otr_trailers_involved}", "fix remaining shortages")
+with k3:
+    kpi_card("Cases Solved", f"{otr_cases_solved:,}", "after on-lot allocation")
+with k4:
+    kpi_card("Waves", f"{otr_waves}", "4 trailers per wave")
+with k5:
+    kpi_card("Move Next", otr_move_next_value, otr_move_next_sub)
+
+coverage_summary_display = pd.DataFrame({
+    "Metric": [
+        "Total Cases Short", "Solved by On-Lot", "Solved by OTR",
+        "Combined Cases Solved", "Still Short", "Loads Fully Met"
+    ],
+    "Result": [
+        total_cases_short, onlot_cases_solved, otr_cases_solved,
+        combined_cases_solved, total_shortage, f"{loads_met_count} of {total_loads}"
+    ],
+})
 
 # =====================================================================
 # TABS
@@ -825,11 +1050,11 @@ with tab_overview:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        top_trailers_chart_df = dock_plan_export.head(15).copy()
-        top_trailers_chart_df["Wave"] = top_trailers_chart_df["Wave"].astype(str)
+        onlot_top_chart_df = onlot_dock_plan_export.head(15).copy()
+        onlot_top_chart_df["Wave"] = onlot_top_chart_df["Wave"].astype(str)
         fig1 = px.bar(
-            top_trailers_chart_df, x="Trailer", y="Fix_Cases",
-            color="Wave", title="Top Trailers by Shortage Cases Fixed", text="Fix_Cases",
+            onlot_top_chart_df, x="Trailer", y="Fix_Cases",
+            color="Wave", title="On-Lot Trailers — Cases Fixed", text="Fix_Cases",
             color_discrete_sequence=[STEEL, AMBER]
         )
         st.plotly_chart(style_fig(fig1), use_container_width=True)
@@ -837,57 +1062,91 @@ with tab_overview:
 
     with c2:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        status_summary = alloc.groupby("Status").size().reset_index(name="Count")
-        fig3 = px.pie(
-            status_summary, names="Status", values="Count",
-            title="Load Status Breakdown", color="Status",
-            color_discrete_map=STATUS_COLORS, hole=0.55
+        otr_top_chart_df = otr_dock_plan_export.head(15).copy()
+        otr_top_chart_df["Wave"] = otr_top_chart_df["Wave"].astype(str)
+        fig5 = px.bar(
+            otr_top_chart_df, x="Trailer", y="Fix_Cases",
+            color="Wave", title="OTR Trailers — Cases Fixed", text="Fix_Cases",
+            color_discrete_sequence=[STEEL, AMBER]
         )
-        st.plotly_chart(style_fig(fig3), use_container_width=True)
+        st.plotly_chart(style_fig(fig5), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     c3, c4 = st.columns(2)
     with c3:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        priority_order_chart_df = dock_plan_export.sort_values("Wave").copy()
-        priority_order_chart_df["Wave"] = priority_order_chart_df["Wave"].astype(str)
-        fig2 = px.bar(
-            priority_order_chart_df, x="Fix_Cases", y="Trailer", orientation="h",
-            color="Wave", title="Trailer Priority Order — Today",
-            category_orders={"Trailer": priority_order_chart_df["Trailer"].tolist()},
-            color_discrete_sequence=[STEEL, AMBER]
+        status_summary = alloc.groupby("Status").size().reset_index(name="Count")
+        fig3 = px.pie(
+            status_summary, names="Status", values="Count",
+            title="Combined Load Status Breakdown", color="Status",
+            color_discrete_map=STATUS_COLORS, hole=0.55
         )
-        st.plotly_chart(style_fig(fig2), use_container_width=True)
-        st.caption("Earliest dispatch drives the ranking; shortage cases fixed breaks ties.")
+        st.plotly_chart(style_fig(fig3), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c4:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         short_items = alloc[alloc["Actual_short_cases"] > 0]
         top_skus = short_items.groupby("Item").agg(
-            Actual_short_cases=("Actual_short_cases", "sum"),
-            Trailer=("Trailer", lambda s: ", ".join(sorted(set(x for x in s if pd.notna(x) and x != ""))) or "No inventory found")
+            Actual_short_cases=("Actual_short_cases", "sum")
         ).reset_index()
         top_skus = top_skus.sort_values(by="Actual_short_cases", ascending=False).head(10)
         fig4 = px.bar(
-            top_skus, x="Item", y="Actual_short_cases", title="Top Still-Short Items",
-            text="Actual_short_cases", color_discrete_sequence=[DANGER],
-            hover_data={"Trailer": True, "Item": False}
+            top_skus, x="Item", y="Actual_short_cases", title="Top Still-Short Items After Both Sources",
+            text="Actual_short_cases", color_discrete_sequence=[DANGER]
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
-        st.caption("Items still short after all trailer inventory is allocated.")
+        st.caption("Items still short after on-lot and OTR inventory are allocated.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    c5, c6 = st.columns(2)
+    with c5:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        onlot_priority_chart_df = onlot_dock_plan_export.sort_values("Wave").copy()
+        onlot_priority_chart_df["Wave"] = onlot_priority_chart_df["Wave"].astype(str)
+        fig2 = px.bar(
+            onlot_priority_chart_df, x="Fix_Cases", y="Trailer", orientation="h",
+            color="Wave", title="On-Lot Trailer Priority Order",
+            category_orders={"Trailer": onlot_priority_chart_df["Trailer"].tolist()},
+            color_discrete_sequence=[STEEL, AMBER]
+        )
+        st.plotly_chart(style_fig(fig2), use_container_width=True)
+        st.caption("Earliest dispatch drives the ranking; shortage cases fixed breaks ties.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with c6:
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        otr_priority_chart_df = otr_dock_plan_export.sort_values("Wave").copy()
+        otr_priority_chart_df["Wave"] = otr_priority_chart_df["Wave"].astype(str)
+        fig6 = px.bar(
+            otr_priority_chart_df, x="Fix_Cases", y="Trailer", orientation="h",
+            color="Wave", title="OTR Trailer Priority Order",
+            category_orders={"Trailer": otr_priority_chart_df["Trailer"].tolist()},
+            color_discrete_sequence=[STEEL, AMBER]
+        )
+        st.plotly_chart(style_fig(fig6), use_container_width=True)
+        st.caption("OTR priority uses status 66/99 rows only when In Transit Quantity is greater than zero.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- WAVE PLAN ----------------
 with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("Dock Plan — Trailers in Priority Order")
+    st.subheader("On-Lot Dock Plan — Trailers in Priority Order")
     st.caption(
-        "Every trailer here carries cases that fix a shortage. "
+        "Every on-lot trailer here carries cases that fix a shortage. "
         "Priority: earliest dispatch on a short load first; ties broken by most cases fixed. "
         "Waves are groups of 4."
     )
-    st.dataframe(dock_plan_display, use_container_width=True, hide_index=True)
+    st.dataframe(onlot_dock_plan_display, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("OTR Transfer Plan — Trailers in Priority Order")
+    st.caption(
+        "Only OTR transfers on status 66/99 with In Transit Quantity greater than zero are included. "
+        "The OTR waves are ranked independently and contain 4 trailers each."
+    )
+    st.dataframe(otr_dock_plan_display, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- LOAD COVERAGE ----------------
@@ -895,9 +1154,16 @@ with tab_load:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Load Coverage — Demand vs. Available by Trip")
     st.caption(
-        "Each row is one trailer contribution to one load/item. "
+        "This is the only combined analysis: on-lot inventory is allocated first, "
+        "then eligible OTR inventory covers the remaining shortage. "
+        "Each row is one source/trailer contribution to one load/item. "
         "Status: green = Full, yellow = Partial, red = Short. "
         "Each repeated (multi-trailer) item gets its own highlight color."
+    )
+    st.dataframe(coverage_summary_display, use_container_width=True, hide_index=True)
+    st.caption(
+        "Combined Cases Solved equals On-Lot Cases Solved plus OTR Cases Solved; "
+        "Still Short is calculated once per short line, never once per trailer row."
     )
 
     def highlight_load_coverage(row):
@@ -931,11 +1197,15 @@ with tab_load:
 def build_excel():
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        dock_plan_display.to_excel(writer, sheet_name="Dock Plan", index=False)
+        coverage_summary_display.to_excel(writer, sheet_name="Coverage Summary", index=False)
+        onlot_dock_plan_display.to_excel(writer, sheet_name="On-Lot Wave Plan", index=False)
+        otr_dock_plan_display.to_excel(writer, sheet_name="OTR Wave Plan", index=False)
         load_display.to_excel(writer, sheet_name="Load Coverage", index=False)
         exception_display.to_excel(writer, sheet_name="Exception Report", index=False)
-        optimized_trailers_display.to_excel(writer, sheet_name="Optimized Trailers", index=False)
-        top4_trailers_display.to_excel(writer, sheet_name="Top 4 Trailers", index=False)
+        onlot_optimized_trailers_display.to_excel(writer, sheet_name="On-Lot Optimized", index=False)
+        otr_optimized_trailers_display.to_excel(writer, sheet_name="OTR Optimized", index=False)
+        onlot_top4_trailers_display.to_excel(writer, sheet_name="On-Lot Top 4", index=False)
+        otr_top4_trailers_display.to_excel(writer, sheet_name="OTR Top 4", index=False)
 
         for sheet in writer.sheets:
             ws = writer.sheets[sheet]
@@ -976,22 +1246,29 @@ with c2:
         label="Download Full Report (.pdf)",
         data=build_full_pdf(
             "Shorts Analysis Results",
-            kpis=[
-                ("Transfer Trailers", str(total_transfer_trailers), "on the lot today"),
-                ("Trailers Involved", str(total_trailers), f"across {total_waves} waves"),
-                ("Cases Short", f"{total_cases_short:,}", "on short sheet"),
-                ("Still Short", f"{total_shortage:,}", "no trailer covers"),
-                ("Loads Affected", f"{total_loads:,}", "have short product today"),
-                ("Loads Fully Met", f"{loads_met_count:,}", f"of {total_loads:,} loads"),
-                ("Move Next", move_next_value, move_next_sub),
+            onlot_kpis=[
+                ("Transfer Trailers", str(total_transfer_trailers), "on lot"),
+                ("Involved", str(onlot_trailers_involved), "fix shortages"),
+                ("Cases Solved", f"{onlot_cases_solved:,}", "on-lot supply"),
+                ("Waves", str(onlot_waves), "4 per wave"),
+                ("Move Next", onlot_move_next_value, onlot_move_next_sub),
+            ],
+            otr_kpis=[
+                ("Eligible OTR", str(total_otr_trailers), "66/99; in transit > 0"),
+                ("Involved", str(otr_trailers_involved), "fix shortages"),
+                ("Cases Solved", f"{otr_cases_solved:,}", "after on-lot"),
+                ("Waves", str(otr_waves), "4 per wave"),
+                ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
-                ("Top Trailers by Fix Cases", fig1),
-                ("Load Status Breakdown", fig3),
-                ("Trailer Priority Order — Today", fig2),
+                ("On-Lot Cases Fixed", fig1),
+                ("OTR Cases Fixed", fig5),
+                ("Combined Load Status", fig3),
                 ("Top Still-Short Items", fig4),
             ],
-            wave_df=dock_plan_display,
+            onlot_wave_df=onlot_dock_plan_display,
+            otr_wave_df=otr_dock_plan_display,
+            coverage_summary_df=coverage_summary_display,
             load_df=load_display,
             repeated_items=repeated_multi_trailer_items,
             item_color_map=item_color_map
