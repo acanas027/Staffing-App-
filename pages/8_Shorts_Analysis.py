@@ -384,7 +384,7 @@ def build_full_pdf(
     story.append(Spacer(1, 6))
     story.append(build_status_table(onlot_wave_df))
     story.append(Spacer(1, 14))
-    story.append(Paragraph("OTR Transfer Plan — Status 66/99 with In Transit > 0", styles["Heading2"]))
+    story.append(Paragraph("OTR Transfer Plan", styles["Heading2"]))
     story.append(Spacer(1, 6))
     story.append(build_status_table(otr_wave_df))
 
@@ -1117,7 +1117,19 @@ with tab_overview:
             "Display_Trailer": False, "Source_Order": False,
         }
     )
-    st.plotly_chart(style_fig(fig2), use_container_width=True)
+    fig2 = style_fig(fig2, height=320)
+    fig2.update_layout(
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,
+            xanchor="center",
+            x=0.5,
+            title_text="Supply Source",
+        ),
+        margin=dict(l=10, r=10, t=50, b=75),
+    )
+    st.plotly_chart(fig2, use_container_width=True)
     st.caption(
         "Both sources appear in one graph; priority #1 is shown at the top. "
         "Priority numbers and waves remain calculated independently within each source."
