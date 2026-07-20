@@ -871,15 +871,17 @@ try:
     # Items that repeat within the same wave should sit next to each other where
     # possible, WITHOUT disturbing rows that have no trailer/wave assigned (those
     # keep their original Dispatch/Trip/Status ordering, exactly as before).
-    has_wave_mask = load_export["Wave"].notna()
-    load_export["_Item_Cluster_Sort"] = 0.0
-    if has_wave_mask.any():
-        cluster_key = (
-            load_export.loc[has_wave_mask]
-            .groupby(["Supply_Source", "Wave", "Item"])["Trailer_Priority"]
-            .transform("min")
-        )
-        load_export.loc[has_wave_mask, "_Item_Cluster_Sort"] = cluster_key
+    # Build the cluster key directly instead of assigning an integer array into
+    # a pre-created float64 column. Newer pandas versions reject that implicit
+    # dtype change with: Invalid value '[...]' for dtype 'float64'.
+    load_export["_Item_Cluster_Sort"] = (
+        load_export
+        .groupby(["Supply_Source", "Wave", "Item"], dropna=False)["Trailer_Priority"]
+        .transform("min")
+    )
+    load_export["_Item_Cluster_Sort"] = pd.to_numeric(
+        load_export["_Item_Cluster_Sort"], errors="coerce"
+    )
 
     load_export["_Source_Sort"] = load_export["Supply_Source"].map(
         {"On-Lot": 0, "OTR": 1, "None": 2}
@@ -1050,26 +1052,67 @@ with tab_overview:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        onlot_top_chart_df = onlot_dock_plan_export.head(15).copy()
-        onlot_top_chart_df["Wave"] = onlot_top_chart_df["Wave"].astype(str)
+        cases_fixed_chart_df = pd.concat([
+            onlot_dock_plan_export.assign(Supply_Source="On-Lot"),
+            otr_dock_plan_export.assign(Supply_Source="OTR"),
+        ], ignore_index=True)
+        cases_fixed_chart_df = cases_fixed_chart_df.sort_values(
+            "Fix_Cases", ascending=False
+        ).head(30)
+        cases_fixed_chart_df["Display_Trailer"] = (
+            cases_fixed_chart_df["Supply_Source"]
+            + " | "
+            + cases_fixed_chart_df["Trailer"].astype(str)
+        )
+        cases_fixed_chart_df["Wave"] = cases_fixed_chart_df["Wave"].astype(str)
         fig1 = px.bar(
-            onlot_top_chart_df, x="Trailer", y="Fix_Cases",
-            color="Wave", title="On-Lot Trailers — Cases Fixed", text="Fix_Cases",
-            color_discrete_sequence=[STEEL, AMBER]
+            cases_fixed_chart_df,
+            x="Display_Trailer", y="Fix_Cases", color="Supply_Source",
+            title="Cases Fixed by Trailer — On-Lot + OTR", text="Fix_Cases",
+            color_discrete_map={"On-Lot": STEEL, "OTR": AMBER},
+            hover_data={"Wave": True, "Trailer": True, "Display_Trailer": False}
         )
         st.plotly_chart(style_fig(fig1), use_container_width=True)
+        st.caption("One combined view; color identifies the inventory source.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with c2:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        otr_top_chart_df = otr_dock_plan_export.head(15).copy()
-        otr_top_chart_df["Wave"] = otr_top_chart_df["Wave"].astype(str)
-        fig5 = px.bar(
-            otr_top_chart_df, x="Trailer", y="Fix_Cases",
-            color="Wave", title="OTR Trailers — Cases Fixed", text="Fix_Cases",
-            color_discrete_sequence=[STEEL, AMBER]
+        combined_priority_chart_df = pd.concat([
+            onlot_trailer_priority.assign(Supply_Source="On-Lot", Source_Order=0),
+            otr_trailer_priority.assign(Supply_Source="OTR", Source_Order=1),
+        ], ignore_index=True)
+        combined_priority_chart_df = combined_priority_chart_df.sort_values(
+            ["Source_Order", "Trailer_Priority"]
         )
-        st.plotly_chart(style_fig(fig5), use_container_width=True)
+        combined_priority_chart_df["Display_Trailer"] = (
+            combined_priority_chart_df["Supply_Source"]
+            + " | "
+            + combined_priority_chart_df["Trailer"].astype(str)
+        )
+        combined_priority_chart_df["Priority_Label"] = (
+            "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
+        )
+        priority_category_order = list(
+            reversed(combined_priority_chart_df["Display_Trailer"].tolist())
+        )
+        fig2 = px.bar(
+            combined_priority_chart_df,
+            x="Fix_Cases", y="Display_Trailer", orientation="h",
+            color="Supply_Source", text="Priority_Label",
+            title="Priority Order — On-Lot + OTR",
+            category_orders={"Display_Trailer": priority_category_order},
+            color_discrete_map={"On-Lot": STEEL, "OTR": AMBER},
+            hover_data={
+                "Wave": True, "Trailer_Priority": True, "Trailer": True,
+                "Display_Trailer": False, "Source_Order": False,
+            }
+        )
+        st.plotly_chart(style_fig(fig2), use_container_width=True)
+        st.caption(
+            "Both sources appear in one graph; priority numbers and waves remain "
+            "calculated independently within each source."
+        )
         st.markdown('</div>', unsafe_allow_html=True)
 
     c3, c4 = st.columns(2)
@@ -1097,35 +1140,6 @@ with tab_overview:
         )
         st.plotly_chart(style_fig(fig4), use_container_width=True)
         st.caption("Items still short after on-lot and OTR inventory are allocated.")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    c5, c6 = st.columns(2)
-    with c5:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        onlot_priority_chart_df = onlot_dock_plan_export.sort_values("Wave").copy()
-        onlot_priority_chart_df["Wave"] = onlot_priority_chart_df["Wave"].astype(str)
-        fig2 = px.bar(
-            onlot_priority_chart_df, x="Fix_Cases", y="Trailer", orientation="h",
-            color="Wave", title="On-Lot Trailer Priority Order",
-            category_orders={"Trailer": onlot_priority_chart_df["Trailer"].tolist()},
-            color_discrete_sequence=[STEEL, AMBER]
-        )
-        st.plotly_chart(style_fig(fig2), use_container_width=True)
-        st.caption("Earliest dispatch drives the ranking; shortage cases fixed breaks ties.")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with c6:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        otr_priority_chart_df = otr_dock_plan_export.sort_values("Wave").copy()
-        otr_priority_chart_df["Wave"] = otr_priority_chart_df["Wave"].astype(str)
-        fig6 = px.bar(
-            otr_priority_chart_df, x="Fix_Cases", y="Trailer", orientation="h",
-            color="Wave", title="OTR Trailer Priority Order",
-            category_orders={"Trailer": otr_priority_chart_df["Trailer"].tolist()},
-            color_discrete_sequence=[STEEL, AMBER]
-        )
-        st.plotly_chart(style_fig(fig6), use_container_width=True)
-        st.caption("OTR priority uses status 66/99 rows only when In Transit Quantity is greater than zero.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- WAVE PLAN ----------------
@@ -1261,8 +1275,8 @@ with c2:
                 ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
-                ("On-Lot Cases Fixed", fig1),
-                ("OTR Cases Fixed", fig5),
+                ("Combined Cases Fixed", fig1),
+                ("Combined Priority Order", fig2),
                 ("Combined Load Status", fig3),
                 ("Top Still-Short Items", fig4),
             ],
