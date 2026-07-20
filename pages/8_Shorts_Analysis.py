@@ -1091,15 +1091,21 @@ with tab_overview:
         otr_trailer_priority.assign(Supply_Source="OTR", Source_Order=1),
     ], ignore_index=True)
     combined_priority_chart_df = combined_priority_chart_df.sort_values(
-        ["Trailer_Priority", "Source_Order"]
+        ["Wave", "Source_Order", "Trailer_Priority"]
     )
     combined_priority_chart_df["Display_Trailer"] = (
-        combined_priority_chart_df["Supply_Source"]
-        + " | "
-        + combined_priority_chart_df["Trailer"].astype(str)
+        combined_priority_chart_df["Trailer"].astype(str)
     )
-    combined_priority_chart_df["Priority_Label"] = (
-        "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
+    duplicate_trailer_labels = combined_priority_chart_df["Display_Trailer"].duplicated(
+        keep=False
+    )
+    combined_priority_chart_df.loc[duplicate_trailer_labels, "Display_Trailer"] = (
+        combined_priority_chart_df.loc[duplicate_trailer_labels, "Supply_Source"]
+        + " | "
+        + combined_priority_chart_df.loc[duplicate_trailer_labels, "Trailer"].astype(str)
+    )
+    combined_priority_chart_df["Wave"] = (
+        combined_priority_chart_df["Wave"].astype(int).astype(str)
     )
     # Plotly Express already handles the visual direction for horizontal bars.
     # Pass priority order directly so #1 renders at the top; manually reversing
@@ -1108,12 +1114,12 @@ with tab_overview:
     fig2 = px.bar(
         combined_priority_chart_df,
         x="Fix_Cases", y="Display_Trailer", orientation="h",
-        color="Supply_Source", text="Priority_Label",
-        title="Priority Order — Topeka Transfers + OTR",
+        color="Wave",
+        title="Trailer Priority Order — By Wave",
         category_orders={"Display_Trailer": priority_category_order},
-        color_discrete_map={"Topeka Transfers": STEEL, "OTR": AMBER},
+        color_discrete_sequence=[STEEL, AMBER, SUCCESS, "#7A5C99", "#2A9D8F", DANGER],
         hover_data={
-            "Wave": True, "Trailer_Priority": True, "Trailer": True,
+            "Supply_Source": True, "Trailer_Priority": True, "Trailer": True,
             "Display_Trailer": False, "Source_Order": False,
         }
     )
@@ -1125,14 +1131,14 @@ with tab_overview:
             y=-0.22,
             xanchor="center",
             x=0.5,
-            title_text="Supply Source",
+            title_text="Wave",
         ),
         margin=dict(l=10, r=10, t=50, b=75),
     )
     st.plotly_chart(fig2, use_container_width=True)
     st.caption(
-        "Both sources appear in one graph; priority #1 is shown at the top. "
-        "Priority numbers and waves remain calculated independently within each source."
+        "Trailers are ordered and color-coded by wave. Source and exact trailer "
+        "priority remain available in the hover details."
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
