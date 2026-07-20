@@ -345,10 +345,10 @@ def build_full_pdf(
         ]))
         return table
 
-    overview_page.append(Paragraph("Topeka Transfer KPIs", styles["Heading2"]))
+    overview_page.append(Paragraph("Topeka Transfers", styles["Heading2"]))
     overview_page.append(pdf_kpi_table(onlot_kpis))
     overview_page.append(Spacer(1, 8))
-    overview_page.append(Paragraph("Over-the-Road Transfer KPIs", styles["Heading2"]))
+    overview_page.append(Paragraph("Over-the-Road Transfers", styles["Heading2"]))
     overview_page.append(pdf_kpi_table(otr_kpis))
     overview_page.append(Spacer(1, 12))
 
@@ -1008,7 +1008,7 @@ otr_move_next_value, otr_move_next_sub = move_next_values(
     otr_dock_plan_export, "OTR"
 )
 
-st.markdown("### Topeka Transfer KPIs")
+st.markdown("### Topeka Transfers")
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "from Topeka")
@@ -1021,10 +1021,10 @@ with k4:
 with k5:
     kpi_card("Move Next", onlot_move_next_value, onlot_move_next_sub)
 
-st.markdown("### Over-the-Road Transfer KPIs")
+st.markdown("### Over-the-Road Transfers")
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
-    kpi_card("Eligible OTR Trailers", f"{total_otr_trailers}", "status 66/99; in transit > 0")
+    kpi_card("Eligible OTR Trailers", f"{total_otr_trailers}")
 with k2:
     kpi_card("OTR Trailers Involved", f"{otr_trailers_involved}", "fix remaining shortages")
 with k3:
@@ -1101,7 +1101,9 @@ with tab_overview:
     combined_priority_chart_df["Priority_Label"] = (
         "#" + combined_priority_chart_df["Trailer_Priority"].astype(int).astype(str)
     )
-    priority_category_order = combined_priority_chart_df["Display_Trailer"].tolist()
+    priority_category_order = list(
+        reversed(combined_priority_chart_df["Display_Trailer"].tolist())
+    )
     fig2 = px.bar(
         combined_priority_chart_df,
         x="Fix_Cases", y="Display_Trailer", orientation="h",
@@ -1114,7 +1116,6 @@ with tab_overview:
             "Display_Trailer": False, "Source_Order": False,
         }
     )
-    fig2.update_yaxes(autorange="reversed")
     st.plotly_chart(style_fig(fig2), use_container_width=True)
     st.caption(
         "Both sources appear in one graph; priority #1 is shown at the top. "
@@ -1278,7 +1279,7 @@ with c2:
                 ("Move Next", onlot_move_next_value, onlot_move_next_sub),
             ],
             otr_kpis=[
-                ("Eligible OTR", str(total_otr_trailers), "66/99; in transit > 0"),
+                ("Eligible OTR", str(total_otr_trailers), ""),
                 ("Involved", str(otr_trailers_involved), "fix shortages"),
                 ("Cases Solved", f"{otr_cases_solved:,}", "after Topeka"),
                 ("Waves", str(otr_waves), "4 per wave"),
