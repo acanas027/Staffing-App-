@@ -491,13 +491,20 @@ try:
     total_transfer_trailers = int(clean_df["Trailer"].nunique())
 
     # ---- LOAD OVER-THE-ROAD TRANSFERS ----
-    # Only status 66 and 99 are eligible for review, but the ONLY usable supply
-    # is In Transit Quantity. If In Transit Quantity is zero, that row/load is
-    # not useful and must not contribute to coverage, KPIs, priorities, or waves.
+    # Only status 66 and 99 are eligible for review. The usable supply column
+    # depends on the status:
+    #   status 66 (still in transit)      -> In Transit Quantity
+    #   status 99 (received / reported)   -> Reported Quantity
+    # (Status-99 rows carry 0 in In Transit Quantity, so using In Transit for
+    # everything would drop all received transfers.) Whichever column applies,
+    # a zero value means that row has no usable supply and must not contribute
+    # to coverage, KPIs, priorities, or waves.
     otr_raw = pd.read_excel(otr_file)
     otr_raw.columns = [str(c).strip() for c in otr_raw.columns]
 
-    required_otr_columns = {"Item", "Order Status", "In Transit Quantity"}
+    required_otr_columns = {
+        "Item", "Order Status", "In Transit Quantity", "Reported Quantity"
+    }
     missing_otr_columns = sorted(required_otr_columns.difference(otr_raw.columns))
     if missing_otr_columns:
         raise ValueError(
@@ -514,7 +521,15 @@ try:
     otr_raw["In Transit Quantity"] = pd.to_numeric(
         otr_raw["In Transit Quantity"], errors="coerce"
     ).fillna(0)
-    otr_raw["Quantity"] = otr_raw["In Transit Quantity"]
+    otr_raw["Reported Quantity"] = pd.to_numeric(
+        otr_raw["Reported Quantity"], errors="coerce"
+    ).fillna(0)
+    # Pick the right supply column per row based on Order Status.
+    otr_raw["Quantity"] = np.where(
+        otr_raw["Order Status"] == 99,
+        otr_raw["Reported Quantity"],
+        otr_raw["In Transit Quantity"],
+    )
 
     # The supplied export merges the last two headers into
     # "Delivery External Tracking Number". Some versions split them into
@@ -1211,7 +1226,8 @@ with tab_wave:
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("OTR Transfer Plan — Trailers in Priority Order")
     st.caption(
-        "Only OTR transfers on status 66/99 with In Transit Quantity greater than zero are included. "
+        "Only OTR transfers on status 66/99 with usable supply greater than zero are included "
+        "(In Transit Quantity for status 66, Reported Quantity for status 99). "
         "The OTR waves are ranked independently and contain 4 trailers each."
     )
     st.dataframe(otr_dock_plan_display, use_container_width=True, hide_index=True)
