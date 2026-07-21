@@ -1120,7 +1120,7 @@ with tab_overview:
             topeka_cases_chart_df,
             x="Trailer", y="Fix_Cases", color="Wave",
             title="Cases Fixed by Trailer — Topeka Transfers", text="Fix_Cases",
-            color_discrete_sequence=[STEEL, AMBER]
+            color_discrete_sequence=[STEEL, AMBER, SUCCESS]
         )
         st.plotly_chart(style_fig(fig1), use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
