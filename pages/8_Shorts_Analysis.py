@@ -980,14 +980,30 @@ otr_cases_solved = int(alloc["OTR_Allocated_Cases"].sum())
 combined_cases_solved = int(alloc["Allocated_Cases"].sum())
 total_shortage = int(alloc["Actual_short_cases"].clip(lower=0).sum())
 
+# Short-flow numbers for the KPIs.
+# Topeka runs first, so its "Still Short" is total demand minus what Topeka
+# solved — and that same remaining number is what OTR starts with. OTR's
+# "Still Short" is the final shortage after both sources (total_shortage).
+topeka_still_short = max(total_cases_short - onlot_cases_solved, 0)
+otr_incoming_short = topeka_still_short
+
 onlot_trailers_involved = int(onlot_dock_plan_export["Trailer"].nunique())
 otr_trailers_involved = int(otr_dock_plan_export["Trailer"].nunique())
 onlot_waves = int(onlot_dock_plan_export["Wave"].nunique()) if not onlot_dock_plan_export.empty else 0
 otr_waves = int(otr_dock_plan_export["Wave"].nunique()) if not otr_dock_plan_export.empty else 0
 
+# ---- LOADS SOLVED (out of total short loads) ----
+# Every trip on the short sheet is a "short load", so the denominator is the
+# total number of distinct trips. A trip is "solved" when every one of its
+# short lines is fully covered:
+#   - Topeka solved: every line fully filled from ON-LOT cases alone.
+#   - Combined solved (final): every line fully filled after both sources.
 trip_status = alloc.groupby("Trip")["Status"].apply(lambda s: (s == "Full").all())
 loads_met_count = int(trip_status.sum())
 total_loads = int(trip_status.shape[0])
+
+topeka_full_line = alloc["On_Lot_Allocated_Cases"] >= alloc["Demand_Cases"]
+topeka_loads_met = int(topeka_full_line.groupby(alloc["Trip"]).all().sum())
 
 
 def move_next_values(dock_plan, source_label):
@@ -1009,29 +1025,37 @@ otr_move_next_value, otr_move_next_sub = move_next_values(
 )
 
 st.markdown("### Topeka Transfers")
-k1, k2, k3, k4, k5 = st.columns(5)
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 with k1:
     kpi_card("Transfer Trailers", f"{total_transfer_trailers}", "from Topeka")
 with k2:
     kpi_card("Trailers Involved", f"{onlot_trailers_involved}", "fix shortages")
 with k3:
-    kpi_card("Cases Solved", f"{onlot_cases_solved:,}", "from Topeka inventory")
+    kpi_card("Cases Short", f"{total_cases_short:,}", "total demand")
 with k4:
-    kpi_card("Waves", f"{onlot_waves}", "4 trailers per wave")
+    kpi_card("Cases Fixed", f"{onlot_cases_solved:,}", "from Topeka inventory")
 with k5:
+    kpi_card("Still Short", f"{topeka_still_short:,}", "before OTR")
+with k6:
+    kpi_card("Loads Solved", f"{topeka_loads_met} of {total_loads}", "fully covered by Topeka")
+with k7:
     kpi_card("Move Next", onlot_move_next_value, onlot_move_next_sub)
 
 st.markdown("### Over-the-Road Transfers")
-k1, k2, k3, k4, k5 = st.columns(5)
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 with k1:
     kpi_card("Eligible OTR Trailers", f"{total_otr_trailers}")
 with k2:
     kpi_card("OTR Trailers Involved", f"{otr_trailers_involved}", "fix remaining shortages")
 with k3:
-    kpi_card("Cases Solved", f"{otr_cases_solved:,}", "after Topeka allocation")
+    kpi_card("Cases Short", f"{otr_incoming_short:,}", "remaining after Topeka")
 with k4:
-    kpi_card("Waves", f"{otr_waves}", "4 trailers per wave")
+    kpi_card("Cases Fixed", f"{otr_cases_solved:,}", "from OTR inventory")
 with k5:
+    kpi_card("Still Short", f"{total_shortage:,}", "after both sources")
+with k6:
+    kpi_card("Loads Solved", f"{loads_met_count} of {total_loads}", "fully covered after both")
+with k7:
     kpi_card("Move Next", otr_move_next_value, otr_move_next_sub)
 
 coverage_summary_display = pd.DataFrame({
@@ -1293,15 +1317,19 @@ with c2:
             onlot_kpis=[
                 ("Transfer Trailers", str(total_transfer_trailers), "on lot"),
                 ("Involved", str(onlot_trailers_involved), "fix shortages"),
-                ("Cases Solved", f"{onlot_cases_solved:,}", "Topeka supply"),
-                ("Waves", str(onlot_waves), "4 per wave"),
+                ("Cases Short", f"{total_cases_short:,}", "total demand"),
+                ("Cases Fixed", f"{onlot_cases_solved:,}", "Topeka supply"),
+                ("Still Short", f"{topeka_still_short:,}", "before OTR"),
+                ("Loads Solved", f"{topeka_loads_met} of {total_loads}", "by Topeka"),
                 ("Move Next", onlot_move_next_value, onlot_move_next_sub),
             ],
             otr_kpis=[
                 ("Eligible OTR", str(total_otr_trailers), ""),
                 ("Involved", str(otr_trailers_involved), "fix shortages"),
-                ("Cases Solved", f"{otr_cases_solved:,}", "after Topeka"),
-                ("Waves", str(otr_waves), "4 per wave"),
+                ("Cases Short", f"{otr_incoming_short:,}", "after Topeka"),
+                ("Cases Fixed", f"{otr_cases_solved:,}", "OTR supply"),
+                ("Still Short", f"{total_shortage:,}", "after both"),
+                ("Loads Solved", f"{loads_met_count} of {total_loads}", "after both"),
                 ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
