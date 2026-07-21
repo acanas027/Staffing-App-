@@ -39,6 +39,22 @@ STATUS_COLORS = {
     "Short": DANGER,
 }
 
+# Fixed color per wave number so a given wave (e.g. Wave 3 = green) looks the
+# same in every chart. Keyed by the wave's integer and cycled for higher waves,
+# so the color is stable no matter which waves appear in a particular chart.
+WAVE_PALETTE = [STEEL, AMBER, SUCCESS, "#7A5C99", "#2A9D8F", DANGER]
+
+
+def wave_color_map(wave_values):
+    result = {}
+    for w in wave_values:
+        try:
+            n = int(float(w))
+        except (TypeError, ValueError):
+            continue
+        result[str(w)] = WAVE_PALETTE[(n - 1) % len(WAVE_PALETTE)]
+    return result
+
 # Distinct pastel palette used to tell different repeated (multi-trailer) items
 # apart from each other. Cycled if there are more repeated items than colors.
 ITEM_COLOR_PALETTE = [
