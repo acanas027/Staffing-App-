@@ -1039,7 +1039,7 @@ topeka_loads_met = int(topeka_full_line.groupby(alloc["Trip"]).all().sum())
 
 def move_next_values(dock_plan, source_label):
     if dock_plan.empty:
-        return "—", f"no {source_label} trailer fixes a remaining shortage"
+        return "—", f"no {source_label} trailer fixes any short"
     next_trailer = dock_plan.iloc[0]
     return (
         f"Trailer {next_trailer['Trailer']}",
@@ -1361,7 +1361,7 @@ with c2:
                 ("Cases Short", f"{otr_incoming_short:,}", "after Topeka"),
                 ("Cases Fixed", f"{otr_cases_solved:,}", "OTR supply"),
                 ("Still Short", f"{total_shortage:,}", "after both"),
-                ("Loads Solved", f"{loads_met_count} of {total_loads}", "Fully Covered"),
+                ("Loads Solved", f"{loads_met_count} of {total_loads}", "fully covered"),
                 ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
