@@ -1085,7 +1085,7 @@ with k4:
 with k5:
     kpi_card("Still Short", f"{total_shortage:,}", "after both sources")
 with k6:
-    kpi_card("Loads Solved", f"{loads_met_count} of {total_loads}", "fully covered after both")
+    kpi_card("Loads Solved", f"{loads_met_count} of {total_loads}", "fully covered")
 with k7:
     kpi_card("Move Next", otr_move_next_value, otr_move_next_sub)
 
