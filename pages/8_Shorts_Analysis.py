@@ -1361,7 +1361,7 @@ with c2:
                 ("Cases Short", f"{otr_incoming_short:,}", "after Topeka"),
                 ("Cases Fixed", f"{otr_cases_solved:,}", "OTR supply"),
                 ("Still Short", f"{total_shortage:,}", "after both"),
-                ("Loads Solved", f"{loads_met_count} of {total_loads}", "after both"),
+                ("Loads Solved", f"{loads_met_count} of {total_loads}", "Fully Covered"),
                 ("Move Next", otr_move_next_value, otr_move_next_sub),
             ],
             figs=[
