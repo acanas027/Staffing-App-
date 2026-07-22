@@ -1,12 +1,18 @@
 from datetime import date
 from html import escape
+from io import BytesIO
+from urllib.parse import quote
 
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 st.set_page_config(
     page_title="Shift Handoff",
-    page_icon="🔄",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -207,7 +213,9 @@ Loads waiting on product: {report['loads_waiting']:,}
 Open stages: {report['open_stages']:,}
 Drivers checked in and currently in lot: {report['drivers_in_lot']:,}
 Cases picked: {report['cases_picked']:,}
-Pallet pulls: {report['pallet_pulls']:,}
+Full Pallet Pull Cases: {report['full_pallet_pull_cases']:,}
+Staffing at beginning of shift: {report['staffing_beginning']:,}
+Staffing at end of shift: {report['staffing_end']:,}
 
 SAFETY
 {report['safety_detail']}
@@ -217,76 +225,160 @@ EQUIPMENT
 """
 
 
-def make_html_report(report: dict) -> str:
-    status_label, status_class = determine_status(report)
-    attention_color = "#e5a11b" if status_class else "#24a26f"
-
-    metric_rows = "".join(
-        f"<div class='metric'><span>{escape(label)}</span><strong>{value:,}</strong></div>"
-        for label, value in (
-            ("Outbound loads completed", report["loads_completed"]),
-            ("Loads waiting on product", report["loads_waiting"]),
-            ("Open stages", report["open_stages"]),
-            ("Drivers currently in lot", report["drivers_in_lot"]),
-            ("Cases picked", report["cases_picked"]),
-            ("Pallet pulls", report["pallet_pulls"]),
-        )
+def make_pdf_report(report: dict) -> bytes:
+    """Build a clean, one-page PDF version of the handoff."""
+    buffer = BytesIO()
+    document = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=0.55 * inch,
+        leftMargin=0.55 * inch,
+        topMargin=0.55 * inch,
+        bottomMargin=0.55 * inch,
     )
 
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Shift Handoff - {escape(report['report_date'])}</title>
-  <style>
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; padding: 36px 18px; background: #f4f7fb; color: #17324d;
-            font-family: Arial, Helvetica, sans-serif; }}
-    main {{ max-width: 920px; margin: auto; background: white; border-radius: 22px;
-            overflow: hidden; box-shadow: 0 16px 45px rgba(18,53,91,.12); }}
-    header {{ padding: 30px; color: white;
-              background: linear-gradient(120deg, #12355b, #167b75 65%, #39a96b); }}
-    h1 {{ margin: 0 0 8px; }}
-    header p {{ margin: 0; opacity: .88; }}
-    .pill {{ display: inline-block; margin-top: 18px; padding: 7px 12px; border-radius: 999px;
-             background: white; color: {attention_color}; font-weight: 800; font-size: 12px; }}
-    section {{ padding: 26px 30px; }}
-    h2 {{ margin: 0 0 15px; font-size: 19px; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }}
-    .metric {{ padding: 16px; border-radius: 14px; background: #f7f9fc; border: 1px solid #e3e9f0; }}
-    .metric span {{ display: block; min-height: 36px; color: #607086; font-size: 13px; }}
-    .metric strong {{ font-size: 28px; color: #12355b; }}
-    .issues {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
-    .card {{ padding: 18px; border-radius: 14px; background: #fbfcfe;
-             border-left: 6px solid {attention_color}; }}
-    .card h3 {{ margin: 0 0 8px; font-size: 16px; }}
-    .card p {{ margin: 0; color: #506276; line-height: 1.5; white-space: pre-wrap; }}
-    @media (max-width: 650px) {{
-      .metrics {{ grid-template-columns: repeat(2, 1fr); }}
-      .issues {{ grid-template-columns: 1fr; }}
-    }}
-    @media print {{ body {{ padding: 0; background: white; }} main {{ box-shadow: none; }} }}
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <h1>End-of-Shift Handoff</h1>
-      <p>{escape(report['shift'])} · {escape(report['report_date'])} · {escape(report['supervisor'])}</p>
-      <div class="pill">{status_label}</div>
-    </header>
-    <section>
-      <h2>Operation snapshot</h2>
-      <div class="metrics">{metric_rows}</div>
-    </section>
-    <section class="issues">
-      <div class="card"><h3>Safety</h3><p>{escape(report['safety_detail'])}</p></div>
-      <div class="card"><h3>Equipment</h3><p>{escape(report['equipment_detail'])}</p></div>
-    </section>
-  </main>
-</body>
-</html>"""
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "HandoffTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=26,
+        textColor=colors.white,
+        spaceAfter=5,
+    )
+    meta_style = ParagraphStyle(
+        "HandoffMeta",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#E6F2F2"),
+    )
+    section_style = ParagraphStyle(
+        "SectionTitle",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#12355B"),
+        spaceAfter=8,
+    )
+    label_style = ParagraphStyle(
+        "MetricLabel",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#607086"),
+    )
+    value_style = ParagraphStyle(
+        "MetricValue",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=18,
+        textColor=colors.HexColor("#12355B"),
+    )
+    body_style = ParagraphStyle(
+        "IssueBody",
+        parent=styles["BodyText"],
+        fontSize=9.5,
+        leading=13,
+        textColor=colors.HexColor("#42576D"),
+    )
+
+    status_label, status_class = determine_status(report)
+    status_color = colors.HexColor("#E5A11B" if status_class else "#24A26F")
+
+    header = Table(
+        [[
+            Paragraph("End-of-Shift Handoff", title_style),
+            Paragraph(f"<b>{escape(status_label)}</b>", meta_style),
+        ], [
+            Paragraph(
+                f"{escape(report['shift'])} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                f"{escape(report['report_date'])} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                f"{escape(report['supervisor'])}",
+                meta_style,
+            ),
+            "",
+        ]],
+        colWidths=[5.65 * inch, 1.25 * inch],
+    )
+    header.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#12355B")),
+        ("BOX", (0, 0), (-1, -1), 0, colors.HexColor("#12355B")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 16),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+        ("LINEBELOW", (1, 0), (1, 0), 3, status_color),
+    ]))
+
+    metrics = (
+        ("Outbound loads completed", report["loads_completed"]),
+        ("Loads waiting on product", report["loads_waiting"]),
+        ("Open stages", report["open_stages"]),
+        ("Drivers currently in lot", report["drivers_in_lot"]),
+        ("Cases picked", report["cases_picked"]),
+        ("Full Pallet Pull Cases", report["full_pallet_pull_cases"]),
+        ("Staffing at beginning of shift", report["staffing_beginning"]),
+        ("Staffing at end of shift", report["staffing_end"]),
+    )
+    metric_cells = [
+        [Paragraph(escape(label), label_style), Paragraph(f"{value:,}", value_style)]
+        for label, value in metrics
+    ]
+    metric_rows = [metric_cells[index] + metric_cells[index + 1] for index in range(0, 8, 2)]
+    metric_table = Table(metric_rows, colWidths=[2.45 * inch, 0.65 * inch] * 2)
+    metric_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DFE6EF")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#DFE6EF")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+    ]))
+
+    def issue_cell(title: str, detail: str) -> list:
+        safe_detail = escape(detail).replace("\n", "<br/>")
+        return [
+            Paragraph(f"<b>{escape(title)}</b>", section_style),
+            Paragraph(safe_detail, body_style),
+        ]
+
+    issues = Table(
+        [[issue_cell("Safety", report["safety_detail"]), issue_cell("Equipment", report["equipment_detail"])]],
+        colWidths=[3.45 * inch, 3.45 * inch],
+    )
+    issues.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FBFCFE")),
+        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+
+    story = [
+        header,
+        Spacer(1, 0.22 * inch),
+        Paragraph("Operation snapshot", section_style),
+        metric_table,
+        Spacer(1, 0.22 * inch),
+        issues,
+    ]
+    document.build(story)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 
 st.markdown(
@@ -311,7 +403,7 @@ with st.form("shift_handoff_form", border=False):
     with identity_2:
         shift = st.selectbox(
             "Shift *",
-            ["Select shift", "1st Shift", "2nd Shift", "3rd Shift"],
+            ["Select shift", "1st Shift", "2nd Shift"],
         )
     with identity_3:
         supervisor = st.text_input(
@@ -328,37 +420,48 @@ with st.form("shift_handoff_form", border=False):
         unsafe_allow_html=True,
     )
 
-    pulse_1, pulse_2, pulse_3 = st.columns(3, gap="large")
+    pulse_1, pulse_2, pulse_3, pulse_4 = st.columns(4, gap="large")
     with pulse_1:
         loads_completed = st.number_input(
-            "✅ Outbound loads completed",
+            "Outbound loads completed",
             min_value=0,
             step=1,
         )
         drivers_in_lot = st.number_input(
-            "🚚 Drivers checked in and currently in lot",
+            "Drivers checked in and currently in lot",
             min_value=0,
             step=1,
         )
     with pulse_2:
         loads_waiting = st.number_input(
-            "⏳ Loads waiting on product",
+            "Loads waiting on product",
             min_value=0,
             step=1,
         )
         cases_picked = st.number_input(
-            "📦 Cases picked",
+            "Cases picked",
             min_value=0,
             step=1,
         )
     with pulse_3:
         open_stages = st.number_input(
-            "🏷️ Open stages",
+            "Open stages",
             min_value=0,
             step=1,
         )
-        pallet_pulls = st.number_input(
-            "🛞 Pallet pulls",
+        full_pallet_pull_cases = st.number_input(
+            "Full Pallet Pull Cases",
+            min_value=0,
+            step=1,
+        )
+    with pulse_4:
+        staffing_beginning = st.number_input(
+            "Staffing at beginning of shift",
+            min_value=0,
+            step=1,
+        )
+        staffing_end = st.number_input(
+            "Staffing at end of shift",
             min_value=0,
             step=1,
         )
@@ -391,7 +494,7 @@ with st.form("shift_handoff_form", border=False):
         )
 
     submitted = st.form_submit_button(
-        "Create shift handoff →",
+        "Create shift handoff",
         use_container_width=True,
     )
 
@@ -418,7 +521,9 @@ if submitted:
             "open_stages": int(open_stages),
             "drivers_in_lot": int(drivers_in_lot),
             "cases_picked": int(cases_picked),
-            "pallet_pulls": int(pallet_pulls),
+            "full_pallet_pull_cases": int(full_pallet_pull_cases),
+            "staffing_beginning": int(staffing_beginning),
+            "staffing_end": int(staffing_end),
             "safety_status": safety_status,
             "safety_detail": clean_detail(
                 safety_status,
@@ -432,7 +537,7 @@ if submitted:
                 "No equipment issues reported.",
             ),
         }
-        st.success("Handoff created. Review it below, then copy or download it.")
+        st.success("Handoff created. Review it below, then copy, email, or download it.")
 
 if "handoff_report" in st.session_state:
     report = st.session_state["handoff_report"]
@@ -451,15 +556,17 @@ if "handoff_report" in st.session_state:
         unsafe_allow_html=True,
     )
 
-    metric_row_1 = st.columns(3, gap="medium")
+    metric_row_1 = st.columns(4, gap="medium")
     metric_row_1[0].metric("Outbound loads completed", f"{report['loads_completed']:,}")
     metric_row_1[1].metric("Loads waiting on product", f"{report['loads_waiting']:,}")
     metric_row_1[2].metric("Open stages", f"{report['open_stages']:,}")
+    metric_row_1[3].metric("Drivers currently in lot", f"{report['drivers_in_lot']:,}")
 
-    metric_row_2 = st.columns(3, gap="medium")
-    metric_row_2[0].metric("Drivers currently in lot", f"{report['drivers_in_lot']:,}")
-    metric_row_2[1].metric("Cases picked", f"{report['cases_picked']:,}")
-    metric_row_2[2].metric("Pallet pulls", f"{report['pallet_pulls']:,}")
+    metric_row_2 = st.columns(4, gap="medium")
+    metric_row_2[0].metric("Cases picked", f"{report['cases_picked']:,}")
+    metric_row_2[1].metric("Full Pallet Pull Cases", f"{report['full_pallet_pull_cases']:,}")
+    metric_row_2[2].metric("Staffing at beginning", f"{report['staffing_beginning']:,}")
+    metric_row_2[3].metric("Staffing at end", f"{report['staffing_end']:,}")
 
     safety_class = "attention" if report["safety_status"] == "Issue to hand off" else ""
     equipment_class = "attention" if report["equipment_status"] == "Issue to hand off" else ""
@@ -468,7 +575,7 @@ if "handoff_report" in st.session_state:
         st.markdown(
             f"""
             <div class="issue-card {safety_class}">
-                <h4>🦺 Safety</h4>
+                <h4>Safety</h4>
                 <p>{escape(report['safety_detail'])}</p>
             </div>
             """,
@@ -478,7 +585,7 @@ if "handoff_report" in st.session_state:
         st.markdown(
             f"""
             <div class="issue-card {equipment_class}">
-                <h4>🛠️ Equipment</h4>
+                <h4>Equipment</h4>
                 <p>{escape(report['equipment_detail'])}</p>
             </div>
             """,
@@ -486,27 +593,31 @@ if "handoff_report" in st.session_state:
         )
 
     text_report = make_text_report(report)
-    html_report = make_html_report(report)
+    pdf_report = make_pdf_report(report)
+    email_url = (
+        "mailto:?subject="
+        + quote("Shift Handoff", safe="")
+        + "&body="
+        + quote(text_report, safe="")
+    )
 
-    st.markdown("#### Copy or download")
-    st.caption("Use the copy icon in the top-right corner of the text box, or download a report.")
+    st.markdown("#### Copy, email, or download")
+    st.caption("Use the copy icon in the top-right corner of the text box, open a prefilled email, or download the PDF.")
     st.code(text_report, language=None)
 
-    download_1, download_2, download_space = st.columns([1, 1, 2], gap="medium")
+    action_1, action_2, action_space = st.columns([1, 1, 2], gap="medium")
     safe_date = report["report_date"].replace(",", "").replace(" ", "-")
-    with download_1:
-        st.download_button(
-            "Download text report",
-            data=text_report,
-            file_name=f"shift-handoff-{safe_date}.txt",
-            mime="text/plain",
+    with action_1:
+        st.link_button(
+            "Send by email",
+            email_url,
             use_container_width=True,
         )
-    with download_2:
+    with action_2:
         st.download_button(
-            "Download HTML report",
-            data=html_report,
-            file_name=f"shift-handoff-{safe_date}.html",
-            mime="text/html",
+            "Download PDF report",
+            data=pdf_report,
+            file_name=f"shift-handoff-{safe_date}.pdf",
+            mime="application/pdf",
             use_container_width=True,
         )
