@@ -11,6 +11,9 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
+REPORT_STATE_KEY = "shift_handoff_report_v2"
+
+
 st.set_page_config(
     page_title="Shift Handoff",
     layout="wide",
@@ -512,7 +515,7 @@ if submitted:
     if errors:
         st.error("Please finish these items:\n\n- " + "\n- ".join(errors))
     else:
-        st.session_state["handoff_report"] = {
+        st.session_state[REPORT_STATE_KEY] = {
             "report_date": report_date.strftime("%B %d, %Y"),
             "shift": shift,
             "supervisor": supervisor.strip(),
@@ -539,8 +542,8 @@ if submitted:
         }
         st.success("Handoff created. Review it below, then copy, email, or download it.")
 
-if "handoff_report" in st.session_state:
-    report = st.session_state["handoff_report"]
+if REPORT_STATE_KEY in st.session_state:
+    report = st.session_state[REPORT_STATE_KEY]
     status_label, status_class = determine_status(report)
 
     st.markdown(
