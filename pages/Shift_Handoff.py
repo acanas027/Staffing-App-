@@ -757,7 +757,7 @@ with st.form("shift_handoff_form", border=False):
 
     supervisor_notes = st.text_area(
         "Supervisor notes",
-        placeholder="Add any additional context or information for the next supervisor",
+        placeholder="Add any additional context for the next supervisor. If there's loads waiting for product or an item from the checklist was not completed, explain here",
         height=110,
     )
 
