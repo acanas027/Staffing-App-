@@ -368,6 +368,19 @@ SHIFT COMPLETION CHECKLIST
 """
 
 
+def make_email_url(text_report: str) -> str:
+    """Create an Outlook-friendly email link with separate To recipients."""
+    recipients = quote(";".join(EMAIL_RECIPIENTS), safe="@;")
+    return (
+        "mailto:"
+        + recipients
+        + "?subject="
+        + quote("Shift Handoff", safe="")
+        + "&body="
+        + quote(text_report, safe="")
+    )
+
+
 def make_pdf_report(report: dict) -> bytes:
     """Build a clean, compact PDF version of the handoff."""
     buffer = BytesIO()
@@ -925,14 +938,7 @@ if REPORT_STATE_KEY in st.session_state:
 
     text_report = make_text_report(report)
     pdf_report = make_pdf_report(report)
-    email_url = (
-        "mailto:"
-        + quote(",".join(EMAIL_RECIPIENTS), safe="@,")
-        + "?subject="
-        + quote("Shift Handoff", safe="")
-        + "&body="
-        + quote(text_report, safe="")
-    )
+    email_url = make_email_url(text_report)
 
     action_1, action_2 = st.columns(2, gap="medium")
     safe_date = report["report_date"].replace(",", "").replace(" ", "-")
