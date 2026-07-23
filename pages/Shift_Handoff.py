@@ -11,7 +11,19 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
-REPORT_STATE_KEY = "shift_handoff_report_v2"
+REPORT_STATE_KEY = "shift_handoff_report_v4"
+
+CHECKLIST_ITEMS = [
+    "All shorts up to the next shift start time are cut or accounted for.",
+    "Every trailer with short product is on a door or documented.",
+    "Every short that was cut is documented.",
+    "Revision emails are checked and addressed.",
+    "Inbound and outbound board are updated.",
+    "Yardview is updated.",
+    "Check UKG punches and fix any missed punch.",
+    "Send attendance to HR.",
+    "Received inbounds and transfer pallets are put away.",
+]
 
 
 st.set_page_config(
@@ -93,6 +105,14 @@ st.markdown(
         div[data-testid="stSelectbox"],
         div[data-testid="stTextArea"] {
             border-radius: 14px;
+        }
+
+        div[data-testid="stCheckbox"] {
+            min-height: 3.15rem;
+            padding: .55rem .7rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            background: #fbfcfe;
         }
 
         div.stButton > button,
@@ -182,6 +202,27 @@ st.markdown(
             font-size: .88rem;
             margin-top: -.3rem;
         }
+
+        .checklist-summary {
+            margin-top: 1rem;
+            padding: 1rem 1.05rem;
+            border: 1px solid #dfe6ef;
+            border-left: 6px solid #3976e8;
+            border-radius: 15px;
+            background: white;
+            box-shadow: 0 6px 16px rgba(18, 53, 91, .05);
+        }
+
+        .checklist-summary h4 {
+            color: #12355b;
+            margin: 0 0 .65rem;
+        }
+
+        .checklist-summary p {
+            color: #485b70;
+            margin: .24rem 0;
+            line-height: 1.4;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -195,13 +236,30 @@ def clean_detail(status: str, details: str, clear_message: str) -> str:
 
 def determine_status(report: dict) -> tuple[str, str]:
     """Create a simple visual status without asking for another input."""
+    checklist = report.get("checklist", [])
+    checklist_incomplete = any(not item["completed"] for item in checklist)
     has_issue = (
         report["safety_status"] == "Issue to hand off"
         or report["equipment_status"] == "Issue to hand off"
         or report["loads_waiting"] > 0
         or report["open_stages"] > 0
+        or checklist_incomplete
     )
     return ("ATTENTION ITEMS", "attention") if has_issue else ("CLEAR HANDOFF", "")
+
+
+def make_checklist_text(report: dict) -> str:
+    """Format the checklist consistently for copied text and email."""
+    checklist = report.get("checklist", [])
+    completed_count = sum(item["completed"] for item in checklist)
+    lines = [
+        f"Completed: {completed_count} of {len(checklist)}",
+    ]
+    lines.extend(
+        f"[{'X' if item['completed'] else ' '}] {item['item']}"
+        for item in checklist
+    )
+    return "\n".join(lines)
 
 
 def make_text_report(report: dict) -> str:
@@ -214,7 +272,8 @@ OPERATION SNAPSHOT
 Outbound loads completed: {report['loads_completed']:,}
 Loads waiting on product: {report['loads_waiting']:,}
 Open stages: {report['open_stages']:,}
-Drivers checked in and currently in lot: {report['drivers_in_lot']:,}
+Outbound drivers checked in and currently in lot: {report['outbound_drivers_in_lot']:,}
+Inbound drivers checked in and currently in lot: {report['inbound_drivers_in_lot']:,}
 Cases picked: {report['cases_picked']:,}
 Full Pallet Pull Cases: {report['full_pallet_pull_cases']:,}
 Staffing at beginning of shift: {report['staffing_beginning']:,}
@@ -225,6 +284,9 @@ SAFETY
 
 EQUIPMENT
 {report['equipment_detail']}
+
+SHIFT COMPLETION CHECKLIST
+{make_checklist_text(report)}
 """
 
 
@@ -288,6 +350,31 @@ def make_pdf_report(report: dict) -> bytes:
         leading=13,
         textColor=colors.HexColor("#42576D"),
     )
+    checklist_style = ParagraphStyle(
+        "ChecklistBody",
+        parent=styles["BodyText"],
+        fontSize=8.7,
+        leading=11,
+        textColor=colors.HexColor("#42576D"),
+    )
+    checklist_status_style = ParagraphStyle(
+        "ChecklistStatus",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=8.7,
+        leading=11,
+        textColor=colors.HexColor("#12355B"),
+        alignment=1,
+    )
+    checklist_count_style = ParagraphStyle(
+        "ChecklistCount",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#607086"),
+        spaceAfter=6,
+    )
 
     status_label, status_class = determine_status(report)
     status_color = colors.HexColor("#E5A11B" if status_class else "#24A26F")
@@ -323,7 +410,8 @@ def make_pdf_report(report: dict) -> bytes:
         ("Outbound loads completed", report["loads_completed"]),
         ("Loads waiting on product", report["loads_waiting"]),
         ("Open stages", report["open_stages"]),
-        ("Drivers currently in lot", report["drivers_in_lot"]),
+        ("Outbound drivers currently in lot", report["outbound_drivers_in_lot"]),
+        ("Inbound drivers currently in lot", report["inbound_drivers_in_lot"]),
         ("Cases picked", report["cases_picked"]),
         ("Full Pallet Pull Cases", report["full_pallet_pull_cases"]),
         ("Staffing at beginning of shift", report["staffing_beginning"]),
@@ -333,7 +421,11 @@ def make_pdf_report(report: dict) -> bytes:
         [Paragraph(escape(label), label_style), Paragraph(f"{value:,}", value_style)]
         for label, value in metrics
     ]
-    metric_rows = [metric_cells[index] + metric_cells[index + 1] for index in range(0, 8, 2)]
+    metric_rows = []
+    for index in range(0, len(metric_cells), 2):
+        left_metric = metric_cells[index]
+        right_metric = metric_cells[index + 1] if index + 1 < len(metric_cells) else ["", ""]
+        metric_rows.append(left_metric + right_metric)
     metric_table = Table(metric_rows, colWidths=[2.45 * inch, 0.65 * inch] * 2)
     metric_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
@@ -370,6 +462,36 @@ def make_pdf_report(report: dict) -> bytes:
         ("RIGHTPADDING", (0, 0), (-1, -1), 12),
     ]))
 
+    checklist = report.get("checklist", [])
+    completed_count = sum(item["completed"] for item in checklist)
+    checklist_rows = [
+        [
+            Paragraph("[X]" if item["completed"] else "[ ]", checklist_status_style),
+            Paragraph(escape(item["item"]), checklist_style),
+        ]
+        for item in checklist
+    ]
+    checklist_table = Table(
+        checklist_rows,
+        colWidths=[0.48 * inch, 6.42 * inch],
+    )
+    checklist_table_style = [
+        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#E8EDF3")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+    ]
+    for row_index, item in enumerate(checklist):
+        row_fill = "#F0FAF5" if item["completed"] else "#FFF9E8"
+        checklist_table_style.append(
+            ("BACKGROUND", (0, row_index), (-1, row_index), colors.HexColor(row_fill))
+        )
+    checklist_table.setStyle(TableStyle(checklist_table_style))
+
     story = [
         header,
         Spacer(1, 0.22 * inch),
@@ -377,6 +499,13 @@ def make_pdf_report(report: dict) -> bytes:
         metric_table,
         Spacer(1, 0.22 * inch),
         issues,
+        Spacer(1, 0.20 * inch),
+        Paragraph("Shift completion checklist", section_style),
+        Paragraph(
+            f"{completed_count} of {len(checklist)} items completed",
+            checklist_count_style,
+        ),
+        checklist_table,
     ]
     document.build(story)
     pdf_bytes = buffer.getvalue()
@@ -430,8 +559,8 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
-        drivers_in_lot = st.number_input(
-            "Drivers checked in and currently in lot",
+        outbound_drivers_in_lot = st.number_input(
+            "Outbound drivers checked in and currently in lot",
             min_value=0,
             step=1,
         )
@@ -468,6 +597,11 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
+        inbound_drivers_in_lot = st.number_input(
+            "Inbound drivers checked in and currently in lot",
+            min_value=0,
+            step=1,
+        )
 
     st.markdown(
         '<div class="section-banner"><span class="section-number">3</span> Safety & equipment</div>',
@@ -496,6 +630,24 @@ with st.form("shift_handoff_form", border=False):
             height=100,
         )
 
+    st.markdown(
+        '<div class="section-banner"><span class="section-number">4</span> Shift completion checklist</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="small-note">Check each item that has been completed. Unchecked items will remain visible in the handoff report.</p>',
+        unsafe_allow_html=True,
+    )
+
+    checklist_answers = {}
+    checklist_columns = st.columns(2, gap="large")
+    for item_index, item_text in enumerate(CHECKLIST_ITEMS):
+        with checklist_columns[item_index % 2]:
+            checklist_answers[item_text] = st.checkbox(
+                item_text,
+                key=f"handoff_checklist_{item_index}",
+            )
+
     submitted = st.form_submit_button(
         "Create shift handoff",
         use_container_width=True,
@@ -522,7 +674,8 @@ if submitted:
             "loads_completed": int(loads_completed),
             "loads_waiting": int(loads_waiting),
             "open_stages": int(open_stages),
-            "drivers_in_lot": int(drivers_in_lot),
+            "outbound_drivers_in_lot": int(outbound_drivers_in_lot),
+            "inbound_drivers_in_lot": int(inbound_drivers_in_lot),
             "cases_picked": int(cases_picked),
             "full_pallet_pull_cases": int(full_pallet_pull_cases),
             "staffing_beginning": int(staffing_beginning),
@@ -539,6 +692,13 @@ if submitted:
                 equipment_details,
                 "No equipment issues reported.",
             ),
+            "checklist": [
+                {
+                    "item": item_text,
+                    "completed": bool(checklist_answers[item_text]),
+                }
+                for item_text in CHECKLIST_ITEMS
+            ],
         }
         st.success("Handoff created. Review it below, then copy, email, or download it.")
 
@@ -559,11 +719,18 @@ if REPORT_STATE_KEY in st.session_state:
         unsafe_allow_html=True,
     )
 
-    metric_row_1 = st.columns(4, gap="medium")
+    metric_row_1 = st.columns(5, gap="medium")
     metric_row_1[0].metric("Outbound loads completed", f"{report['loads_completed']:,}")
     metric_row_1[1].metric("Loads waiting on product", f"{report['loads_waiting']:,}")
     metric_row_1[2].metric("Open stages", f"{report['open_stages']:,}")
-    metric_row_1[3].metric("Drivers currently in lot", f"{report['drivers_in_lot']:,}")
+    metric_row_1[3].metric(
+        "Outbound drivers in lot",
+        f"{report['outbound_drivers_in_lot']:,}",
+    )
+    metric_row_1[4].metric(
+        "Inbound drivers in lot",
+        f"{report['inbound_drivers_in_lot']:,}",
+    )
 
     metric_row_2 = st.columns(4, gap="medium")
     metric_row_2[0].metric("Cases picked", f"{report['cases_picked']:,}")
@@ -594,6 +761,25 @@ if REPORT_STATE_KEY in st.session_state:
             """,
             unsafe_allow_html=True,
         )
+
+    checklist = report.get("checklist", [])
+    completed_count = sum(item["completed"] for item in checklist)
+    checklist_html = "".join(
+        (
+            f"<p><strong>[{'X' if item['completed'] else ' '}]</strong> "
+            f"{escape(item['item'])}</p>"
+        )
+        for item in checklist
+    )
+    st.markdown(
+        f"""
+        <div class="checklist-summary">
+            <h4>Shift completion checklist - {completed_count} of {len(checklist)} completed</h4>
+            {checklist_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     text_report = make_text_report(report)
     pdf_report = make_pdf_report(report)
