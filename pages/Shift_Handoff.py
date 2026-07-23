@@ -25,6 +25,14 @@ CHECKLIST_ITEMS = [
     "Received inbounds and transfer pallets are put away.",
 ]
 
+EMAIL_RECIPIENTS = [
+    "JuanB@resers.com",
+    "CCameron@Resers.com",
+    "MarkeithF@Resers.com",
+    "CarmenD@Resers.com",
+    "BrianM@resers.com",
+]
+
 
 st.set_page_config(
     page_title="Shift Handoff",
@@ -784,17 +792,15 @@ if REPORT_STATE_KEY in st.session_state:
     text_report = make_text_report(report)
     pdf_report = make_pdf_report(report)
     email_url = (
-        "mailto:?subject="
+        "mailto:"
+        + quote(",".join(EMAIL_RECIPIENTS), safe="@,")
+        + "?subject="
         + quote("Shift Handoff", safe="")
         + "&body="
         + quote(text_report, safe="")
     )
 
-    st.markdown("#### Copy, email, or download")
-    st.caption("Use the copy icon in the top-right corner of the text box, open a prefilled email, or download the PDF.")
-    st.code(text_report, language=None)
-
-    action_1, action_2, action_space = st.columns([1, 1, 2], gap="medium")
+    action_1, action_2 = st.columns(2, gap="medium")
     safe_date = report["report_date"].replace(",", "").replace(" ", "-")
     with action_1:
         st.link_button(
