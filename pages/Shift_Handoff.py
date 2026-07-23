@@ -171,6 +171,21 @@ st.markdown(
             color: #815400;
         }
 
+        .status-summary {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: .3rem;
+            text-align: right;
+        }
+
+        .status-reason {
+            max-width: 300px;
+            color: #fff1cc;
+            font-size: .78rem;
+            line-height: 1.25;
+        }
+
         .issue-card {
             min-height: 125px;
             padding: 1rem 1.05rem;
@@ -231,6 +246,28 @@ st.markdown(
             margin: .24rem 0;
             line-height: 1.4;
         }
+
+        .supervisor-notes {
+            margin-top: 1rem;
+            padding: 1rem 1.05rem;
+            border: 1px solid #dfe6ef;
+            border-left: 6px solid #167b75;
+            border-radius: 15px;
+            background: white;
+            box-shadow: 0 6px 16px rgba(18, 53, 91, .05);
+        }
+
+        .supervisor-notes h4 {
+            color: #12355b;
+            margin: 0 0 .45rem;
+        }
+
+        .supervisor-notes p {
+            color: #485b70;
+            margin: 0;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -242,18 +279,34 @@ def clean_detail(status: str, details: str, clear_message: str) -> str:
     return details.strip() if status == "Issue to hand off" else clear_message
 
 
-def determine_status(report: dict) -> tuple[str, str]:
-    """Create a simple visual status without asking for another input."""
+def get_attention_reasons(report: dict) -> list[str]:
+    """Return concise reasons the receiving supervisor should review."""
     checklist = report.get("checklist", [])
-    checklist_incomplete = any(not item["completed"] for item in checklist)
-    has_issue = (
-        report["safety_status"] == "Issue to hand off"
-        or report["equipment_status"] == "Issue to hand off"
-        or report["loads_waiting"] > 0
-        or report["open_stages"] > 0
-        or checklist_incomplete
+    incomplete_count = sum(not item["completed"] for item in checklist)
+    reasons = []
+
+    loads_waiting = report.get("loads_waiting", 0)
+    if loads_waiting > 0:
+        load_word = "load" if loads_waiting == 1 else "loads"
+        reasons.append(f"{loads_waiting:,} {load_word} waiting on product")
+    if report["safety_status"] == "Issue to hand off":
+        reasons.append("Safety issue to hand off")
+    if report["equipment_status"] == "Issue to hand off":
+        reasons.append("Equipment issue to hand off")
+    if incomplete_count:
+        item_word = "item" if incomplete_count == 1 else "items"
+        reasons.append(f"{incomplete_count} checklist {item_word} incomplete")
+
+    return reasons
+
+
+def determine_status(report: dict) -> tuple[str, str]:
+    """Flag operational follow-up, explicit issues, or unfinished checklist items."""
+    return (
+        ("ATTENTION ITEMS", "attention")
+        if get_attention_reasons(report)
+        else ("CLEAR HANDOFF", "")
     )
-    return ("ATTENTION ITEMS", "attention") if has_issue else ("CLEAR HANDOFF", "")
 
 
 def make_checklist_text(report: dict) -> str:
@@ -271,10 +324,24 @@ def make_checklist_text(report: dict) -> str:
 
 
 def make_text_report(report: dict) -> str:
+    supervisor_notes = (
+        report.get("supervisor_notes", "").strip()
+        or "No additional supervisor notes."
+    )
+    status_label, _ = determine_status(report)
+    attention_reasons = get_attention_reasons(report)
+    status_text = status_label
+    if attention_reasons:
+        status_text += "\n" + "\n".join(
+            f"- {reason}" for reason in attention_reasons
+        )
     return f"""END-OF-SHIFT SUPERVISOR HANDOFF
 Date: {report['report_date']}
 Shift: {report['shift']}
 Supervisor: {report['supervisor']}
+
+HANDOFF STATUS
+{status_text}
 
 OPERATION SNAPSHOT
 Outbound loads completed: {report['loads_completed']:,}
@@ -293,21 +360,24 @@ SAFETY
 EQUIPMENT
 {report['equipment_detail']}
 
+SUPERVISOR NOTES
+{supervisor_notes}
+
 SHIFT COMPLETION CHECKLIST
 {make_checklist_text(report)}
 """
 
 
 def make_pdf_report(report: dict) -> bytes:
-    """Build a clean, one-page PDF version of the handoff."""
+    """Build a clean, compact PDF version of the handoff."""
     buffer = BytesIO()
     document = SimpleDocTemplate(
         buffer,
         pagesize=letter,
         rightMargin=0.55 * inch,
         leftMargin=0.55 * inch,
-        topMargin=0.55 * inch,
-        bottomMargin=0.55 * inch,
+        topMargin=0.38 * inch,
+        bottomMargin=0.38 * inch,
     )
 
     styles = getSampleStyleSheet()
@@ -361,16 +431,16 @@ def make_pdf_report(report: dict) -> bytes:
     checklist_style = ParagraphStyle(
         "ChecklistBody",
         parent=styles["BodyText"],
-        fontSize=8.7,
-        leading=11,
+        fontSize=8.2,
+        leading=9.8,
         textColor=colors.HexColor("#42576D"),
     )
     checklist_status_style = ParagraphStyle(
         "ChecklistStatus",
         parent=styles["BodyText"],
         fontName="Helvetica-Bold",
-        fontSize=8.7,
-        leading=11,
+        fontSize=8.2,
+        leading=9.8,
         textColor=colors.HexColor("#12355B"),
         alignment=1,
     )
@@ -383,8 +453,18 @@ def make_pdf_report(report: dict) -> bytes:
         textColor=colors.HexColor("#607086"),
         spaceAfter=6,
     )
+    status_reason_style = ParagraphStyle(
+        "StatusReason",
+        parent=styles["BodyText"],
+        fontSize=7.3,
+        leading=9,
+        textColor=colors.HexColor("#FFF1CC"),
+        alignment=2,
+    )
 
     status_label, status_class = determine_status(report)
+    attention_reasons = get_attention_reasons(report)
+    status_reason = " | ".join(attention_reasons)
     status_color = colors.HexColor("#E5A11B" if status_class else "#24A26F")
 
     header = Table(
@@ -398,17 +478,17 @@ def make_pdf_report(report: dict) -> bytes:
                 f"{escape(report['supervisor'])}",
                 meta_style,
             ),
-            "",
+            Paragraph(escape(status_reason), status_reason_style),
         ]],
-        colWidths=[5.65 * inch, 1.25 * inch],
+        colWidths=[4.95 * inch, 1.95 * inch],
     )
     header.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#12355B")),
         ("BOX", (0, 0), (-1, -1), 0, colors.HexColor("#12355B")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-        ("TOPPADDING", (0, 0), (-1, -1), 12),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("LEFTPADDING", (0, 0), (-1, -1), 16),
         ("RIGHTPADDING", (0, 0), (-1, -1), 16),
         ("LINEBELOW", (1, 0), (1, 0), 3, status_color),
@@ -440,8 +520,8 @@ def make_pdf_report(report: dict) -> bytes:
         ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#DFE6EF")),
         ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#DFE6EF")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("LEFTPADDING", (0, 0), (-1, -1), 9),
         ("RIGHTPADDING", (0, 0), (-1, -1), 9),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
@@ -464,8 +544,30 @@ def make_pdf_report(report: dict) -> bytes:
         ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
         ("INNERGRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 12),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+
+    supervisor_notes = (
+        report.get("supervisor_notes", "").strip()
+        or "No additional supervisor notes."
+    )
+    safe_supervisor_notes = escape(supervisor_notes).replace("\n", "<br/>")
+    notes_table = Table(
+        [[
+            Paragraph("<b>Supervisor notes</b>", section_style),
+            Paragraph(safe_supervisor_notes, body_style),
+        ]],
+        colWidths=[1.45 * inch, 5.45 * inch],
+    )
+    notes_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FBFCFE")),
+        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ("LEFTPADDING", (0, 0), (-1, -1), 12),
         ("RIGHTPADDING", (0, 0), (-1, -1), 12),
     ]))
@@ -488,8 +590,8 @@ def make_pdf_report(report: dict) -> bytes:
         ("INNERGRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#E8EDF3")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("LEFTPADDING", (0, 0), (-1, -1), 7),
         ("RIGHTPADDING", (0, 0), (-1, -1), 7),
     ]
@@ -502,12 +604,14 @@ def make_pdf_report(report: dict) -> bytes:
 
     story = [
         header,
-        Spacer(1, 0.22 * inch),
+        Spacer(1, 0.12 * inch),
         Paragraph("Operation snapshot", section_style),
         metric_table,
-        Spacer(1, 0.22 * inch),
+        Spacer(1, 0.12 * inch),
         issues,
-        Spacer(1, 0.20 * inch),
+        Spacer(1, 0.10 * inch),
+        notes_table,
+        Spacer(1, 0.12 * inch),
         Paragraph("Shift completion checklist", section_style),
         Paragraph(
             f"{completed_count} of {len(checklist)} items completed",
@@ -638,6 +742,12 @@ with st.form("shift_handoff_form", border=False):
             height=100,
         )
 
+    supervisor_notes = st.text_area(
+        "Supervisor notes",
+        placeholder="Add any additional context or information for the next supervisor",
+        height=110,
+    )
+
     st.markdown(
         '<div class="section-banner"><span class="section-number">4</span> Shift completion checklist</div>',
         unsafe_allow_html=True,
@@ -700,6 +810,7 @@ if submitted:
                 equipment_details,
                 "No equipment issues reported.",
             ),
+            "supervisor_notes": supervisor_notes.strip(),
             "checklist": [
                 {
                     "item": item_text,
@@ -713,6 +824,12 @@ if submitted:
 if REPORT_STATE_KEY in st.session_state:
     report = st.session_state[REPORT_STATE_KEY]
     status_label, status_class = determine_status(report)
+    attention_reasons = get_attention_reasons(report)
+    status_reason_html = (
+        f'<div class="status-reason">{escape(" · ".join(attention_reasons))}</div>'
+        if attention_reasons
+        else ""
+    )
 
     st.markdown(
         f"""
@@ -721,7 +838,10 @@ if REPORT_STATE_KEY in st.session_state:
                 <h2>Ready for the next supervisor</h2>
                 <div>{escape(report['shift'])} · {escape(report['report_date'])} · {escape(report['supervisor'])}</div>
             </div>
-            <span class="status-pill {status_class}">{status_label}</span>
+            <div class="status-summary">
+                <span class="status-pill {status_class}">{status_label}</span>
+                {status_reason_html}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -769,6 +889,20 @@ if REPORT_STATE_KEY in st.session_state:
             """,
             unsafe_allow_html=True,
         )
+
+    supervisor_notes_display = (
+        report.get("supervisor_notes", "").strip()
+        or "No additional supervisor notes."
+    )
+    st.markdown(
+        f"""
+        <div class="supervisor-notes">
+            <h4>Supervisor notes</h4>
+            <p>{escape(supervisor_notes_display)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     checklist = report.get("checklist", [])
     completed_count = sum(item["completed"] for item in checklist)
