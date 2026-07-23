@@ -698,7 +698,7 @@ with st.form("shift_handoff_form", border=False):
         unsafe_allow_html=True,
     )
     st.markdown(
-        '<p class="small-note">Enter the current totals. Counts only—fast and clean.</p>',
+        '<p class="small-note">Enter the current totals. Counts only.</p>',
         unsafe_allow_html=True,
     )
 
