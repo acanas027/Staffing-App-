@@ -19,7 +19,7 @@ CHECKLIST_ITEMS = [
     "Every short that was cut is documented.",
     "Revision emails are checked and addressed.",
     "Inbound and outbound board are updated.",
-    "Yardview is updated. Every drop load has ALL necessary info and is accurate",
+    "Every drop load has ALL necessary information, is accurate and updated in Yardview",
     "Check UKG punches and fix any missed punch.",
     "Send attendance to HR.",
     "Received inbounds and transfer pallets are put away.",
