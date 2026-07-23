@@ -309,6 +309,31 @@ def determine_status(report: dict) -> tuple[str, str]:
     )
 
 
+def make_result_header_html(report: dict) -> str:
+    """Build continuous HTML so Streamlit never renders a closing tag as text."""
+    status_label, status_class = determine_status(report)
+    attention_reasons = get_attention_reasons(report)
+    status_reason_html = (
+        f'<div class="status-reason">{escape(" · ".join(attention_reasons))}</div>'
+        if attention_reasons
+        else ""
+    )
+    return (
+        '<div class="result-head">'
+        "<div>"
+        "<h2>Ready for the next supervisor</h2>"
+        f"<div>{escape(report['shift'])} · "
+        f"{escape(report['report_date'])} · "
+        f"{escape(report['supervisor'])}</div>"
+        "</div>"
+        '<div class="status-summary">'
+        f'<span class="status-pill {status_class}">{escape(status_label)}</span>'
+        f"{status_reason_html}"
+        "</div>"
+        "</div>"
+    )
+
+
 def make_checklist_text(report: dict) -> str:
     """Format the checklist consistently for copied text and email."""
     checklist = report.get("checklist", [])
@@ -757,7 +782,7 @@ with st.form("shift_handoff_form", border=False):
 
     supervisor_notes = st.text_area(
         "Supervisor notes",
-        placeholder="Add any additional context for the next supervisor. If there's loads waiting for product or an item from the checklist was not completed, explain here",
+        placeholder="Add any additional context or information for the next supervisor",
         height=110,
     )
 
@@ -836,27 +861,9 @@ if submitted:
 
 if REPORT_STATE_KEY in st.session_state:
     report = st.session_state[REPORT_STATE_KEY]
-    status_label, status_class = determine_status(report)
-    attention_reasons = get_attention_reasons(report)
-    status_reason_html = (
-        f'<div class="status-reason">{escape(" · ".join(attention_reasons))}</div>'
-        if attention_reasons
-        else ""
-    )
 
     st.markdown(
-        f"""
-        <div class="result-head">
-            <div>
-                <h2>Ready for the next supervisor</h2>
-                <div>{escape(report['shift'])} · {escape(report['report_date'])} · {escape(report['supervisor'])}</div>
-            </div>
-            <div class="status-summary">
-                <span class="status-pill {status_class}">{status_label}</span>
-                {status_reason_html}
-            </div>
-        </div>
-        """,
+        make_result_header_html(report),
         unsafe_allow_html=True,
     )
 
