@@ -25,12 +25,12 @@ CHECKLIST_ITEMS = [
     "Received inbounds and transfer pallets are put away.",
 ]
 
-EMAIL_RECIPIENTS = [
-    "JuanB@resers.com",
-    "CCameron@Resers.com",
-    "MarkeithF@Resers.com",
-    "CarmenD@Resers.com",
-    "BrianM@resers.com",
+_RECIPIENTS = [
+    "juanb@resers.com",
+    "ccameron@resers.com",
+    "markeithf@resers.com",
+    "carmend@resers.com",
+    "brianm@resers.com",
 ]
 
 
