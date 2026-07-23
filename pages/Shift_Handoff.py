@@ -572,6 +572,11 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
+        inbound_drivers_in_lot = st.number_input(
+            "Inbound drivers checked in and currently in lot",
+            min_value=0,
+            step=1,
+        )
     with pulse_2:
         loads_waiting = st.number_input(
             "Loads waiting on product",
@@ -602,11 +607,6 @@ with st.form("shift_handoff_form", border=False):
         )
         staffing_end = st.number_input(
             "Staffing at end of shift",
-            min_value=0,
-            step=1,
-        )
-        inbound_drivers_in_lot = st.number_input(
-            "Inbound drivers checked in and currently in lot",
             min_value=0,
             step=1,
         )
