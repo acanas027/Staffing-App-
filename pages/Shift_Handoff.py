@@ -25,12 +25,12 @@ CHECKLIST_ITEMS = [
     "Received inbounds and transfer pallets are put away.",
 ]
 
-_RECIPIENTS = [
-    "juanb@resers.com",
-    "ccameron@resers.com",
-    "markeithf@resers.com",
-    "carmend@resers.com",
-    "brianm@resers.com",
+EMAIL_RECIPIENTS = [
+    "JuanB@resers.com",
+    "CCameron@Resers.com",
+    "MarkeithF@Resers.com",
+    "CarmenD@Resers.com",
+    "BrianM@resers.com",
 ]
 
 
@@ -369,12 +369,12 @@ SHIFT COMPLETION CHECKLIST
 
 
 def make_email_url(text_report: str) -> str:
-    """Create an Outlook-friendly email link with separate To recipients."""
-    recipients = quote(";".join(EMAIL_RECIPIENTS), safe="@;")
+    """Open an Outlook Web draft with resolved, separate To recipients."""
+    recipients = quote(",".join(EMAIL_RECIPIENTS), safe="@")
     return (
-        "mailto:"
+        "https://outlook.office.com/mail/deeplink/compose?to="
         + recipients
-        + "?subject="
+        + "&subject="
         + quote("Shift Handoff", safe="")
         + "&body="
         + quote(text_report, safe="")
@@ -944,7 +944,7 @@ if REPORT_STATE_KEY in st.session_state:
     safe_date = report["report_date"].replace(",", "").replace(" ", "-")
     with action_1:
         st.link_button(
-            "Send by email",
+            "Open email in Outlook",
             email_url,
             use_container_width=True,
         )
