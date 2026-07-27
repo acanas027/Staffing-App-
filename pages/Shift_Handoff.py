@@ -229,6 +229,39 @@ st.markdown(
             margin-top: -.3rem;
         }
 
+        .operation-group-title {
+            display: flex;
+            align-items: center;
+            gap: .55rem;
+            margin: 0 0 .2rem;
+            color: #12355b;
+            font-size: .98rem;
+            font-weight: 800;
+        }
+
+        .operation-group-title::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: linear-gradient(135deg, #3976e8, #21a179);
+            box-shadow: 0 0 0 4px rgba(57, 118, 232, .10);
+        }
+
+        .operation-group-note {
+            color: #718096;
+            font-size: .78rem;
+            line-height: 1.35;
+            margin: 0 0 .75rem;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-color: #e2e8f0 !important;
+            border-radius: 16px !important;
+            background: rgba(251, 252, 254, .72);
+            box-shadow: 0 4px 12px rgba(18, 53, 91, .035);
+        }
+
         .checklist-summary {
             margin-top: 1rem;
             padding: 1rem 1.05rem;
@@ -705,66 +738,109 @@ with st.form("shift_handoff_form", border=False):
         unsafe_allow_html=True,
     )
 
-    pulse_1, pulse_2, pulse_3, pulse_4 = st.columns(4, gap="large")
-    with pulse_1:
-        loads_completed = st.number_input(
-            "Outbound loads completed",
-            min_value=0,
-            step=1,
+    with st.container(border=True):
+        st.markdown(
+            """
+            <div class="operation-group-title">Load flow</div>
+            <p class="operation-group-note">
+                Completed loads, work still waiting, open stages, and ready-to-load status.
+            </p>
+            """,
+            unsafe_allow_html=True,
         )
-        outbound_drivers_in_lot = st.number_input(
-            "Outbound drivers checked in and currently in lot",
-            min_value=0,
-            step=1,
-        )
-        inbound_drivers_in_lot = st.number_input(
-            "Inbound drivers checked in and currently in lot",
-            min_value=0,
-            step=1,
-        )
-    with pulse_2:
-        loads_waiting = st.number_input(
-            "Loads waiting on product",
-            min_value=0,
-            step=1,
-        )
-        cases_picked = st.number_input(
-            "Cases picked",
-            min_value=0,
-            step=1,
-        )
-    with pulse_3:
-        open_stages = st.number_input(
-            "Open stages",
-            min_value=0,
-            step=1,
-        )
-        full_pallet_pull_cases = st.number_input(
-            "Full Pallet Pull Cases",
-            min_value=0,
-            step=1,
-        )
-    with pulse_4:
-        staffing_beginning = st.number_input(
-            "Staffing at beginning of shift",
-            min_value=0,
-            step=1,
-        )
-        staffing_end = st.number_input(
-            "Staffing at end of shift",
-            min_value=0,
-            step=1,
-        )
-        Inbounds_completed = st.number_input(
-            "Inbound loads completed",
-            min_value=0,
-            step=1,
-        )
-        RTL_up_to = st.number_input(
-            "RTL up to",
-            min_value=0,
-            step=1,
-        )
+        load_1, load_2, load_3, load_4, load_5 = st.columns(5, gap="medium")
+        with load_1:
+            loads_completed = st.number_input(
+                "Outbound loads completed",
+                min_value=0,
+                step=1,
+            )
+        with load_2:
+            Inbounds_completed = st.number_input(
+                "Inbound loads completed",
+                min_value=0,
+                step=1,
+            )
+        with load_3:
+            loads_waiting = st.number_input(
+                "Loads waiting on product",
+                min_value=0,
+                step=1,
+            )
+        with load_4:
+            open_stages = st.number_input(
+                "Open stages",
+                min_value=0,
+                step=1,
+            )
+        with load_5:
+            RTL_up_to = st.number_input(
+                "Ready to load (RTL) up to",
+                min_value=0,
+                step=1,
+            )
+
+    yard_group, picking_group, staffing_group = st.columns(3, gap="large")
+
+    with yard_group:
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div class="operation-group-title">Yard status</div>
+                <p class="operation-group-note">Drivers currently checked in and in the lot.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+            outbound_drivers_in_lot = st.number_input(
+                "Outbound drivers checked in and currently in lot",
+                min_value=0,
+                step=1,
+            )
+            inbound_drivers_in_lot = st.number_input(
+                "Inbound drivers checked in and currently in lot",
+                min_value=0,
+                step=1,
+            )
+
+    with picking_group:
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div class="operation-group-title">Picking activity</div>
+                <p class="operation-group-note">Current case-picking and full-pallet volume.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+            cases_picked = st.number_input(
+                "Cases picked",
+                min_value=0,
+                step=1,
+            )
+            full_pallet_pull_cases = st.number_input(
+                "Full Pallet Pull Cases",
+                min_value=0,
+                step=1,
+            )
+
+    with staffing_group:
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div class="operation-group-title">Staffing</div>
+                <p class="operation-group-note">Headcount at the beginning and end of the shift.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+            staffing_beginning = st.number_input(
+                "Staffing at beginning of shift",
+                min_value=0,
+                step=1,
+            )
+            staffing_end = st.number_input(
+                "Staffing at end of shift",
+                min_value=0,
+                step=1,
+            )
 
     st.markdown(
         '<div class="section-banner"><span class="section-number">3</span> Safety & equipment</div>',
