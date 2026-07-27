@@ -163,6 +163,16 @@ DEFAULT_HOURS = {
         "End of day":  11.25,
     },
 }
+
+# 2nd Shift uses the same fixed hours every day.
+SECOND_SHIFT_HOURS = {
+    "1st break":   3.0,
+    "Lunch":       5.75,
+    "2nd break":   7.75,
+    "End of day":  9.0,
+}
+
+SHIFTS = ["1st Shift", "2nd Shift"]
 BREAK_POINTS = ["1st break", "Lunch", "2nd break", "End of day"]
 
 # The 7 days, and which schedule each one uses.
@@ -220,8 +230,9 @@ def compute_rates(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 # Persistent storage — Google Sheets (survives Streamlit Cloud restarts)
 # =============================================================================
-# One worksheet, one row per worker per saved day. We only save people who
-# actually picked (hours > 0). Re-saving a date overwrites that date's rows.
+# One worksheet, one row per worker per saved day and schedule. We only save
+# people who actually picked (hours > 0). Re-saving the same date and schedule
+# overwrites only that schedule's rows.
 HISTORY_COLUMNS = ["date", "worker_id", "cases", "hours", "rate",
                    "day_of_week", "day_type", "saved_at"]
 
@@ -272,7 +283,7 @@ def load_history() -> pd.DataFrame:
 
 
 def save_day(date_str: str, work_df: pd.DataFrame, day_of_week: str, day_type: str) -> int:
-    """Upsert one day's records. Overwrites any existing rows for date_str.
+    """Upsert one day's records. Overwrites rows for the same date and schedule.
     Only workers with hours > 0 are saved. Returns how many were written."""
     ws = _get_worksheet()
     saved_at = central_now().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -287,10 +298,12 @@ def save_day(date_str: str, work_df: pd.DataFrame, day_of_week: str, day_type: s
         new_rows.append([str(date_str), str(r["name"]), cases, hours, rate,
                          day_of_week, day_type, saved_at])
 
-    # Overwrite semantics: load everything, drop this date, append, rewrite.
+    # Overwrite semantics: preserve the other shift on the same date.
     current = load_history()
     if not current.empty:
-        current = current[current["date"].astype(str) != str(date_str)]
+        same_date = current["date"].astype(str) == str(date_str)
+        same_schedule = current["day_type"].astype(str) == str(day_type)
+        current = current[~(same_date & same_schedule)]
         keep = current[HISTORY_COLUMNS].values.tolist()
     else:
         keep = []
@@ -549,8 +562,15 @@ def render_rate_view(df: pd.DataFrame):
                "·  dashed line marks the standard.")
 
 
-def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str,
-                       day_of_week=None, day_type=None, break_point=None):
+def render_leaderboard(
+    df: pd.DataFrame,
+    title: str,
+    subtitle: str,
+    day_of_week=None,
+    day_type=None,
+    break_point=None,
+    auto_save_requested=False,
+):
     st.markdown("##### Leaderboard — ranked by cases / hour")
     render_rate_view(df)
 
@@ -563,9 +583,9 @@ def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str,
                         file_name="leaderboard.csv", mime="text/csv",
                         use_container_width=True)
 
-    # ---- Save end-of-day data (only at End of day) ----
+    # ---- Automatically save end-of-day data when Calculate rates is pressed ----
     if break_point == "End of day":
-        st.markdown("**Save this day's data**")
+        st.markdown("**Automatic end-of-day save**")
         if not _gsheets_configured():
             st.info(
                 "Storage isn't set up yet, so saving is disabled. Add your Google "
@@ -573,21 +593,26 @@ def render_leaderboard(df: pd.DataFrame, title: str, subtitle: str,
                 "(one-time setup — steps are in the chat)."
             )
         else:
-            sd1, sd2 = st.columns([1, 1])
-            save_date = sd1.date_input("Date for this save",
-                                       value=central_now().date(), key="save_date")
-            if sd2.button("Save data for this day", type="primary",
-                          use_container_width=True):
+            save_date = st.date_input(
+                "Date for this save",
+                value=central_now().date(),
+                key="save_date",
+            )
+            if auto_save_requested:
                 try:
                     n = save_day(str(save_date), df, day_of_week or "", day_type or "")
                     st.success(
-                        f"Saved {n} worker record(s) for {save_date}. "
-                        "Any previous save for that date was overwritten."
+                        f"Automatically saved {n} worker record(s) for {save_date}. "
+                        "Any previous save for that date and shift was overwritten."
                     )
                 except Exception as e:
                     st.error(f"Save failed: {e}")
+            else:
+                st.caption(
+                    "Press **Calculate rates** to automatically save the End of day results."
+                )
             st.caption("Only workers with hours above 0 are saved. "
-                       "Re-saving the same date overwrites it.")
+                       "Re-saving the same date and shift overwrites that shift.")
     else:
         st.caption("Select **End of day** above to enable saving this day's data.")
 
@@ -791,16 +816,25 @@ if "picker_df" in st.session_state:
     st.subheader("Enter hours each person picked")
 
     # --- Shift settings -> predetermined hours for everyone ---
-    sc1, sc2 = st.columns(2)
+    sc1, sc2, sc3 = st.columns(3)
     today_name = central_now().strftime("%A")
     default_day_idx = DAYS_OF_WEEK.index(today_name) if today_name in DAYS_OF_WEEK else 0
     selected_day = sc1.selectbox("Day", DAYS_OF_WEEK, index=default_day_idx, key="day_of_week")
-    break_point = sc2.selectbox("Point in shift", BREAK_POINTS, key="break_point")
-    day_type = DAY_TO_TYPE[selected_day]
-    default_hours = float(DEFAULT_HOURS[day_type][break_point])
+    selected_shift = sc2.selectbox("Shift", SHIFTS, key="selected_shift")
+    break_point = sc3.selectbox("Point in shift", BREAK_POINTS, key="break_point")
+
+    first_shift_day_type = DAY_TO_TYPE[selected_day]
+    if selected_shift == "1st Shift":
+        day_type = first_shift_day_type
+        default_hours = float(DEFAULT_HOURS[day_type][break_point])
+        schedule_description = f"{selected_day} ({day_type}) · {selected_shift}"
+    else:
+        day_type = "2nd Shift"
+        default_hours = float(SECOND_SHIFT_HOURS[break_point])
+        schedule_description = f"{selected_day} · {selected_shift}"
 
     st.caption(
-        f"Predetermined hours for **{selected_day} ({day_type}) · {break_point} = {default_hours} h** "
+        f"Predetermined hours for **{schedule_description} · {break_point} = {default_hours} h** "
         "are filled in automatically. Lower anyone who was moved off picking or came in late. "
         "Leave at 0 to show no rate for that person."
     )
@@ -813,7 +847,7 @@ if "picker_df" in st.session_state:
     # day-type/break-point selection changes (or on first load / new roster).
     # This must run BEFORE the form widgets are instantiated so it sets their values.
     # Re-applying on every rerun would wipe per-worker edits, so we gate on the combo.
-    combo = (day_type, break_point)
+    combo = (selected_shift, day_type, break_point)
     if st.session_state.get("applied_combo") != combo:
         for nm in names:
             st.session_state[f"hrs::{nm}"] = default_hours
@@ -831,7 +865,11 @@ if "picker_df" in st.session_state:
                     format_func=lambda v: f"{v:.2f} h",
                     key=f"hrs::{nm}",
                 )
-        st.form_submit_button("Calculate rates", type="primary", use_container_width=True)
+        calculate_rates_clicked = st.form_submit_button(
+            "Calculate rates",
+            type="primary",
+            use_container_width=True,
+        )
 
     # Build the working frame from whatever hours have been submitted so far.
     work = base_df.copy()
@@ -839,8 +877,15 @@ if "picker_df" in st.session_state:
         lambda n: float(st.session_state.get(f"hrs::{n}", 0.0) or 0.0)
     )
     work = compute_rates(work)
-    render_leaderboard(work, report_title, report_subtitle,
-                       day_of_week=selected_day, day_type=day_type, break_point=break_point)
+    render_leaderboard(
+        work,
+        report_title,
+        report_subtitle,
+        day_of_week=selected_day,
+        day_type=day_type,
+        break_point=break_point,
+        auto_save_requested=calculate_rates_clicked,
+    )
 
 
 # =============================================================================
@@ -858,7 +903,7 @@ else:
     history = load_history()
     if history.empty:
         st.caption("No data saved yet. Build a leaderboard, select **End of day**, "
-                   "and click **Save data for this day** to start your history.")
+                   "and click **Calculate rates** to save automatically.")
     else:
         blocks = saved_dates_in_blocks(history, block_size=5)
         block_labels = [
