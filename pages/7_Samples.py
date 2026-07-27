@@ -666,7 +666,7 @@ if orders_file and tk_file:
     if mixed:
         verb = "contains" if len(mixed) == 1 else "contain"
         caption += (
-            f" — {', '.join(mixed)} {verb} both regular and sample items, 
+            f" — {', '.join(mixed)} {verb} both regular and sample items." 
         )
 
     st.caption(caption)
