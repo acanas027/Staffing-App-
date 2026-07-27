@@ -741,7 +741,7 @@ with st.form("shift_handoff_form", border=False):
     with st.container(border=True):
         st.markdown(
             """
-            <div class="operation-group-title">Load flow</div>
+            <div class="operation-group-title">Load Activity</div>
             <p class="operation-group-note">
                 Completed loads, work still waiting, open stages, and ready-to-load status.
             </p>
@@ -774,8 +774,8 @@ with st.form("shift_handoff_form", border=False):
                 step=1,
             )
         with load_5:
-            RTL_up_to = st.number_input(
-                "Ready to load (RTL) up to",
+            RTL_up_to = st.text_input(
+                "Ready to load up to",
                 min_value=0,
                 step=1,
             )
@@ -786,7 +786,7 @@ with st.form("shift_handoff_form", border=False):
         with st.container(border=True):
             st.markdown(
                 """
-                <div class="operation-group-title">Yard status</div>
+                <div class="operation-group-title">Central lot activity</div>
                 <p class="operation-group-note">Drivers currently checked in and in the lot.</p>
                 """,
                 unsafe_allow_html=True,
@@ -806,7 +806,7 @@ with st.form("shift_handoff_form", border=False):
         with st.container(border=True):
             st.markdown(
                 """
-                <div class="operation-group-title">Picking activity</div>
+                <div class="operation-group-title">Floor productivity</div>
                 <p class="operation-group-note">Current case-picking and full-pallet volume.</p>
                 """,
                 unsafe_allow_html=True,
@@ -841,6 +841,7 @@ with st.form("shift_handoff_form", border=False):
                 min_value=0,
                 step=1,
             )
+            
 
     st.markdown(
         '<div class="section-banner"><span class="section-number">3</span> Safety & equipment</div>',
