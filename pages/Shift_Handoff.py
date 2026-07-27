@@ -754,6 +754,11 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
+        Inbounds completed = st.number_input(
+            "Inbound loads completed",
+            min_value=0,
+            step=1,
+        )
 
     st.markdown(
         '<div class="section-banner"><span class="section-number">3</span> Safety & equipment</div>',
