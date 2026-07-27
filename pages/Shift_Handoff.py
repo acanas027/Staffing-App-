@@ -25,6 +25,7 @@ CHECKLIST_ITEMS = [
     "Received inbound pallets are put away.",
     "Pickers are correctly logged out of the system.", 
     "Sanitation tasks are completed.",
+    "Equipment Checklist is reviewed and signed.", 
 ]
 
 EMAIL_RECIPIENTS = [
