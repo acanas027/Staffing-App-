@@ -760,6 +760,10 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
+        RTL_up_to = st.number_input(
+            "RTL up to",
+            min_value=0,
+            step=1,
 
     st.markdown(
         '<div class="section-banner"><span class="section-number">3</span> Safety & equipment</div>',
