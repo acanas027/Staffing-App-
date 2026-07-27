@@ -170,19 +170,25 @@ def load_tkreserve(file) -> pd.DataFrame:
     return df[df["SKU"] != ""]
 
 
+def is_active_location(loc) -> bool:
+    """Active pick locations end in a letter; reserve locations end in a digit."""
+    loc = str(loc).strip()
+    return bool(loc) and loc[-1].isalpha()
+
+
 def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     def summarize(g):
-        loc_qty = (
-            g.groupby("Location")["Quantity"]
-            .sum()
-            .sort_values(ascending=False)
+        loc_qty = g.groupby("Location")["Quantity"].sum()
+
+        # Active locations (ending in a letter) list first.
+        # Within each group, and when there are no active locations,
+        # the order is unchanged: highest quantity first.
+        ordered = sorted(
+            ((loc, q) for loc, q in loc_qty.items() if loc),
+            key=lambda kv: (0 if is_active_location(kv[0]) else 1, -kv[1]),
         )
 
-        loc_str = "; ".join(
-            f"{loc} ({int(q)})"
-            for loc, q in loc_qty.items()
-            if loc
-        )
+        loc_str = "; ".join(f"{loc} ({int(q)})" for loc, q in ordered)
 
         latest = g.loc[g["TxTime"].idxmax(), "Previous Location"]
 
