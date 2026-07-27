@@ -389,6 +389,10 @@ def make_text_report(report: dict) -> str:
         report.get("supervisor_notes", "").strip()
         or "No additional supervisor notes."
     )
+    staffing_change_details = (
+        report.get("staffing_change_details", "").strip()
+        or "No staffing changes reported."
+    )
     status_label, _ = determine_status(report)
     attention_reasons = get_attention_reasons(report)
     status_text = status_label
@@ -414,6 +418,9 @@ Cases picked: {report['cases_picked']:,}
 Full Pallet Pull Cases: {report['full_pallet_pull_cases']:,}
 Staffing at beginning of shift: {report['staffing_beginning']:,}
 Staffing at end of shift: {report['staffing_end']:,}
+
+STAFFING CHANGES
+{staffing_change_details}
 
 SAFETY
 {report['safety_detail']}
@@ -628,6 +635,28 @@ def make_pdf_report(report: dict) -> bytes:
         report.get("supervisor_notes", "").strip()
         or "No additional supervisor notes."
     )
+    staffing_change_details = (
+        report.get("staffing_change_details", "").strip()
+        or "No staffing changes reported."
+    )
+    safe_staffing_change_details = escape(staffing_change_details).replace("\n", "<br/>")
+    staffing_details_table = Table(
+        [[
+            Paragraph("<b>Staffing changes</b>", section_style),
+            Paragraph(safe_staffing_change_details, body_style),
+        ]],
+        colWidths=[1.45 * inch, 5.45 * inch],
+    )
+    staffing_details_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FBFCFE")),
+        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#DFE6EF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+
     safe_supervisor_notes = escape(supervisor_notes).replace("\n", "<br/>")
     notes_table = Table(
         [[
@@ -682,6 +711,8 @@ def make_pdf_report(report: dict) -> bytes:
         Paragraph("Operation snapshot", section_style),
         metric_table,
         Spacer(1, 0.12 * inch),
+        staffing_details_table,
+        Spacer(1, 0.10 * inch),
         issues,
         Spacer(1, 0.10 * inch),
         notes_table,
@@ -776,8 +807,6 @@ with st.form("shift_handoff_form", border=False):
         with load_5:
             RTL_up_to = st.text_input(
                 "Ready to load up to",
-                min_value=0,
-                step=1,
             )
 
     yard_group, picking_group, staffing_group = st.columns(3, gap="large")
@@ -841,6 +870,11 @@ with st.form("shift_handoff_form", border=False):
                 min_value=0,
                 step=1,
             )
+            staffing_change_details = st.text_area(
+                "Who left and why? (optional)",
+                placeholder="Specify who left and why, if applicable.",
+                height=90,
+            )
             
 
     st.markdown(
@@ -870,12 +904,6 @@ with st.form("shift_handoff_form", border=False):
             height=100,
         )
 
-    supervisor_notes = st.text_area(
-        "Supervisor notes",
-        placeholder="Add any additional context or information for the next supervisor",
-        height=110,
-    )
-
     st.markdown(
         '<div class="section-banner"><span class="section-number">4</span> Shift completion checklist</div>',
         unsafe_allow_html=True,
@@ -893,6 +921,12 @@ with st.form("shift_handoff_form", border=False):
                 item_text,
                 key=f"handoff_checklist_{item_index}",
             )
+
+    supervisor_notes = st.text_area(
+        "Supervisor notes",
+        placeholder="Add any additional context or information for the next supervisor",
+        height=110,
+    )
 
     submitted = st.form_submit_button(
         "Create shift handoff",
@@ -926,6 +960,7 @@ if submitted:
             "full_pallet_pull_cases": int(full_pallet_pull_cases),
             "staffing_beginning": int(staffing_beginning),
             "staffing_end": int(staffing_end),
+            "staffing_change_details": staffing_change_details.strip(),
             "safety_status": safety_status,
             "safety_detail": clean_detail(
                 safety_status,
@@ -975,6 +1010,20 @@ if REPORT_STATE_KEY in st.session_state:
     metric_row_2[1].metric("Full Pallet Pull Cases", f"{report['full_pallet_pull_cases']:,}")
     metric_row_2[2].metric("Staffing at beginning", f"{report['staffing_beginning']:,}")
     metric_row_2[3].metric("Staffing at end", f"{report['staffing_end']:,}")
+
+    staffing_change_details_display = (
+        report.get("staffing_change_details", "").strip()
+        or "No staffing changes reported."
+    )
+    st.markdown(
+        f"""
+        <div class="supervisor-notes">
+            <h4>Staffing changes</h4>
+            <p>{escape(staffing_change_details_display)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     safety_class = "attention" if report["safety_status"] == "Issue to hand off" else ""
     equipment_class = "attention" if report["equipment_status"] == "Issue to hand off" else ""
