@@ -22,7 +22,9 @@ CHECKLIST_ITEMS = [
     "Every drop load has every necessary piece of information and is updated in Yardview.",
     "Check UKG punches and fix any missed punch.",
     "Send attendance to HR.",
-    "Received inbounds and transfer pallets are put away.",
+    "Received inbound pallets are put away.",
+    "Pickers are correctly logged out of the system.", 
+    "Sanitation tasks are completed.",
 ]
 
 EMAIL_RECIPIENTS = [
