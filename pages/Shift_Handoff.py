@@ -754,7 +754,7 @@ with st.form("shift_handoff_form", border=False):
             min_value=0,
             step=1,
         )
-        Inbounds completed = st.number_input(
+        Inbounds_completed = st.number_input(
             "Inbound loads completed",
             min_value=0,
             step=1,
