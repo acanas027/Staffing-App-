@@ -40,6 +40,15 @@ COL_TIME2 = 25
 # cell. Either way the CA/EA totals on the Summary sheet are unaffected.
 SPLIT_QTY_COLUMNS = False
 
+# Location ordering inside the "Current Location" cell.
+# Locations ending in one of these list first (primary pick faces).
+PRIMARY_SUFFIXES = ("A", "B")
+
+# Any location whose text contains one of these is forced to the end of the
+# list, even though it ends in a letter. Matched after stripping spaces and
+# punctuation, so "BLACK HOLE" and "BLACK-HOLE" both hit.
+BLACKHOLE_MARKERS = ("BLACKHOL",)
+
 # Carried through the pipeline but never written to the order sheets.
 HIDDEN_COLS = {"_OrderSortKey", "Order Date"}
 
@@ -170,22 +179,47 @@ def load_tkreserve(file) -> pd.DataFrame:
     return df[df["SKU"] != ""]
 
 
-def is_active_location(loc) -> bool:
-    """Active pick locations end in a letter; reserve locations end in a digit."""
+def is_blackhole(loc) -> bool:
+    """Blackhole locations never lead, even though they end in a letter."""
+    s = "".join(ch for ch in str(loc).upper() if ch.isalnum())
+    return any(m in s for m in BLACKHOLE_MARKERS)
+
+
+def location_rank(loc) -> int:
+    """
+    Sort tier for one location inside the Current Location cell.
+        0 = primary pick face  (ends in A or B)
+        1 = other active       (ends in any other letter)
+        2 = reserve            (ends in a digit)
+        3 = blackhole          (always last)
+    """
+    if is_blackhole(loc):
+        return 3
+
     loc = str(loc).strip()
-    return bool(loc) and loc[-1].isalpha()
+
+    if not loc:
+        return 2
+
+    last = loc[-1].upper()
+
+    if last in PRIMARY_SUFFIXES:
+        return 0
+    if last.isalpha():
+        return 1
+
+    return 2
 
 
 def aggregate_inventory(inv: pd.DataFrame) -> pd.DataFrame:
     def summarize(g):
         loc_qty = g.groupby("Location")["Quantity"].sum()
 
-        # Active locations (ending in a letter) list first.
-        # Within each group, and when there are no active locations,
-        # the order is unchanged: highest quantity first.
+        # Locations list by tier (see location_rank), then — inside each
+        # tier — highest quantity first, exactly as before.
         ordered = sorted(
             ((loc, q) for loc, q in loc_qty.items() if loc),
-            key=lambda kv: (0 if is_active_location(kv[0]) else 1, -kv[1]),
+            key=lambda kv: (location_rank(kv[0]), -kv[1]),
         )
 
         loc_str = "; ".join(f"{loc} ({int(q)})" for loc, q in ordered)
@@ -618,7 +652,25 @@ if orders_file and tk_file:
         else str(date_val)
     )
 
+    n_reg = order_count(regular)
+    n_smp = order_count(samples)
+    mixed = sorted(set(regular["Order #"]) & set(samples["Order #"]))
+
     st.subheader("Summary")
+
+    caption = (
+        f"{n_reg} regular orders · {n_smp} samples orders · "
+        f"{summary['Orders']} distinct"
+    )
+
+    if mixed:
+        verb = "contains" if len(mixed) == 1 else "contain"
+        caption += (
+            f" — {', '.join(mixed)} {verb} both regular and sample lines, "
+            "so the two tabs overlap"
+        )
+
+    st.caption(caption)
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Date", date_txt)
@@ -639,11 +691,6 @@ if orders_file and tk_file:
         else:
             st.error(f"Day Flag: {summary['Day Flag']}")
     m8.metric("Expected Completion Time", summary["Expected Completion Time"])
-
-    n_reg = order_count(regular)
-    n_smp = order_count(samples)
-
-    st.caption(f"{n_reg} regular orders · {n_smp} samples orders")
 
     st.divider()
 
