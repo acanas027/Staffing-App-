@@ -4419,7 +4419,7 @@ def build_pdf_report(
         [
             Paragraph("SHIFT HEALTH", styles["Tiny"]),
             Paragraph("SERVICE RISK", styles["Tiny"]),
-            Paragraph("SHIFT GOAL - PYTHON SOURCE OF TRUTH", styles["Tiny"]),
+            Paragraph("SHIFT GOAL", styles["Tiny"]),
         ],
         [
             Paragraph(f"<b>{pdf_safe(health)}</b><br/>{pdf_safe(health_reason)}", styles["BodySmall"]),
