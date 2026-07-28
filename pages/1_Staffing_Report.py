@@ -4755,7 +4755,19 @@ def compute_recommended_allocation(
             need_controlled = _loads_controlled(need_counts)
             opt_controlled = _loads_controlled(opt_counts)
 
-            if (opt_controlled, -sum(opt_counts.values())) > (need_controlled, -sum(need_counts.values())):
+            # Never select a throughput-optimized allocation that overstaffs one
+            # function while another function is still understaffed. In that case,
+            # keep the fixed-minimum allocation, which lets generate_recommendations()
+            # use the available cross-trained labor to cover shortages first.
+            opt_has_shortage = bool((opt_summary["Difference"] < 0).any())
+            opt_has_overstaffing = bool((opt_summary["Difference"] > 0).any())
+            opt_has_mixed_gap = opt_has_shortage and opt_has_overstaffing
+
+            if (
+                not opt_has_mixed_gap
+                and (opt_controlled, -sum(opt_counts.values()))
+                > (need_controlled, -sum(need_counts.values()))
+            ):
                 staff = opt_staff
                 present_recommendations, summary_table = opt_present, opt_summary
                 recommended_counts = opt_counts
