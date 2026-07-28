@@ -1298,18 +1298,22 @@ def compute_labor_availability(summary_table, present_recommendations, lead_extr
         elif diff < 0:
             short_tasks[task] = diff
 
-    total_surplus = sum(surplus_tasks.values()) + lead_extra_count
+    gross_surplus = sum(surplus_tasks.values()) + lead_extra_count
     total_short = sum(abs(v) for v in short_tasks.values())
     net_gap = int(summary_table["Difference"].sum())
+    # Bench exists only after every outstanding staffing need is covered.
+    # Example: Picking +2, Putaway -1, Replenishment -1 => bench 0, not 2.
+    net_surplus = max(0, gross_surplus - total_short)
 
     return {
         "lead_extra_count": lead_extra_count,
         "surplus_tasks": surplus_tasks,          # {task: +n}
         "short_tasks": short_tasks,              # {task: -n}
-        "total_surplus_workers": total_surplus,
+        "gross_surplus_workers": gross_surplus,
+        "total_surplus_workers": net_surplus,
         "total_short_workers": total_short,
         "net_gap": net_gap,
-        "has_available_labor": total_surplus > 0,
+        "has_available_labor": net_surplus > 0,
     }
 
 
@@ -4793,13 +4797,59 @@ def compute_recommended_allocation(
                 pass
 
     total_present = len(present_recommendations)
-    # "Bench" = workers with nowhere else productive to go right now: anyone still
-    # literally labeled Lead/Extra, PLUS every worker sitting in a function that's
-    # overstaffed vs need (generate_recommendations() never leaves anyone unassigned
-    # if they have a skilled task to fill, so overstaffing — not an unfilled
-    # Lead/Extra bucket — is where real bench capacity actually shows up).
+    # Bench is NET usable surplus after all shortages are considered. Employees
+    # remain in roles they are qualified to perform; an employee over the need in
+    # one role is not called bench when another role is short but requires a skill
+    # that employee does not have.
     bench_availability = compute_labor_availability(summary_table, present_recommendations)
     bench = int(bench_availability["total_surplus_workers"])
+    bench_note = ""
+    if (
+        bench == 0
+        and int(bench_availability.get("gross_surplus_workers", 0)) > 0
+        and bench_availability.get("short_tasks")
+    ):
+        shortage_labels = {
+            "Unloading": "Unloading",
+            "Receiving": "Receiving",
+            "Picking": "Picking",
+            "Full Pallets": "Full Pallets",
+            "Putaway": "Putaway",
+            "Replenishment": "Replenishment",
+            "Loading": "Loading",
+        }
+        required_skill = {
+            "Unloading": "U",
+            "Receiving": "R",
+            "Picking": "P",
+            "Full Pallets": "T",
+            "Putaway": "T",
+            "Replenishment": "T",
+            "Loading": "L",
+        }
+        shortages_by_skill = {}
+        for task in bench_availability["short_tasks"]:
+            skill = required_skill.get(task, "")
+            shortages_by_skill.setdefault(skill, []).append(
+                shortage_labels.get(task, task)
+            )
+
+        skill_messages = []
+        for skill, positions in shortages_by_skill.items():
+            if len(positions) == 1:
+                position_text = positions[0]
+            else:
+                position_text = ", ".join(positions[:-1]) + f" and {positions[-1]}"
+            skill_messages.append(f"{skill} skill for {position_text}")
+
+        if len(skill_messages) == 1:
+            bench_note = f"No available workers with the {skill_messages[0]}."
+        else:
+            bench_note = (
+                "No available workers with the required skills: "
+                + "; ".join(skill_messages)
+                + "."
+            )
 
     return {
         "needed": needed,
@@ -4811,6 +4861,7 @@ def compute_recommended_allocation(
         "total_recommended": sum(recommended_counts.values()),
         "short_by": max(0, int(pd.Series(needed).sum()) - total_present),
         "bench": bench,
+        "bench_note": bench_note,
         "lead_extra": bench,  # kept for backward compatibility with any old references
     }
 
@@ -5262,9 +5313,12 @@ if reco:
     rc = reco["recommended_counts"]
 
     st.subheader("Recommended Allocation")
+    bench_display = f"Bench: {reco['bench']}"
+    if reco.get("bench_note"):
+        bench_display += f" — {reco['bench_note']}"
     st.caption(
         f"Built from {reco['total_present']} present. "
-        f"Extra over today's workload (bench): {reco['bench']}. "
+        f"{bench_display} "
         "If you change any input on the left, click Compute again to refresh."
     )
     reco_df = pd.DataFrame(
