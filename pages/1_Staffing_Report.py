@@ -42,7 +42,7 @@ if not os.path.exists(TEMPLATE_FILE):
 #  OPPORTUNITY CUSTOMER LIST (loaded from Excel)
 #  File must be in the same folder as report.py.
 #
-#  NEW FILE FORMAT — Resers_DCs_Opportunity_Customer_List.xlsx
+#  NEW FILE FORMAT — OC Cusotmer List.xlsx
 #  Sheet: "Sheet1" (falls back to the first sheet if it was renamed)
 #  Row 1  = headers  (Company | Adress | Special Considerations)
 #  Rows 2+ = real data
@@ -55,7 +55,7 @@ if not os.path.exists(TEMPLATE_FILE):
 #  columns, so sign-off and photo requirements are now read out of the
 #  Special Considerations text instead of from dedicated Y/N columns.
 # ============================================================
-OC_FILE = "Resers_DCs_Opportunity_Customer_List.xlsx"
+OC_FILE = "OC Cusotmer List.xlsx"
 OC_SHEET = "Sheet1"
 OC_DATA_START = 2
 
@@ -1850,9 +1850,12 @@ def read_board_today_totals_from_excel(board_file):
         wb = load_workbook(board_file, data_only=True)
         sheet_name = "Outbound" if "Outbound" in wb.sheetnames else wb.sheetnames[0]
         ws = wb[sheet_name]
+        picks_left_today = parse_number(ws["L2"].value)
+        if picks_left_today < 1000:
+            picks_left_today *= 60
         return {
             "pulls_left_today": parse_number(ws["K2"].value),
-            "picks_left_today": parse_number(ws["L2"].value),
+            "picks_left_today": picks_left_today,
         }
     except Exception:
         return {"pulls_left_today": 0, "picks_left_today": 0}
@@ -2348,6 +2351,58 @@ def rows_not_selected_day(rows, selected_day):
     ]
 
 
+def reconcile_selected_day_load_counts(selected_rows, total_outbound_loads_day=None):
+    """
+    Reconcile today's outbound input with the rows still visible on the board.
+
+    The outbound input is the full-day source of truth. If the board contains
+    no Completed/Loaded rows, treat any difference between the outbound input
+    and the remaining board-row count as loads already completed and removed
+    from the board. If even one Completed/Loaded row is present, keep the
+    board's normal status logic and do not infer completed loads.
+    """
+    selected_rows = selected_rows or []
+    board_row_count = len(selected_rows)
+
+    actual_completed_count = sum(
+        1 for row in selected_rows
+        if str(row.get("status") or "").strip().upper() in {"COMPLETED", "COMPLETE"}
+    )
+    actual_loaded_count = sum(
+        1 for row in selected_rows
+        if str(row.get("status") or "").strip().upper() == "LOADED"
+    )
+    actual_completed_or_loaded = actual_completed_count + actual_loaded_count
+
+    if total_outbound_loads_day is None:
+        selected_day_total_loads = board_row_count
+    else:
+        try:
+            selected_day_total_loads = max(
+                0, int(round(float(total_outbound_loads_day or 0)))
+            )
+        except Exception:
+            selected_day_total_loads = board_row_count
+
+    inferred_completed_count = 0
+    if actual_completed_or_loaded == 0:
+        inferred_completed_count = max(
+            0, selected_day_total_loads - board_row_count
+        )
+
+    return {
+        "selected_day_total_loads": selected_day_total_loads,
+        "board_row_count": board_row_count,
+        "actual_completed_count": actual_completed_count,
+        "actual_loaded_count": actual_loaded_count,
+        "actual_completed_or_loaded": actual_completed_or_loaded,
+        "inferred_completed_count": inferred_completed_count,
+        "effective_completed_or_loaded": (
+            actual_completed_or_loaded + inferred_completed_count
+        ),
+    }
+
+
 def status_bucket_for_pacing(status):
     status = str(status or "").strip()
     return status if status else "Blank/Not Started"
@@ -2413,18 +2468,24 @@ def estimated_current_minutes_from_shift(shift, hours_remaining):
     return max(0, end_minutes - remaining_minutes)
 
 
-def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
+def build_selected_day_pacing(
+    all_rows, selected_day, shift, hours_remaining,
+    total_outbound_loads_day=None,
+):
     """
     Build a Python-computed selected-day pacing guardrail.
     This prevents the AI from mixing days or inventing pacing math.
     """
     selected_rows = rows_for_selected_day(all_rows, selected_day)
+    reconciled = reconcile_selected_day_load_counts(
+        selected_rows, total_outbound_loads_day
+    )
     current_minutes = estimated_current_minutes_from_shift(shift, hours_remaining)
 
     status_counts = {}
-    completed_count = 0
+    completed_count = reconciled["inferred_completed_count"]
     loaded_count = 0
-    done_count = 0
+    done_count = reconciled["inferred_completed_count"]
     due_by_now = 0
     due_done = 0
     future_done = 0
@@ -2472,7 +2533,9 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
                 future_done_rows.append(slim_row)
 
     due_not_RTL = max(0, due_by_now - due_done)
-    actionable_or_not_done = max(0, len(selected_rows) - done_count)
+    actionable_or_not_done = max(
+        0, reconciled["selected_day_total_loads"] - done_count
+    )
 
     if due_not_RTL > 0:
         pacing = "BEHIND"
@@ -2487,7 +2550,9 @@ def build_selected_day_pacing(all_rows, selected_day, shift, hours_remaining):
     return {
         "selected_day": selected_day,
         "estimated_current_time": format_minutes_for_pacing(current_minutes),
-        "selected_day_total_loads": len(selected_rows),
+        "selected_day_total_loads": reconciled["selected_day_total_loads"],
+        "selected_day_board_rows": reconciled["board_row_count"],
+        "inferred_completed_count": reconciled["inferred_completed_count"],
         "selected_day_status_counts": status_counts,
         "completed_count": completed_count,
         "loaded_count": loaded_count,
@@ -2768,6 +2833,7 @@ def compute_throughput_optimal_allocation(
 
 def appointment_controlled_by_allocation(
     board_text, day, shift, hours_remaining, summary_table_or_counts,
+    total_outbound_loads_day=None,
 ):
     """
     Given an allocation, compute how many of TODAY's loads it can control
@@ -2783,6 +2849,8 @@ def appointment_controlled_by_allocation(
     blank = {
         "loads_controlled": 0,
         "selected_day_loads": 0,
+        "selected_day_board_rows": 0,
+        "inferred_completed_loads": 0,
         "already_controlled_loads": 0,
         "completed_or_loaded_now": 0,
         "rtl_controlled_loads": 0,
@@ -2830,11 +2898,16 @@ def appointment_controlled_by_allocation(
 
     picks_left = pdf_number(today_totals.get("picks_left_today", 0))
     pulls_left = pdf_number(today_totals.get("pulls_left_today", 0))
-    total_loads = len(selected_rows)
+    reconciled = reconcile_selected_day_load_counts(
+        selected_rows, total_outbound_loads_day
+    )
+    total_loads = reconciled["selected_day_total_loads"]
+    inferred_completed = reconciled["inferred_completed_count"]
 
-    completed_or_loaded_now = sum(
+    completed_or_loaded_on_board = sum(
         1 for r in selected_rows if status_is_completed_or_loaded(r.get("status"))
     )
+    completed_or_loaded_now = completed_or_loaded_on_board + inferred_completed
     rtl_controlled = sum(
         1 for r in selected_rows if status_is_rtl(r.get("status"))
     )
@@ -2846,8 +2919,11 @@ def appointment_controlled_by_allocation(
         1 for r in selected_rows
         if str(r.get("status") or "").strip().upper() in {"R/S", "READY/SHORT"}
     )
-    already_controlled = sum(
+    already_controlled_on_board = sum(
         1 for r in selected_rows if status_is_controlled_appointment(r.get("status"))
+    )
+    already_controlled = min(
+        total_loads, already_controlled_on_board + inferred_completed
     )
     excluded_from_new_control = sum(
         1 for r in selected_rows
@@ -2920,7 +2996,10 @@ def appointment_controlled_by_allocation(
     else:
         binding_name = min(support_map, key=support_map.get)
 
-   # Cutoff = appt time of the last load in the controlled wave (sorted by appt time).
+    # Cutoff = appointment time of the last remaining board row in the controlled
+    # wave. Inferred completed loads were already removed from the board, so they
+    # must not advance the index into the remaining appointment rows.
+    controlled_board_rows = max(0, loads_controlled - inferred_completed)
     timed = []
     for r in selected_rows:
         m = board_minutes_for_pacing(r.get("time") or r.get("appt_time"))
@@ -2939,16 +3018,18 @@ def appointment_controlled_by_allocation(
             cutoff = "all loads for today controlled"
     elif not timed:
         cutoff = "no appt times on board"
-    elif loads_controlled <= 0:
+    elif controlled_board_rows <= 0:
         cutoff = "none — before first appt"
-    elif loads_controlled >= len(timed):
+    elif controlled_board_rows >= len(timed):
         cutoff = f"{format_minutes_for_pacing(timed[-1])} (all today)"
     else:
-        cutoff = format_minutes_for_pacing(timed[loads_controlled - 1])
+        cutoff = format_minutes_for_pacing(timed[controlled_board_rows - 1])
 
     return {
         "loads_controlled": loads_controlled,
         "selected_day_loads": total_loads,
+        "selected_day_board_rows": reconciled["board_row_count"],
+        "inferred_completed_loads": inferred_completed,
         "already_controlled_loads": already_controlled,
         "completed_or_loaded_now": completed_or_loaded_now,
         "rtl_controlled_loads": rtl_controlled,
@@ -3040,7 +3121,10 @@ def build_summary_table_from_counts(needed, assigned_counts):
     return summary_table
 
 
-def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, summary_table):
+def compute_python_shift_goal_preview(
+    board_text, day, shift, hours_remaining, summary_table,
+    total_outbound_loads_day=None,
+):
     """
     Python-only appointment target preview.
 
@@ -3097,6 +3181,7 @@ def compute_python_shift_goal_preview(board_text, day, shift, hours_remaining, s
         shift=shift,
         hours_remaining=hours_remaining,
         summary_table_or_counts=summary_table,
+        total_outbound_loads_day=total_outbound_loads_day,
     )
 
     try:
@@ -3253,7 +3338,10 @@ def render_python_shift_goal_preview(preview):
     st.write(f"**Suggested decision:** {preview.get('suggested_adjustment', '')}")
 
 
-def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining, summary_table_or_counts):
+def build_second_shift_handoff_forecast(
+    board_text, day, shift, hours_remaining, summary_table_or_counts,
+    total_outbound_loads_day=None,
+):
     """Forecast what this allocation leaves for 2nd shift using the same controlled-through logic."""
     blank = {
         "loads_controlled": 0,
@@ -3281,6 +3369,7 @@ def build_second_shift_handoff_forecast(board_text, day, shift, hours_remaining,
         shift=shift,
         hours_remaining=hours_remaining,
         summary_table_or_counts=summary_table_or_counts,
+        total_outbound_loads_day=total_outbound_loads_day,
     )
 
     total = int(controlled.get("selected_day_loads", 0) or 0)
@@ -3397,7 +3486,9 @@ def analyze_board_with_groq(
 
     oc_section = f"\n{oc_alert_text}\n" if oc_alert_text else ""
 
-    selected_day_pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining)
+    selected_day_pacing = build_selected_day_pacing(
+        all_rows, day, shift, hours_remaining, total_outbound_loads
+    )
     selected_status_text = json.dumps(selected_day_pacing.get("selected_day_status_counts", {}), ensure_ascii=False)
 
     loads_by_day = py_summary.get("loads_by_day", {})
@@ -3615,7 +3706,9 @@ def build_email_draft(
     py_today = payload.get("python_verified_today_totals", {})
     all_rows = payload.get("all_outbound_rows", [])
 
-    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
+    pacing = build_selected_day_pacing(
+        all_rows, day, shift, hours_remaining, total_outbound_loads_day
+    ) if all_rows else {}
     health, health_reason = derive_shift_health(summary_table, pacing, py_out)
 
     net_gap = int(summary_table["Difference"].sum()) if summary_table is not None and "Difference" in summary_table else 0
@@ -3656,7 +3749,8 @@ def build_email_draft(
 
     # Coverage % per stream from the same controlled-through logic the PDF uses.
     controlled = appointment_controlled_by_allocation(
-        board_text, day, shift, hours_remaining, summary_table
+        board_text, day, shift, hours_remaining, summary_table,
+        total_outbound_loads_day=total_outbound_loads_day,
     ) if board_text else {}
     pick_pct = int(float(controlled.get("pick_frac", 0) or 0) * 100)
     pull_pct = int(float(controlled.get("pull_frac", 0) or 0) * 100)
@@ -4080,11 +4174,14 @@ def extract_ai_top_action_items_lines(board_analysis_text):
     return output
 
 
-def build_pdf_board_summary_rows(selected_rows):
+def build_pdf_board_summary_rows(selected_rows, total_outbound_loads_day=None):
     """Small first-page board summary table for the selected day only."""
+    reconciled = reconcile_selected_day_load_counts(
+        selected_rows, total_outbound_loads_day
+    )
     counts = {
-        "Total loads": 0,
-        "Completed/Loaded": 0,
+        "Total loads": reconciled["selected_day_total_loads"],
+        "Completed/Loaded": reconciled["inferred_completed_count"],
         "RTL": 0,
         "R/S + Loaded Short": 0,
         "Picking/Short": 0,
@@ -4093,7 +4190,6 @@ def build_pdf_board_summary_rows(selected_rows):
     }
 
     for row in selected_rows or []:
-        counts["Total loads"] += 1
         status = str(row.get("status", "") or "").strip()
         status_upper = status.upper()
 
@@ -4146,7 +4242,7 @@ def derive_service_risk_level(summary_table, pacing, py_out, oc_load_matches, cr
         if due_not_RTL > 2:
             reasons.append(f"{due_not_RTL} load(s) due by now are still not RTL")
         if loaded_short > 0:
-            reasons.append(f"{loaded_short} load(s) shipped Loaded Short")
+            reasons.append(f"{loaded_short} load(s) are Loaded Short and waiting on product")
         if net_gap <= -5:
             reasons.append(f"staffing is short {net_gap:+d}")
         return "HIGH", " and ".join(reasons) + "."
@@ -4253,7 +4349,9 @@ def build_pdf_report(
     py_today = payload.get("python_verified_today_totals", {})
     all_rows = payload.get("all_outbound_rows", [])
     selected_rows = rows_for_selected_day(all_rows, day)
-    pacing = build_selected_day_pacing(all_rows, day, shift, hours_remaining) if all_rows else {}
+    pacing = build_selected_day_pacing(
+        all_rows, day, shift, hours_remaining, total_outbound_loads_day
+    ) if all_rows else {}
     health, health_reason = derive_shift_health(summary_table, pacing, py_out)
     cutoff = appointment_cutoff_from_rows(selected_rows)
 
@@ -4381,6 +4479,7 @@ def build_pdf_report(
         shift=shift,
         hours_remaining=hours_remaining,
         summary_table_or_counts=summary_table,
+        total_outbound_loads_day=total_outbound_loads_day,
     )
     story.append(Paragraph("Second Shift Handoff Forecast", styles["Subsection"]))
     handoff_rows = [
@@ -4394,7 +4493,9 @@ def build_pdf_report(
     story.append(Spacer(1, 5))
 
     story.append(Paragraph(f"Board summary - selected day ({pdf_safe(day)})", styles["Subsection"]))
-    board_summary_rows = build_pdf_board_summary_rows(selected_rows)
+    board_summary_rows = build_pdf_board_summary_rows(
+        selected_rows, total_outbound_loads_day
+    )
     board_summary_data = [["Status", "Count"]] + board_summary_rows[1:]
     story.append(pdf_table(board_summary_data, [2.45*inch, 1.05*inch]))
     story.append(Spacer(1, 4))
@@ -4587,12 +4688,19 @@ def compute_recommended_allocation(
             _payload = json.loads(board_text_for_preview or "{}")
             _today = _payload.get("python_verified_today_totals", {}) or {}
             _sel = rows_for_selected_day(_payload.get("all_outbound_rows", []) or [], day)
+            _reconciled = reconcile_selected_day_load_counts(
+                _sel, total_outbound_loads_day
+            )
             # Use the SAME "already controlled" definition as appointment_controlled_by_allocation
             # (Completed/Loaded/RTL/R-S), not just Completed/Loaded — otherwise this optimizer's
             # remaining pool doesn't match the pool the reported metric scores against, and it can
             # settle for an allocation that scores lower than the true best split.
-            already_controlled_now = sum(
+            already_controlled_now = _reconciled["inferred_completed_count"] + sum(
                 1 for r in _sel if status_is_controlled_appointment(r.get("status"))
+            )
+            already_controlled_now = min(
+                _reconciled["selected_day_total_loads"],
+                already_controlled_now,
             )
 
             # Bound the search by who can ACTUALLY be placed in each flexible task.
@@ -4604,7 +4712,7 @@ def compute_recommended_allocation(
             optimal = compute_throughput_optimal_allocation(
                 picks_left=pdf_number(_today.get("picks_left_today", 0)),
                 pulls_left=pdf_number(_today.get("pulls_left_today", 0)),
-                total_loads=len(_sel),
+                total_loads=_reconciled["selected_day_total_loads"],
                 hours_remaining=hours_remaining,
                 present_total=len(present_recommendations),
                 already_controlled_loads=already_controlled_now,
@@ -4641,6 +4749,7 @@ def compute_recommended_allocation(
             def _loads_controlled(counts):
                 return int(appointment_controlled_by_allocation(
                     board_text_for_preview, day, shift, hours_remaining, counts,
+                    total_outbound_loads_day=total_outbound_loads_day,
                 ).get("loads_controlled", 0) or 0)
 
             need_controlled = _loads_controlled(need_counts)
@@ -4661,6 +4770,7 @@ def compute_recommended_allocation(
                 shift=shift,
                 hours_remaining=hours_remaining,
                 summary_table=summary_table,
+                total_outbound_loads_day=total_outbound_loads_day,
             )
         except Exception:
             python_shift_goal_preview = None
@@ -4822,6 +4932,7 @@ def run_full_generation(
             shift=shift,
             hours_remaining=hours_remaining,
             summary_table=summary_table,
+            total_outbound_loads_day=total_outbound_loads_day,
         )
 
         board_analysis_text = analyze_board_with_groq(
@@ -5159,6 +5270,7 @@ if reco:
         appointment_controlled_by_allocation(
             reco.get("board_text_for_preview", ""), day, shift, hours_remaining,
             reco["recommended_counts"],
+            total_outbound_loads_day=total_outbound_loads_day,
         ),
     )
 
@@ -5295,6 +5407,7 @@ if reco:
                 shift=shift,
                 hours_remaining=hours_remaining,
                 summary_table=actual_summary_for_preview,
+                total_outbound_loads_day=total_outbound_loads_day,
             )
             render_python_shift_goal_preview(override_preview)
             render_allocation_controls_preview(
@@ -5302,6 +5415,7 @@ if reco:
                 appointment_controlled_by_allocation(
                     reco.get("board_text_for_preview", ""), day, shift, hours_remaining,
                     actual_counts,
+                    total_outbound_loads_day=total_outbound_loads_day,
                 ),
             )
 
