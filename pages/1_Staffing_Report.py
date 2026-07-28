@@ -41,18 +41,31 @@ if not os.path.exists(TEMPLATE_FILE):
 # ============================================================
 #  OPPORTUNITY CUSTOMER LIST (loaded from Excel)
 #  File must be in the same folder as report.py.
-#  Sheet: "OC Customer List"
-#  Row 6  = headers (skipped by name check)
-#  Row 7  = example row — skipped (name contains "market x" / "example")
-#  Rows 8+ = real data
+#
+#  NEW FILE FORMAT — Resers_DCs_Opportunity_Customer_List.xlsx
+#  Sheet: "Sheet1" (falls back to the first sheet if it was renamed)
+#  Row 1  = headers  (Company | Adress | Special Considerations)
+#  Rows 2+ = real data
 #  Columns:
-#    A: Resers DC   B: Customer #   C: Customer Name   D: Address
-#    E: Profile/Why OC   F: DC Requirements   G: Sign Off (Y/N)
-#    H: Pictures (Y/N)   I: Other (Y/N)
+#    A: Company (customer name)
+#    B: Address
+#    C: Special Considerations (DC requirements)
+#
+#  This file no longer has Customer #, Sign Off (Y/N), or Pictures (Y/N)
+#  columns, so sign-off and photo requirements are now read out of the
+#  Special Considerations text instead of from dedicated Y/N columns.
 # ============================================================
-OC_FILE = "OC Cusotmer List.xlsx"
-OC_SHEET = "OC Customer List"
-OC_DATA_START = 8
+OC_FILE = "Resers_DCs_Opportunity_Customer_List.xlsx"
+OC_SHEET = "Sheet1"
+OC_DATA_START = 2
+
+# Phrases in the Special Considerations text that mean the load needs a
+# supervisor sign-off / photos, now that the Y/N columns are gone.
+OC_SIGNOFF_KEYWORDS = (
+    "sign off", "sign-off", "signs off", "signed off",
+    "supervisor owns", "supervisor sign", "supervisor approval",
+)
+OC_PICTURE_KEYWORDS = ("picture", "photo", "photograph")
 
 
 @st.cache_data
@@ -66,37 +79,38 @@ def load_oc_customer_list():
 
     try:
         wb = load_workbook(OC_FILE, data_only=True)
-        if OC_SHEET not in wb.sheetnames:
-            available = ', '.join(wb.sheetnames)
-            return [], f"Sheet '{OC_SHEET}' not found in {OC_FILE}. Available sheets: {available}"
-
-
-        ws = wb[OC_SHEET]
+        # Sheet1 is a generic name, so fall back to the first sheet if it was renamed.
+        ws = wb[OC_SHEET] if OC_SHEET in wb.sheetnames else wb[wb.sheetnames[0]]
         customers = []
 
         for row_idx in range(OC_DATA_START, ws.max_row + 1):
-            raw_name = ws.cell(row_idx, 3).value  # col C
+            raw_name = ws.cell(row_idx, 1).value  # col A - Company
             if not raw_name:
                 continue
 
             name_clean = str(raw_name).strip().strip('"').lower()
+            if not name_clean:
+                continue
 
+            # Skip a repeated header row or any leftover example row.
+            if name_clean in ("company", "customer", "customer name"):
+                continue
             if "market x" in name_clean or "example" in name_clean:
                 continue
 
-            raw_cust_num = ws.cell(row_idx, 2).value  # col B
-            raw_issue    = ws.cell(row_idx, 5).value  # col E
-            raw_reqs     = ws.cell(row_idx, 6).value  # col F
-            raw_signoff  = ws.cell(row_idx, 7).value  # col G
-            raw_pictures = ws.cell(row_idx, 8).value  # col H
+            raw_address = ws.cell(row_idx, 2).value  # col B - Adress
+            raw_reqs    = ws.cell(row_idx, 3).value  # col C - Special Considerations
 
-            issue = str(raw_issue).strip() if raw_issue else ""
-            reqs  = str(raw_reqs).strip()  if raw_reqs  else ""
+            address = str(raw_address).replace("\n", " ").strip() if raw_address else ""
+            address = re.sub(r"\s+", " ", address)
+            reqs = str(raw_reqs).replace("\n", " ").strip() if raw_reqs else ""
+            reqs = re.sub(r"\s+", " ", reqs)
+            reqs_lower = reqs.lower()
 
-            sign_off = str(raw_signoff).strip().upper() == "Y" if raw_signoff else False
-            pictures = str(raw_pictures).strip().upper() == "Y" if raw_pictures else False
+            sign_off = any(k in reqs_lower for k in OC_SIGNOFF_KEYWORDS)
+            pictures = any(k in reqs_lower for k in OC_PICTURE_KEYWORDS)
 
-            priority = "HIGH" if (sign_off or pictures) else "HIGH"
+            priority = "HIGH"
 
             base = name_clean.rstrip(" -").split(" - ")[0].strip()
             aliases = []
@@ -107,14 +121,26 @@ def load_oc_customer_list():
                 aliases.append(base.replace("'", ""))
                 aliases.append(base.replace("'s", ""))
             known_aliases = {
-                "target rialto":          ["target"],
-                "sobey's - all loads":    ["sobeys", "sobey", "sobey's"],
-                "sysco kc (olathe)":      ["sysco kc", "sysco kansas city", "sysco olathe", "sysco kc olathe"],
-                "pfs virgina":            ["pfs virginia", "pfs va"],
-                "metro toronto fresh dc": ["metro toronto", "metro fresh"],
-                "jewel's":                ["jewels", "jewel"],
-                "awg":                    ["associated wholesale grocers"],
-                "whataburguer":           ["whataburger"],
+                "target rialto":            ["target"],
+                "sobey's - all loads":      ["sobeys", "sobey", "sobey's"],
+                "sobeys atlantic division": ["sobeys atlantic"],
+                "sobeys vaughan":           ["sobeys vaughn"],
+                "sysco kc (olathe)":        ["sysco kc", "sysco kansas city", "sysco olathe", "sysco kc olathe"],
+                "pfs virgina":              ["pfs virginia", "pfs va"],
+                "metro toronto fresh dc":   ["metro toronto", "metro fresh"],
+                "metro inc toronto":        ["metro toronto", "metro inc", "metro toronto fresh dc"],
+                "jewel's":                  ["jewels", "jewel"],
+                "awg":                      ["associated wholesale grocers"],
+                "whataburguer":             ["whataburger"],
+                # Spelling variants that appear on the new list.
+                "sysco monton":             ["sysco moncton"],
+                "loblaws monton":           ["loblaws moncton"],
+                "core mark milton":         ["core-mark milton", "coremark milton"],
+                "giant tiger stores":       ["giant tiger"],
+                "longo brothers":           ["longo bros", "longos"],
+                "pratts food":              ["pratts food service"],
+                "mortons food service":     ["mortons", "morton's food service"],
+                "sysco sowestern bedell":   ["sysco sowestern", "sysco southwestern ont"],
             }
             if name_clean in known_aliases:
                 aliases += known_aliases[name_clean]
@@ -126,8 +152,7 @@ def load_oc_customer_list():
             customers.append({
                 "name": name_clean,
                 "aliases": aliases,
-                "customer_number": str(raw_cust_num).strip() if raw_cust_num else None,
-                "issue": issue,
+                "address": address,
                 "requirements": reqs,
                 "sign_off": sign_off,
                 "pictures": pictures,
@@ -1622,48 +1647,127 @@ def default_new_col_map():
 
 
 def detect_board_layout_from_header(values):
-    """Return the correct column map from the header row when possible."""
-    headers = [clean_header_text(v) for v in values]
-    joined = " | ".join(headers)
+    """
+    Return the correct column map by READING the header labels directly, so any
+    board layout maps every field to the right column. This handles all real
+    layouts seen in the field:
 
-    has_board_header = any(h in ("load #", "load", "load number", "destination", "customer", "carrier", "status") for h in headers)
+      Refreshed template:
+        LOAD # | CUSTOMER | CARRIER | TIME | TYPE | DOOR - TRAILER | STATUS |
+        TT4 | LOADER | PULLS | PICK TICKETS | PICK CASES | COMMENTS
+      Older "Boards" Outbound:
+        DAY | DESTINATION | CARRIER | TIME | DOOR | STATUS | TT4 | LOADER |
+        COMMENTS | PULLS | PICKS
+      Older "Boards" Outbound (2):
+        LD # | DESTINATION | CARRIER | APT TIME | TIME IN | STAGE | TRAILER |
+        STATUS | LOADER | COMMENTS | Weight | PULLS | PICKS
+
+    Instead of guessing a fixed positional map from where STATUS lands, every
+    field is matched to the column whose header text says so. Two rules keep it
+    correct across these variants:
+      - "DOOR - TRAILER" (a single combined column) fills BOTH door and trailer
+        from the same index.
+      - "PICK TICKETS" and "PICK CASES" both mean picks; whichever appears is
+        used for picks. Plain "PICKS" also maps to picks. "PULLS" maps to pulls.
+      - Matching is exact-first, then a safe substring pass, so "APT TIME" still
+        maps to appt_time and "PICK CASES" still maps to picks without a plain
+        "TIME"/"PICKS" column stealing the slot.
+    """
+    headers = [clean_header_text(v) for v in values]
+
+    has_board_header = any(
+        h in ("load #", "load", "load number", "ld", "ld #", "destination", "customer", "carrier", "status")
+        for h in headers
+    )
     if not has_board_header:
         return None
 
-    # If Type is in column D, this is the refreshed layout.
-    if len(headers) > 3 and headers[3] in ("type", "load type"):
-        return default_new_col_map()
-
-    # If Status is in column H, this is the refreshed layout even if Type header is blank.
-    if len(headers) > 7 and headers[7] == "status":
-        return default_new_col_map()
-
-    # If Status is in column G, this is the older layout.
-    if len(headers) > 6 and headers[6] == "status":
-        return default_old_col_map()
-
-    # Fallback: use header positions if labels are present.
+    # Start from the refreshed map as a sane default, then overwrite every field
+    # we can positively identify from the header labels.
     col_map = default_new_col_map()
-    label_map = {
-        "load_number": ["load #", "load", "load number", "ld"],
-        "customer": ["customer", "destination", "ship to", "consignee"],
-        "carrier": ["carrier"],
-        "type": ["type", "load type"],
-        "appt_time": ["time", "appt", "appointment", "appointment time"],
-        "door": ["door"],
-        "trailer": ["trailer", "tr", "trailer #"],
-        "status": ["status"],
-        "tt4": ["tt4"],
-        "loader": ["loader"],
-        "comments": ["comments", "comment", "notes", "note"],
-        "pulls": ["pulls", "pull"],
-        "picks": ["picks", "pick"],
+
+    # Exact header text -> field. First matching column wins for each field.
+    exact_aliases = {
+        "load_number": ["load #", "load", "load number", "ld", "ld #", "day"],
+        "customer":    ["customer", "destination", "ship to", "consignee"],
+        "carrier":     ["carrier"],
+        "type":        ["type", "load type"],
+        "appt_time":   ["time", "apt time", "appt time", "appt", "appointment", "appointment time"],
+        "door":        ["door", "door trailer", "door - trailer", "stage"],
+        "trailer":     ["trailer", "tr", "trailer #", "door trailer", "door - trailer"],
+        "status":      ["status"],
+        "tt4":         ["tt4"],
+        "loader":      ["loader"],
+        "comments":    ["comments", "comment", "notes", "note"],
+        "pulls":       ["pulls", "pull"],
+        # Pick CASES is the real pick volume; Pick TICKETS is a ticket count.
+        # List "pick cases" first so it always wins over "pick tickets" when both
+        # columns exist (refreshed template), and plain "picks"/"pick" still cover
+        # the older layouts that only have one picks column.
+        "picks":       ["pick cases", "picks", "pick", "pick tickets"],
     }
-    for key, aliases in label_map.items():
-        for idx, header in enumerate(headers):
-            if header in aliases:
-                col_map[key] = idx
-                break
+
+    def _find_exact(aliases, used):
+        # Respect alias PRIORITY, not just column order: try each alias in the
+        # order listed and return the first column whose header equals it. This is
+        # what makes "pick cases" win over "pick tickets" even though the Pick
+        # Cases column sits to the RIGHT of Pick Tickets on the refreshed board.
+        for alias in aliases:
+            for idx, header in enumerate(headers):
+                if header and header == alias and idx not in used:
+                    return idx
+        return None
+
+    # Fields resolved in an order that protects the specific headers first:
+    # load/customer/carrier/status/tt4/loader are unambiguous; appt_time before
+    # door/stage so "APT TIME" is claimed before a generic pass; picks/pulls last.
+    resolve_order = [
+        "load_number", "customer", "carrier", "status", "tt4", "loader",
+        "type", "appt_time", "comments", "door", "trailer", "pulls", "picks",
+    ]
+
+    used_idx = set()
+    combined_door_trailer_idx = None
+
+    # Detect a single combined "DOOR - TRAILER" column up front so we can fill
+    # both door and trailer from it and never double-claim it for one only.
+    for idx, header in enumerate(headers):
+        if header in ("door trailer", "door - trailer"):
+            combined_door_trailer_idx = idx
+            break
+
+    for field in resolve_order:
+        if field in ("door", "trailer") and combined_door_trailer_idx is not None:
+            # Both come from the same combined column; do not consume it from the pool.
+            col_map[field] = combined_door_trailer_idx
+            continue
+        idx = _find_exact(exact_aliases[field], used_idx)
+        if idx is not None:
+            col_map[field] = idx
+            used_idx.add(idx)
+
+    # If TYPE was not found as its own column (older layouts have no Type column),
+    # blank it so derive_board_type() infers it from the row instead of grabbing
+    # whatever happens to sit in the refreshed map's default type index.
+    type_present = any(h in ("type", "load type") for h in headers)
+    if not type_present:
+        col_map["type"] = None
+
+    # If no trailer column exists at all (older Outbound has DOOR only, no trailer),
+    # leave trailer unmapped so it doesn't read the STATUS/other column by accident.
+    trailer_present = (
+        combined_door_trailer_idx is not None
+        or any(h in ("trailer", "tr", "trailer #") for h in headers)
+    )
+    if not trailer_present:
+        col_map["trailer"] = None
+
+    # If no TT4 column exists (some layouts don't have one), leave tt4 unmapped so
+    # the parser never reads a neighboring column (e.g. LOADER) as a TT4 value and
+    # falsely flags the load as TT4-needed.
+    if not any(h == "tt4" for h in headers):
+        col_map["tt4"] = None
+
     return col_map
 
 
@@ -3607,10 +3711,10 @@ def clean_pdf_text(value):
     text = str(value)
 
     replacements = {
-        "—": "-", "–": "-", "−": "-", "‐": "-", "‑": "-",
-        "→": "->", "≤": "<=", "≥": ">=",
-        "•": "-", "▪": "-", "■": "-", "□": "-", "●": "-", "◦": "-", "·": "-",
-        """: '"', """: '"', "'": "'", "'": "'",
+        "\u2014": "-", "\u2013": "-", "\u2212": "-", "\u2010": "-", "\u2011": "-",
+        "\u2192": "->", "\u2264": "<=", "\u2265": ">=",
+        "\u2022": "-", "\u25aa": "-", "\u25a0": "-", "\u25a1": "-", "\u25cf": "-", "\u25e6": "-", "\u00b7": "-",
+        "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
         "\u00a0": " ", "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
     }
 
@@ -4976,11 +5080,10 @@ with st.expander("View Opportunity Customer List (from Excel file)"):
         oc_preview_rows = []
         for c in oc_list_preview:
             oc_preview_rows.append({
-                "Customer":        c["name"].title(),
-                "Customer #":      c["customer_number"] or "—",
-                "Priority":        c["priority"],
-                "Issue":           c["issue"],
-                "DC Requirements": c["requirements"],
+                "Customer":          c["name"].title(),
+                "Address":           c.get("address", "") or "—",
+                "Priority":          c["priority"],
+                "DC Requirements":   c["requirements"],
                 "Sign-Off Required": "Yes" if c["sign_off"] else "No",
                 "Photos Required":   "Yes" if c["pictures"] else "No",
             })
