@@ -3125,9 +3125,130 @@ def build_summary_table_from_counts(needed, assigned_counts):
     return summary_table
 
 
+def build_constraint_skill_note(
+    board_text, day, shift, hours_remaining, summary_table, skill_caps,
+    bottleneck, current_loads_controlled, selected_day_loads,
+    total_outbound_loads_day=None,
+):
+    """
+    Explain when a higher-value move into the bottleneck is blocked because every
+    present worker with that required skill is already assigned.
+    """
+    if (
+        summary_table is None
+        or not skill_caps
+        or int(current_loads_controlled or 0) >= int(selected_day_loads or 0)
+    ):
+        return ""
+
+    bottleneck_text = str(bottleneck or "")
+    if "Unload" in bottleneck_text:
+        constraint_task, skill = "Unloading", "U"
+    elif "Receiv" in bottleneck_text:
+        constraint_task, skill = "Receiving", "R"
+    elif "Replen" in bottleneck_text:
+        constraint_task, skill = "Replenishment", "T"
+    elif "Putaway" in bottleneck_text:
+        constraint_task, skill = "Putaway", "T"
+    elif "Full Pallet" in bottleneck_text or "Pallet" in bottleneck_text:
+        constraint_task, skill = "Full Pallets", "T"
+    elif "Pick" in bottleneck_text:
+        constraint_task, skill = "Picking", "P"
+    elif "Load" in bottleneck_text:
+        constraint_task, skill = "Loading", "L"
+    else:
+        return ""
+
+    assigned_counts = {
+        task: (
+            int(summary_table.loc[task, "Assigned"])
+            if task in summary_table.index else 0
+        )
+        for task in [
+            "Unloading", "Receiving", "Picking", "Full Pallets",
+            "Putaway", "Replenishment", "Loading",
+        ]
+    }
+
+    if skill == "T":
+        qualified_assigned = sum(
+            assigned_counts.get(task, 0)
+            for task in ["Full Pallets", "Putaway", "Replenishment"]
+        )
+        qualified_present = int(skill_caps.get("Tasking", 0) or 0)
+    else:
+        qualified_assigned = assigned_counts.get(constraint_task, 0)
+        qualified_present = int(skill_caps.get(constraint_task, 0) or 0)
+
+    # If another qualified worker exists outside the constrained role/family,
+    # lack of skill is not the reason the optimizer stopped.
+    if qualified_present > qualified_assigned:
+        return ""
+
+    surplus_tasks = [
+        task for task in assigned_counts
+        if task != constraint_task
+        and task in summary_table.index
+        and int(summary_table.loc[task, "Difference"]) > 0
+    ]
+    if not surplus_tasks:
+        return ""
+
+    current_controlled = int(current_loads_controlled or 0)
+    best_source = None
+    best_gain = 0
+
+    # Verify that exchanging one surplus worker for one hypothetical qualified
+    # worker in the constraint would actually increase controlled loads.
+    for source_task in surplus_tasks:
+        trial_counts = dict(assigned_counts)
+        trial_counts[source_task] -= 1
+        trial_counts[constraint_task] += 1
+        trial_controlled = int(
+            appointment_controlled_by_allocation(
+                board_text=board_text,
+                day=day,
+                shift=shift,
+                hours_remaining=hours_remaining,
+                summary_table_or_counts=trial_counts,
+                total_outbound_loads_day=total_outbound_loads_day,
+            ).get("loads_controlled", 0)
+            or 0
+        )
+        gain = trial_controlled - current_controlled
+        if gain > best_gain:
+            best_gain = gain
+            best_source = source_task
+
+    if best_source is None or best_gain <= 0:
+        return ""
+
+    singular_role = {
+        "Unloading": "Unloader",
+        "Receiving": "Receiver",
+        "Picking": "Picker",
+        "Full Pallets": "Pallet Puller",
+        "Putaway": "Putaway worker",
+        "Replenishment": "Replenishment worker",
+        "Loading": "Loader",
+    }
+    source_surplus = int(summary_table.loc[best_source, "Difference"])
+    if source_surplus == 1:
+        source_text = f"the extra {singular_role[best_source]}"
+    else:
+        source_text = f"one of the {source_surplus} extra {singular_role[best_source]}s"
+
+    load_word = "load" if best_gain == 1 else "loads"
+    return (
+        f"One more {singular_role[constraint_task]} could control {best_gain} more {load_word} "
+        f"than keeping {source_text}, but there are no additional present workers "
+        f"with the {skill} skill."
+    )
+
+
 def compute_python_shift_goal_preview(
     board_text, day, shift, hours_remaining, summary_table,
-    total_outbound_loads_day=None,
+    total_outbound_loads_day=None, skill_caps=None,
 ):
     """
     Python-only appointment target preview.
@@ -3161,6 +3282,7 @@ def compute_python_shift_goal_preview(
         "pick_coverage_pct": 0,
         "pull_coverage_pct": 0,
         "load_coverage_pct": 0,
+        "constraint_skill_note": "",
     }
 
     if not board_text:
@@ -3268,6 +3390,19 @@ def compute_python_shift_goal_preview(
         reason = f"This allocation does not control the first selected-day appointment wave by shift end. Bottleneck: {bottleneck}.{rs_note}"
         suggested_adjustment = "Add labor to the bottleneck before generating the final report."
 
+    constraint_skill_note = build_constraint_skill_note(
+        board_text=board_text,
+        day=day,
+        shift=shift,
+        hours_remaining=hours_remaining,
+        summary_table=summary_table,
+        skill_caps=skill_caps,
+        bottleneck=bottleneck,
+        current_loads_controlled=loads_controlled,
+        selected_day_loads=total_loads,
+        total_outbound_loads_day=total_outbound_loads_day,
+    )
+
     return {
         "goal": goal,
         "confidence": confidence,
@@ -3296,6 +3431,7 @@ def compute_python_shift_goal_preview(
         "pick_coverage_pct": int(float(controlled.get("pick_frac", 0) or 0) * 100),
         "pull_coverage_pct": int(float(controlled.get("pull_frac", 0) or 0) * 100),
         "load_coverage_pct": int(float(controlled.get("load_frac", 0) or 0) * 100),
+        "constraint_skill_note": constraint_skill_note,
     }
 
 
@@ -3321,6 +3457,8 @@ def render_python_shift_goal_preview(preview):
     c1.metric("Can this allocation hit target?", confidence)
     c2.metric("Main constraint", preview.get("main_constraint", "Unknown"))
     c3.metric("Target cutoff", preview.get("target_cutoff", ""))
+    if preview.get("constraint_skill_note"):
+        c2.caption(preview["constraint_skill_note"])
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Picking capacity left", f"{preview.get('pick_capacity', 0):,} cases")
@@ -4671,6 +4809,7 @@ def compute_recommended_allocation(
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
+    present_skill_caps = count_present_skill_capacity(staff)
 
     staff = generate_recommendations(staff, needed)
     present_recommendations, summary_table = build_summary(staff, needed)
@@ -4712,7 +4851,6 @@ def compute_recommended_allocation(
             # afterward with cap_allocation_to_available_skills) means any headcount
             # that can't go into one stream gets explored in the others within the
             # SAME search, rather than being silently dropped after the fact.
-            skill_caps = count_present_skill_capacity(staff)
             optimal = compute_throughput_optimal_allocation(
                 picks_left=pdf_number(_today.get("picks_left_today", 0)),
                 pulls_left=pdf_number(_today.get("pulls_left_today", 0)),
@@ -4724,9 +4862,9 @@ def compute_recommended_allocation(
                 putaway_floor=needed["Putaway"],
                 replenishment_floor=needed["Replenishment"],
                 full_pallets_floor=needed["Full Pallets"],
-                max_pickers=skill_caps.get("Picking"),
-                max_loaders=skill_caps.get("Loading"),
-                max_pull_taskers=skill_caps.get("Tasking"),
+                max_pickers=present_skill_caps.get("Picking"),
+                max_loaders=present_skill_caps.get("Loading"),
+                max_pull_taskers=present_skill_caps.get("Tasking"),
             )
 
             def _named_counts_for_targets(targets):
@@ -4787,6 +4925,7 @@ def compute_recommended_allocation(
                 hours_remaining=hours_remaining,
                 summary_table=summary_table,
                 total_outbound_loads_day=total_outbound_loads_day,
+                skill_caps=present_skill_caps,
             )
         except Exception:
             python_shift_goal_preview = None
@@ -4855,6 +4994,7 @@ def compute_recommended_allocation(
         "needed": needed,
         "recommended_counts": recommended_counts,
         "recommended_summary_table": summary_table.copy(),
+        "skill_caps": present_skill_caps,
         "board_text_for_preview": board_text_for_preview,
         "python_shift_goal_preview": python_shift_goal_preview,
         "total_present": total_present,
@@ -4914,6 +5054,7 @@ def run_full_generation(
     staff["Present"] = staff["Name"].astype(str).str.strip().str.lower().apply(
         lambda x: "x" if x in selected else ""
     )
+    present_skill_caps = count_present_skill_capacity(staff)
 
     if recommended_counts and "Loading" in recommended_counts:
         needed["Loading"] = min(needed["Loading"], recommended_counts["Loading"])
@@ -4996,6 +5137,7 @@ def run_full_generation(
             hours_remaining=hours_remaining,
             summary_table=summary_table,
             total_outbound_loads_day=total_outbound_loads_day,
+            skill_caps=present_skill_caps,
         )
 
         board_analysis_text = analyze_board_with_groq(
@@ -5474,6 +5616,7 @@ if reco:
                 hours_remaining=hours_remaining,
                 summary_table=actual_summary_for_preview,
                 total_outbound_loads_day=total_outbound_loads_day,
+                skill_caps=reco.get("skill_caps"),
             )
             render_python_shift_goal_preview(override_preview)
             render_allocation_controls_preview(
