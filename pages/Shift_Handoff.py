@@ -26,6 +26,7 @@ CHECKLIST_ITEMS = [
     "Pickers are correctly logged out of the system.", 
     "Sanitation tasks are completed.",
     "Equipment Checklist is reviewed and signed.", 
+    "Canadians BOL are printed and filled.",
 ]
 
 EMAIL_RECIPIENTS = [
